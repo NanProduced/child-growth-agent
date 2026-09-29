@@ -86,6 +86,12 @@ Desktop.ini
 tmp/
 .skills/
 image_1790669124672_cflo.png
+.runtime/
+public/file.svg
+public/globe.svg
+public/next.svg
+public/vercel.svg
+public/window.svg
 
 # Optional files
 *.tgz
