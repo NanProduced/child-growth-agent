@@ -87,6 +87,7 @@ tmp/
 .skills/
 image_1790669124672_cflo.png
 .runtime/
+.git-rewrite/
 public/file.svg
 public/globe.svg
 public/next.svg

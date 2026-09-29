@@ -6,11 +6,11 @@ import {
   ClipboardList,
   Info,
   PenLine,
-  Sparkles,
   UserCheck,
 } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -44,19 +44,26 @@ export default async function DashboardPage() {
   }
 
   const childrenById = new Map(children.map((c) => [c.id, c]));
+  const observationsByChild = new Map<string, Observation[]>();
+  for (const observation of observations) {
+    const childObservations = observationsByChild.get(observation.child_id) ?? [];
+    childObservations.push(observation);
+    observationsByChild.set(observation.child_id, childObservations);
+  }
   const totalObs = observations.length;
   const pendingConfirm = observations.filter((o) => o.status === 'ai_organized').length;
-  const confirmed = observations.filter((o) => o.status === 'confirmed').length;
+  const confirmedObservations = observations.filter(
+    (o) => o.status === 'confirmed' && o.confirmed_content,
+  );
+  const confirmedChildren = new Set(confirmedObservations.map((o) => o.child_id));
   const recent = observations.slice(0, 5);
 
   return (
     <div className="space-y-6">
       <section className="rounded-2xl border bg-gradient-to-br from-amber-100/80 via-orange-50 to-white p-6 sm:p-8">
-        <h1 className="text-xl font-bold sm:text-2xl">幼儿成长观察与活动支持智能体</h1>
-        <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-          面向幼儿园教师的观察记录助手：录入观察原文，AI 依据《3-6
-          岁儿童学习与发展指南》整理为结构化分析卡片，教师核对确认后归档。AI
-          产出仅作草稿，一切以教师确认为准。
+        <h1 className="text-xl font-bold sm:text-2xl">班级观察工作台</h1>
+        <p className="mt-2 text-sm text-slate-600">
+          从班级整体概览进入每个幼儿的观察档案。
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           <Button asChild>
@@ -74,16 +81,6 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      <Alert>
-        <Info className="size-4" />
-        <AlertTitle>演示数据说明</AlertTitle>
-        <AlertDescription>
-          内置 6 名幼儿与 3 条观察记录均为<b>合成数据</b>（已标注“合成数据”），不涉及任何真实幼儿信息。
-          第一阶段已打通：观察录入 → 保存原文 → 真实 AI 整理 → 教师确认 → 刷新后仍可查看。
-          阶段回顾与活动建议将在下一阶段上线。
-        </AlertDescription>
-      </Alert>
-
       {dbError ? (
         <Alert variant="destructive">
           <AlertCircle className="size-4" />
@@ -92,7 +89,7 @@ export default async function DashboardPage() {
         </Alert>
       ) : (
         <>
-          <section className="grid grid-cols-3 gap-3">
+          <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription className="flex items-center gap-1">
@@ -114,20 +111,36 @@ export default async function DashboardPage() {
                 <CardTitle className="text-2xl">{totalObs}</CardTitle>
               </CardHeader>
               <CardContent className="text-xs text-slate-500">
-                已确认 {confirmed} 条 · 待确认 {pendingConfirm} 条
+                已确认 {confirmedObservations.length} 条
               </CardContent>
             </Card>
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription className="flex items-center gap-1">
-                  <Sparkles className="size-4" /> AI 整理
+                  <UserCheck className="size-4" /> 待教师确认
+                </CardDescription>
+                <CardTitle className="text-2xl">{pendingConfirm}</CardTitle>
+              </CardHeader>
+              <CardContent className="text-xs text-slate-500">
+                <Link href="/observations?status=ai_organized" className="hover:underline">
+                  查看待确认记录 →
+                </Link>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription className="flex items-center gap-1">
+                  <Baby className="size-4" /> 已确认覆盖
                 </CardDescription>
                 <CardTitle className="text-2xl">
-                  {observations.filter((o) => o.ai_draft).length}
+                  {confirmedChildren.size}
+                  <span className="ml-1 text-sm font-normal text-slate-500">
+                    / {children.length} 名
+                  </span>
                 </CardTitle>
               </CardHeader>
               <CardContent className="text-xs text-slate-500">
-                AI 产出均为草稿，教师确认后进入正册
+                有教师确认观察的幼儿
               </CardContent>
             </Card>
           </section>
@@ -181,32 +194,92 @@ export default async function DashboardPage() {
 
           <section>
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-base font-semibold">幼儿速览</h2>
+              <h2 className="text-base font-semibold">班级幼儿</h2>
               <Link href="/children" className="text-sm text-amber-700 hover:underline">
                 全部档案 →
               </Link>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-              {children.slice(0, 6).map((child) => (
-                <Link key={child.id} href={`/children/${child.id}`}>
-                  <Card className="transition-shadow hover:shadow-md">
-                    <CardContent className="flex items-center gap-3 py-3">
-                      <span className="text-2xl">{child.avatar_emoji ?? '🧒'}</span>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 text-sm font-medium">
-                          {child.name}
-                          {child.is_demo ? <DemoBadge /> : null}
-                        </div>
-                        <div className="text-xs text-slate-500">
-                          {child.class_name} · {ageText(child.birth_date)}
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                </Link>
-              ))}
-            </div>
+            {children.length === 0 ? (
+              <Card>
+                <CardContent className="py-8 text-center text-sm text-slate-500">
+                  暂无幼儿档案，后续可从这里开始建立班级观察入口。
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {children.map((child) => {
+                  const childObservations = observationsByChild.get(child.id) ?? [];
+                  const latest = childObservations[0];
+                  const pendingCount = childObservations.filter(
+                    (observation) => observation.status === 'ai_organized',
+                  ).length;
+                  let warmLabel = '正在了解';
+                  if (childObservations.length > 0) {
+                    warmLabel = childObservations.some(
+                      (observation) => observation.status === 'confirmed',
+                    )
+                      ? '已有观察'
+                      : '值得继续观察';
+                  }
+
+                  return (
+                    <Link key={child.id} href={`/children/${child.id}`}>
+                      <Card className="h-full transition-shadow hover:shadow-md">
+                        <CardContent className="space-y-3 p-4">
+                          <div className="flex items-start gap-3">
+                            <span className="flex size-11 shrink-0 items-center justify-center rounded-full bg-amber-100 text-2xl">
+                              {child.avatar_emoji ?? '🧒'}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-1.5 text-sm font-medium">
+                                <span>{child.name}</span>
+                                {child.is_demo ? <DemoBadge /> : null}
+                              </div>
+                              <div className="mt-1 text-xs text-slate-500">
+                                {child.class_name} · {ageText(child.birth_date)}
+                              </div>
+                            </div>
+                            <Badge variant="outline" className="shrink-0 text-xs font-normal">
+                              {warmLabel}
+                            </Badge>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                            <span>最近观察：</span>
+                            {latest ? (
+                              <>
+                                <span>{formatDateCn(latest.observed_at)}</span>
+                                <StatusBadge status={latest.status} />
+                              </>
+                            ) : (
+                              <span>暂无记录</span>
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-slate-500">观察 {childObservations.length} 条</span>
+                            {pendingCount > 0 ? (
+                              <Badge variant="secondary" className="bg-amber-100 text-amber-800">
+                                待确认 {pendingCount} 条
+                              </Badge>
+                            ) : (
+                              <span className="text-slate-400">暂无待确认</span>
+                            )}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
           </section>
+
+          <Alert>
+            <Info className="size-4" />
+            <AlertTitle>演示数据说明</AlertTitle>
+            <AlertDescription>
+              页面中的合成数据已标注“合成数据”，不涉及真实幼儿信息。
+            </AlertDescription>
+          </Alert>
         </>
       )}
     </div>
