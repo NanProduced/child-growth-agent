@@ -1,4 +1,6 @@
 [project]
+sub_id = "11d43edf"
+name = "child-growth-agent"
 requires = [ "nodejs-24" ]
 project_type = "web"
 template = "nextjs"
@@ -7,6 +9,12 @@ appliedPatches = [ ]
 project_id = "7690748435154354216"
 app_id = "7690784152626528296"
 project_name = "child-growth-agent"
+
+[preview]
+preview_enable = "enabled"
+
+[subprojects]
+path = ["."]
 
 [dev]
 build = [ "bash", "./scripts/prepare.sh" ]
@@ -37,6 +45,10 @@ validate_win = [
   "./scripts/validate.ps1"
 ]
 deps = [ "git", "rsync" ]
+
+[deploy.profile]
+kind = "service"
+flavor = "web"
 
 [deploy]
 build = [ "bash", "./scripts/build.sh" ]
