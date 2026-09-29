@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Loader2, LogIn, PenLine, Send } from 'lucide-react';
+import { Baby, Loader2, LogIn, PenLine, Send, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -126,6 +127,32 @@ export default function NewObservationPage() {
             访客模式可浏览档案与已归档记录。
           </AlertDescription>
         </Alert>
+      </div>
+    );
+  }
+
+  if (!loadingChildren && children.length === 0) {
+    return (
+      <div className="mx-auto max-w-lg py-10">
+        <Card>
+          <CardContent className="flex flex-col items-center gap-4 py-10 text-center">
+            <span className="flex size-11 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+              <Baby className="size-5" />
+            </span>
+            <div>
+              <h2 className="font-medium">还没有幼儿档案，先建立一个幼儿档案</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                建档完成后会自动回到这里录入第一次观察。
+              </p>
+            </div>
+            <Button asChild>
+              <Link href="/children/new">
+                <UserPlus className="size-4" />
+                建立幼儿档案
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }

@@ -16,8 +16,11 @@ export const observationDraftSchema = z.object({
 
 export const createChildSchema = z.object({
   name: z.string().min(1, "请填写姓名").max(50),
-  gender: z.enum(["男", "女", "其他"]),
-  birth_date: z.string().regex(DATE_RE, "出生日期格式应为 YYYY-MM-DD"),
+  gender: z.enum(["男", "女", "其他"], { message: "请选择性别" }),
+  birth_date: z
+    .string()
+    .min(1, "请选择出生日期")
+    .regex(DATE_RE, "出生日期格式应为 YYYY-MM-DD"),
   class_name: z.string().min(1).max(50).default("向日葵班"),
   avatar_emoji: z.string().max(16).optional(),
   note: z.string().max(2000).optional(),

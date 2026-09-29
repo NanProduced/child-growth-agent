@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { Baby, ChevronRight, ClipboardList } from 'lucide-react';
+import { Baby, ChevronRight, ClipboardList, UserPlus } from 'lucide-react';
 
 import {
   Card,
@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { DemoBadge } from '@/components/status-badges';
 import { ageText } from '@/lib/format';
 import { countObservationsByChild, listChildren } from '@/lib/queries';
@@ -37,11 +38,19 @@ export default async function ChildrenPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-bold">幼儿档案</h1>
-        <p className="mt-1 text-sm text-slate-600">
-          班级幼儿一览。演示档案为合成数据；教师登录后可在后续版本中新增与维护档案。
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold">幼儿档案</h1>
+          <p className="mt-1 text-sm text-slate-600">
+            班级幼儿一览。演示档案为合成数据；教师登录后可新增幼儿档案。
+          </p>
+        </div>
+        <Button asChild className="shrink-0">
+          <Link href="/children/new">
+            <UserPlus className="size-4" />
+            新增幼儿
+          </Link>
+        </Button>
       </div>
 
       {dbError ? (
@@ -49,6 +58,26 @@ export default async function ChildrenPage() {
           <AlertTitle>数据库暂不可用</AlertTitle>
           <AlertDescription>{dbError}</AlertDescription>
         </Alert>
+      ) : children.length === 0 ? (
+        <Card>
+          <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
+            <span className="flex size-11 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+              <Baby className="size-5" />
+            </span>
+            <div>
+              <h2 className="font-medium">还没有幼儿档案</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                先建立一个幼儿档案，再开始记录观察。
+              </p>
+            </div>
+            <Button asChild>
+              <Link href="/children/new">
+                <UserPlus className="size-4" />
+                新增幼儿
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
           {children.map((child) => (

@@ -7,6 +7,7 @@ import {
   Info,
   PenLine,
   UserCheck,
+  UserPlus,
 } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -70,6 +71,12 @@ export default async function DashboardPage() {
             <Link href="/observations/new">
               <PenLine className="size-4" />
               录入观察
+            </Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link href="/children/new">
+              <UserPlus className="size-4" />
+              建立幼儿档案
             </Link>
           </Button>
           <Button asChild variant="outline">
@@ -202,7 +209,11 @@ export default async function DashboardPage() {
             {children.length === 0 ? (
               <Card>
                 <CardContent className="py-8 text-center text-sm text-slate-500">
-                  暂无幼儿档案，后续可从这里开始建立班级观察入口。
+                  暂无幼儿档案，
+                  <Link href="/children/new" className="text-amber-700 hover:underline">
+                    建立幼儿档案
+                  </Link>
+                  后开始班级观察。
                 </CardContent>
               </Card>
             ) : (
