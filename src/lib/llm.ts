@@ -1,5 +1,7 @@
 import { Config, LLMClient } from 'coze-coding-dev-sdk';
 
+import { FIVE_DOMAINS } from './types';
+
 export type LlmProvider = 'coze' | 'stepfun';
 
 export type LlmMessage = {
@@ -29,6 +31,35 @@ export type LlmOptions = {
 export const COZE_ORGANIZE_MODEL = 'doubao-seed-2-0-lite-260215';
 const DEFAULT_STEPFUN_BASE_URL = 'https://api.stepfun.com/step_plan/v1';
 const DEFAULT_STEPFUN_MODEL = 'step-5-preview';
+
+// StepFun 原生 JSON Schema 结构化输出：在 API 层把 domain 约束为五大领域枚举，Zod 仍作为入库前的最终校验
+const STEPFUN_DRAFT_RESPONSE_FORMAT = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'observation_draft',
+    strict: true,
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      required: [
+        'domain',
+        'sub_domain',
+        'objective_description',
+        'highlights',
+        'support_suggestions',
+        'highlight_quote',
+      ],
+      properties: {
+        domain: { type: 'string', enum: [...FIVE_DOMAINS] },
+        sub_domain: { type: 'string' },
+        objective_description: { type: 'string' },
+        highlights: { type: 'array', items: { type: 'string' } },
+        support_suggestions: { type: 'array', items: { type: 'string' } },
+        highlight_quote: { type: 'string' },
+      },
+    },
+  },
+} as const;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -136,7 +167,7 @@ async function invokeStepFun(messages: LlmMessage[], options: LlmOptions): Promi
         model,
         messages,
         temperature: options.temperature ?? 0.3,
-        response_format: { type: 'json_object' },
+        response_format: STEPFUN_DRAFT_RESPONSE_FORMAT,
       }),
     });
   } catch (error) {
