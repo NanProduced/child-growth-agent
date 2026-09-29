@@ -1,0 +1,60 @@
+[project]
+requires = [ "nodejs-24" ]
+project_type = "web"
+template = "nextjs"
+version = "0.1.9"
+appliedPatches = [ ]
+project_id = "7690748435154354216"
+app_id = "7690784152626528296"
+project_name = "child-growth-agent"
+
+[dev]
+build = [ "bash", "./scripts/prepare.sh" ]
+build_win = [
+  "powershell.exe",
+  "-NoProfile",
+  "-ExecutionPolicy",
+  "Bypass",
+  "-File",
+  "./scripts/prepare.ps1"
+]
+run = [ "bash", "./scripts/dev.sh" ]
+run_win = [
+  "powershell.exe",
+  "-NoProfile",
+  "-ExecutionPolicy",
+  "Bypass",
+  "-File",
+  "./scripts/dev.ps1"
+]
+validate = [ "bash", "./scripts/validate.sh" ]
+validate_win = [
+  "powershell.exe",
+  "-NoProfile",
+  "-ExecutionPolicy",
+  "Bypass",
+  "-File",
+  "./scripts/validate.ps1"
+]
+deps = [ "git", "rsync" ]
+
+[deploy]
+build = [ "bash", "./scripts/build.sh" ]
+build_win = [
+  "powershell.exe",
+  "-NoProfile",
+  "-ExecutionPolicy",
+  "Bypass",
+  "-File",
+  "./scripts/build.ps1"
+]
+run = [ "bash", "./scripts/start.sh" ]
+run_win = [
+  "powershell.exe",
+  "-NoProfile",
+  "-ExecutionPolicy",
+  "Bypass",
+  "-File",
+  "./scripts/start.ps1"
+]
+deps = [ "git" ]
