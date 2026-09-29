@@ -1,7 +1,7 @@
-import { getSupabaseClient } from "@/storage/database/supabase-client";
+import { query, queryOne } from "@/storage/database/pg-client";
 import type { Child, Observation, ObservationDraft, ObservationStatus } from "./types";
 
-/** PostgREST 返回行为宽结构，这里做显式映射（snake_case -> camelCase 接口字段保持与表一致语义） */
+/** 行来自 to_jsonb(table.*)，列名为 snake_case，显式映射为接口字段（与表结构语义一致） */
 type Row = Record<string, unknown>;
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -42,21 +42,18 @@ export function mapObservation(row: Row): Observation {
 }
 
 export async function listChildren(): Promise<Child[]> {
-  const db = await getSupabaseClient();
-  const { data, error } = await db
-    .from("children")
-    .select("*")
-    .order("created_at", { ascending: true })
-    .limit(1000);
-  if (error) throw new Error(`查询幼儿档案失败：${error.message}`);
-  return (data ?? []).map((row) => mapChild(row as Row));
+  const rows = await query<{ data: Row }>(
+    "SELECT to_jsonb(children.*) AS data FROM children ORDER BY created_at ASC LIMIT 1000"
+  );
+  return rows.map((r) => mapChild(r.data));
 }
 
 export async function getChild(id: string): Promise<Child | null> {
-  const db = await getSupabaseClient();
-  const { data, error } = await db.from("children").select("*").eq("id", id).maybeSingle();
-  if (error) throw new Error(`查询幼儿档案失败：${error.message}`);
-  return data ? mapChild(data as Row) : null;
+  const row = await queryOne<{ data: Row }>(
+    "SELECT to_jsonb(children.*) AS data FROM children WHERE id = $1",
+    [id]
+  );
+  return row ? mapChild(row.data) : null;
 }
 
 export async function createChild(input: {
@@ -67,20 +64,23 @@ export async function createChild(input: {
   avatar_emoji?: string;
   note?: string;
 }): Promise<Child> {
-  const db = await getSupabaseClient();
-  const { data, error } = await db.from("children").insert(input).select().single();
-  if (error) throw new Error(`新增幼儿失败：${error.message}`);
-  return mapChild(data as Row);
+  const row = await queryOne<{ data: Row }>(
+    `INSERT INTO children (name, gender, birth_date, class_name, avatar_emoji, note)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING to_jsonb(children.*) AS data`,
+    [input.name, input.gender, input.birth_date, input.class_name, input.avatar_emoji ?? null, input.note ?? null]
+  );
+  if (!row) throw new Error("新增幼儿失败：写入后未能读取记录");
+  return mapChild(row.data);
 }
 
 export async function countObservationsByChild(): Promise<Record<string, number>> {
-  const db = await getSupabaseClient();
-  const { data, error } = await db.from("observations").select("child_id").limit(10000);
-  if (error) throw new Error(`统计观察记录失败：${error.message}`);
+  const rows = await query<{ child_id: string; count: number }>(
+    "SELECT child_id, COUNT(*)::int AS count FROM observations GROUP BY child_id"
+  );
   const counts: Record<string, number> = {};
-  for (const row of data ?? []) {
-    const key = (row as Row).child_id;
-    if (typeof key === "string") counts[key] = (counts[key] ?? 0) + 1;
+  for (const row of rows) {
+    counts[row.child_id] = row.count;
   }
   return counts;
 }
@@ -88,24 +88,31 @@ export async function countObservationsByChild(): Promise<Record<string, number>
 export async function listObservations(
   opts: { childId?: string; status?: string; limit?: number } = {}
 ): Promise<Observation[]> {
-  const db = await getSupabaseClient();
-  let query = db
-    .from("observations")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(opts.limit ?? 1000);
-  if (opts.childId) query = query.eq("child_id", opts.childId);
-  if (opts.status) query = query.eq("status", opts.status);
-  const { data, error } = await query;
-  if (error) throw new Error(`查询观察记录失败：${error.message}`);
-  return (data ?? []).map((row) => mapObservation(row as Row));
+  const params: unknown[] = [];
+  const conds: string[] = [];
+  if (opts.childId) {
+    params.push(opts.childId);
+    conds.push(`child_id = $${params.length}`);
+  }
+  if (opts.status) {
+    params.push(opts.status);
+    conds.push(`status = $${params.length}`);
+  }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  params.push(opts.limit ?? 1000);
+  const rows = await query<{ data: Row }>(
+    `SELECT to_jsonb(observations.*) AS data FROM observations ${where} ORDER BY created_at DESC LIMIT $${params.length}`,
+    params
+  );
+  return rows.map((r) => mapObservation(r.data));
 }
 
 export async function getObservation(id: string): Promise<Observation | null> {
-  const db = await getSupabaseClient();
-  const { data, error } = await db.from("observations").select("*").eq("id", id).maybeSingle();
-  if (error) throw new Error(`查询观察记录失败：${error.message}`);
-  return data ? mapObservation(data as Row) : null;
+  const row = await queryOne<{ data: Row }>(
+    "SELECT to_jsonb(observations.*) AS data FROM observations WHERE id = $1",
+    [id]
+  );
+  return row ? mapObservation(row.data) : null;
 }
 
 export async function createObservation(input: {
@@ -115,10 +122,14 @@ export async function createObservation(input: {
   raw_text: string;
   is_demo: boolean;
 }): Promise<Observation> {
-  const db = await getSupabaseClient();
-  const { data, error } = await db.from("observations").insert(input).select().single();
-  if (error) throw new Error(`保存观察记录失败：${error.message}`);
-  return mapObservation(data as Row);
+  const row = await queryOne<{ data: Row }>(
+    `INSERT INTO observations (child_id, observed_at, context, raw_text, is_demo)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING to_jsonb(observations.*) AS data`,
+    [input.child_id, input.observed_at, input.context, input.raw_text, input.is_demo]
+  );
+  if (!row) throw new Error("保存观察记录失败：写入后未能读取记录");
+  return mapObservation(row.data);
 }
 
 /** 写入 AI 整理草稿（原文 raw_text 永不改动） */
@@ -128,21 +139,15 @@ export async function updateObservationAiDraft(
   ai_model: string
 ): Promise<Observation> {
   const now = new Date().toISOString();
-  const db = await getSupabaseClient();
-  const { data, error } = await db
-    .from("observations")
-    .update({
-      ai_draft,
-      ai_model,
-      ai_organized_at: now,
-      status: "ai_organized",
-      updated_at: now,
-    })
-    .eq("id", id)
-    .select()
-    .single();
-  if (error) throw new Error(`保存 AI 整理结果失败：${error.message}`);
-  return mapObservation(data as Row);
+  const row = await queryOne<{ data: Row }>(
+    `UPDATE observations
+     SET ai_draft = $2::jsonb, ai_model = $3, ai_organized_at = $4, status = 'ai_organized', updated_at = $4
+     WHERE id = $1
+     RETURNING to_jsonb(observations.*) AS data`,
+    [id, JSON.stringify(ai_draft), ai_model, now]
+  );
+  if (!row) throw new Error("保存 AI 整理结果失败：记录不存在");
+  return mapObservation(row.data);
 }
 
 /** 教师确认：内容进入正册，状态置为 confirmed */
@@ -151,18 +156,13 @@ export async function confirmObservation(
   confirmed_content: ObservationDraft
 ): Promise<Observation> {
   const now = new Date().toISOString();
-  const db = await getSupabaseClient();
-  const { data, error } = await db
-    .from("observations")
-    .update({
-      confirmed_content,
-      confirmed_at: now,
-      status: "confirmed",
-      updated_at: now,
-    })
-    .eq("id", id)
-    .select()
-    .single();
-  if (error) throw new Error(`确认归档失败：${error.message}`);
-  return mapObservation(data as Row);
+  const row = await queryOne<{ data: Row }>(
+    `UPDATE observations
+     SET confirmed_content = $2::jsonb, confirmed_at = $3, status = 'confirmed', updated_at = $3
+     WHERE id = $1
+     RETURNING to_jsonb(observations.*) AS data`,
+    [id, JSON.stringify(confirmed_content), now]
+  );
+  if (!row) throw new Error("确认归档失败：记录不存在");
+  return mapObservation(row.data);
 }
