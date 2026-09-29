@@ -85,6 +85,8 @@ Desktop.ini
 .temp/
 tmp/
 .skills/
+.agents/
+.codex/
 image_1790669124672_cflo.png
 .runtime/
 .git-rewrite/
