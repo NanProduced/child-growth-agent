@@ -50,7 +50,13 @@ export default function NewObservationPage() {
     fetch('/api/children')
       .then((r) => r.json())
       .then((data: { children?: Child[] }) => {
-        if (alive) setChildren(data.children ?? []);
+        if (!alive) return;
+        const nextChildren = data.children ?? [];
+        setChildren(nextChildren);
+        const requestedChildId = new URLSearchParams(window.location.search).get('child_id');
+        if (requestedChildId && nextChildren.some((child) => child.id === requestedChildId)) {
+          setChildId(requestedChildId);
+        }
       })
       .catch(() => toast.error('幼儿档案加载失败，请刷新重试'))
       .finally(() => {

@@ -1,4 +1,4 @@
-import { LLMClient, Config, HeaderUtils } from "coze-coding-dev-sdk";
+import { COZE_ORGANIZE_MODEL, getLlmProvider, invokeLlm } from "./llm";
 import type { ObservationDraft } from "./types";
 import { observationDraftSchema } from "./validation";
 
@@ -7,9 +7,9 @@ import { observationDraftSchema } from "./validation";
  * 整理为结构化观察分析卡片。仅产出草稿，最终内容以教师确认为准。
  */
 
-export const ORGANIZE_MODEL = "doubao-seed-2-0-lite-260215";
+export const ORGANIZE_MODEL = COZE_ORGANIZE_MODEL;
 
-const SYSTEM_PROMPT = `你是幼儿园教师的观察记录整理助手，熟悉《3-6岁儿童学习与发展指南》。
+export const SYSTEM_PROMPT = `你是幼儿园教师的观察记录整理助手，熟悉《3-6岁儿童学习与发展指南》。
 任务：把教师记录的白描式观察原文，整理成一张结构化的观察分析卡片。
 
 硬性要求：
@@ -76,20 +76,18 @@ export async function organizeObservation(params: OrganizeParams): Promise<{
     { role: "user" as const, content: userPrompt },
   ];
 
-  const client = new LLMClient(new Config(), params.forwardHeaders);
   let lastError = "";
 
   // 失败自动重试一次（同参数），保证"AI 失败可重试"的体验兜底
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await client.invoke(messages, {
-        model: ORGANIZE_MODEL,
+      const response = await invokeLlm(messages, {
         temperature: 0.3,
-        thinking: "disabled",
+        forwardHeaders: getLlmProvider() === "coze" ? params.forwardHeaders : undefined,
       });
       const parsed = observationDraftSchema.safeParse(extractJson(response.content));
       if (parsed.success) {
-        return { draft: parsed.data as ObservationDraft, model: ORGANIZE_MODEL };
+        return { draft: parsed.data as ObservationDraft, model: response.model };
       }
       lastError = parsed.error.message;
     } catch (e) {

@@ -77,7 +77,7 @@
 - 连接层：`src/storage/database/pg-client.ts` —— pg Pool 单例（挂 `globalThis` 防 HMR 重复建池），提供 `query<T>()` / `queryOne<T>()` 助手
 - 数据层：`src/lib/queries.ts` —— 9 个函数，SQL 用 `to_jsonb(table.*) AS data` 序列化（保持与 PostgREST 一致的 JSON 形态：时间戳为 ISO 字符串、jsonb 直传），错误文案与原实现一致
 - 依赖：`pg`；`@supabase/supabase-js` 已移除；`supabase-client.ts` 已删除
-- 表结构参考：`src/lib/db/schema.ts`（children / observations，外键 cascade，4 个索引）
+- 表结构参考：`src/storage/database/shared/schema.ts`（children / observations，外键 cascade，4 个索引）
 
 ## 环境变量
 
@@ -86,15 +86,13 @@
 | `DATABASE_URL` | pg 直连连接串 | **部署环境必配**（生产环境变量面板）。sslmode=require |
 | `TEACHER_PASSCODE` | 教师登录口令 | /api/auth/login 校验；本地 `.env` 有联调值 |
 
-本地 `.env` 不提交（.gitignore 已含）；`.env.example` 保留字段说明。
-
-**`.coze` 的 `[env]` 段**（2025-09 追加）：同样的两个变量在 `/workspace/projects/.coze` 末尾的 `[env]` 段维护了一份，作为本地 coding agent 的唯一配置源（agent 从 `.coze` 读取环境配置）。该文件随 git 提交且含数据库凭证，务必保持仓库私有；改动连接信息时 `.env`、`.coze [env]`、部署面板「生产环境变量」三处要同步。
+本地 `.env` 不提交（.gitignore 已含）；`.env.example` 只保留变量名和说明。`.coze` 只保存项目与部署元数据，禁止写入数据库连接串、口令、API Key 或其他凭证。部署环境变量统一在扣子编程部署面板配置。
 
 ## 部署要点
 
 1. 部署前在扣子编程部署面板的"生产环境变量"配置 `DATABASE_URL` 与 `TEACHER_PASSCODE`，缺一不可
-2. AI 整理功能依赖平台注入的 LLM 网关凭证（COZE_API_TOKEN 等），**本地沙箱无此凭证属正常现象**，部署环境自动注入；本地 `/api/observations/:id/organize` 会返回 200 + 业务错误提示
-3. 数据库迁移是幂等 DDL（CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS），部署后首次请求前无需手工执行
+2. AI 整理使用当前选择的 provider；Coze provider 依赖平台注入的 LLM 网关凭证，StepFun provider 依赖本地/生产环境变量中的 StepFun 配置，不能把任何凭证写入仓库
+3. 新数据库需要先完成与 `src/storage/database/shared/schema.ts` 一致的表结构初始化；当前仓库没有可自动执行的迁移文件，部署前必须验证表和索引已存在
 4. `.coze` 的部署标识是**扣子编程**体系的：`project_id` 必须等于沙箱 `COZE_PROJECT_ID`（当前 `7690843235199139866`，与线上站点埋点上报一致）。初始化快照曾带入旧扣子（低代码平台）的 `project_id`/`app_id`，2025-09 已纠正为扣子编程值并移除无对应概念的 `app_id`——两平台 ID 互不相通，勿混用
 
 ## 测试与验收（踩坑记录）
