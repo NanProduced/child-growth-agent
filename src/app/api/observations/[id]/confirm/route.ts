@@ -5,8 +5,14 @@ import { requireTeacher } from "@/lib/auth";
 import {
   confirmObservation,
   getObservation,
+  getChild,
+  listObservations,
   updateObservationAgentContext,
 } from "@/lib/queries";
+import {
+  updateGrowthProfileSafely,
+  type ProfileUpdateResult,
+} from "@/lib/growth-profile";
 import {
   normalizeTeacherEditContent,
   sameTeacherEditContent,
@@ -93,7 +99,29 @@ export async function POST(
         ...submittedContent,
         teacher_note: teacherNote,
       });
-      return NextResponse.json({ observation: confirmed });
+      let profileUpdate: ProfileUpdateResult = {
+        status: "failed",
+        message: "观察已确认，但成长档案暂未更新，请稍后重试。",
+      };
+      try {
+        const child = await getChild(confirmed.child_id);
+        if (!child) throw new Error("关联幼儿档案不存在");
+        const confirmedObservations = await listObservations({
+          childId: confirmed.child_id,
+          status: "confirmed",
+        });
+        profileUpdate = await updateGrowthProfileSafely(child, confirmedObservations, {
+          forwardHeaders: HeaderUtils.extractForwardHeaders(request.headers),
+        });
+      } catch (error) {
+        console.error("确认后更新成长档案失败：", error);
+      }
+      return NextResponse.json({
+        observation: confirmed,
+        profileUpdateStatus: profileUpdate.status,
+        profileUpdateMessage: profileUpdate.message,
+        growthProfile: profileUpdate.growthProfile,
+      });
     }
 
     if (submissionAction === "clarify" && currentReview) {

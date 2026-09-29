@@ -6,7 +6,8 @@ export type LlmProvider = 'coze' | 'stepfun';
 export type LlmResponseType =
   | 'follow_up_decision'
   | 'observation_draft'
-  | 'teacher_edit_review';
+  | 'teacher_edit_review'
+  | 'growth_profile';
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -101,6 +102,25 @@ const STEPFUN_RESPONSE_FORMATS: Record<LlmResponseType, object> = {
             enum: ['supported', 'partially_supported', 'unsupported'],
           },
           question: { type: 'string' },
+        },
+      },
+    },
+  },
+  growth_profile: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'growth_profile',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['summary', 'recent_change', 'development_clues', 'next_support', 'next_focus'],
+        properties: {
+          summary: { type: 'string' },
+          recent_change: { type: 'string' },
+          development_clues: { type: 'array', items: { type: 'string' } },
+          next_support: { type: 'string' },
+          next_focus: { type: 'string' },
         },
       },
     },

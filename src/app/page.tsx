@@ -144,7 +144,7 @@ export default async function DashboardPage() {
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription className="flex items-center gap-1">
-                  <Baby className="size-4" /> 已确认覆盖
+                  <Baby className="size-4" /> 有确认观察
                 </CardDescription>
                 <CardTitle className="text-2xl">
                   {confirmedChildren.size}
@@ -154,7 +154,7 @@ export default async function DashboardPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="text-xs text-slate-500">
-                有教师确认观察的幼儿
+                已开始积累成长档案的幼儿
               </CardContent>
             </Card>
           </section>
@@ -190,6 +190,11 @@ export default async function DashboardPage() {
                             {obs.context ? ` · ${obs.context}` : ''}
                           </span>
                           {child?.is_demo ? <DemoBadge /> : null}
+                          {child?.growth_profile && obs.status === 'confirmed' ? (
+                            <Badge variant="outline" className="border-emerald-200 text-emerald-700">
+                              成长档案已更新
+                            </Badge>
+                          ) : null}
                           <span className="ml-auto flex items-center gap-2">
                             {obs.ai_draft ? <AiBadge /> : null}
                             <StatusBadge status={obs.status} />

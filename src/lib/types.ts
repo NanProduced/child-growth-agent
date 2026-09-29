@@ -44,6 +44,20 @@ export interface ObservationDraft {
   teacher_note?: string;
 }
 
+export interface GrowthProfileDraft {
+  summary: string;
+  recent_change: string;
+  development_clues: string[];
+  next_support: string;
+  next_focus: string;
+}
+
+export interface GrowthProfile extends GrowthProfileDraft {
+  source_observation_ids: string[];
+  ai_model: string;
+  updated_at: string;
+}
+
 export type TeacherEditContent = Pick<
   ObservationDraft,
   | "domain"
@@ -78,6 +92,7 @@ export interface Child {
   class_name: string;
   avatar_emoji: string | null;
   note: string | null;
+  growth_profile: GrowthProfile | null;
   is_demo: boolean;
   created_at: string;
   updated_at: string | null;

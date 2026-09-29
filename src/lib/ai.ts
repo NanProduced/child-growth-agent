@@ -3,6 +3,8 @@ import type { LlmMessage, LlmResult, LlmResponseType } from "./llm";
 import type {
   AgentContext,
   FollowUpDecision,
+  GrowthProfileDraft,
+  Observation,
   ObservationDraft,
   TeacherEditContent,
   TeacherEditReviewOutput,
@@ -11,6 +13,7 @@ import {
   followUpDecisionSchema,
   observationDraftSchema,
   teacherEditReviewSchema,
+  growthProfileSchema,
 } from "./validation";
 import { z } from "zod";
 
@@ -61,6 +64,36 @@ export const TEACHER_EDIT_REVIEW_SYSTEM_PROMPT = `你是幼儿园教师观察记
 4. fact_check 必须为 supported、partially_supported、unsupported 之一。
 5. decision=clarify 时 question 必须具体说明需要教师确认什么；decision=accept 时 question 输出空字符串。
 6. 只输出 JSON 对象，不要解释文字或代码块：{"decision":"accept|clarify","summary":"string","change_summary":[],"fact_check":"supported|partially_supported|unsupported","question":"string"}。`;
+
+export const GROWTH_PROFILE_SYSTEM_PROMPT = `你是幼儿园教师的成长档案整理助手，熟悉《3-6岁儿童学习与发展指南》。
+你的任务是根据同一个幼儿已经由教师确认的观察记录，形成阶段性的成长档案小结，帮助教师回顾变化并决定下一次观察关注什么。
+
+硬性要求：
+1. 只能使用输入中明确标记为 status=confirmed 的观察记录；绝不使用 draft、needs_input、ai_organized 或任何未经教师确认的 AI 草稿，也不能把教师尚未提交的编辑内容当作依据。
+2. 只能依据输入中的原始观察与 confirmed_content，不得虚构观察中没有出现的事实、动机、情绪或结果。
+3. 不进行医疗、心理或教育诊断，不评分，不排名，不做同龄比较，不输出等级或优劣判断。
+4. 不使用“发展落后、能力差、注意力不集中”等定性词，也不要换用含义相同的评判性表达。
+5. summary 关注一段时间内已经确认的具体行为线索；recent_change 只描述最近一次或最近一组观察中可见的变化；development_clues 列出具体且可追溯的观察线索；next_support 给出温和、可操作且不带干预色彩的教师支持；next_focus 写下一次可以继续观察的具体现象。
+6. 全部使用中文，只输出一个 JSON 对象，不要解释文字或代码块标记。不要输出 source_observation_ids、ai_model、updated_at 等元数据。
+
+输出结构：
+{"summary":"string","recent_change":"string","development_clues":["string"],"next_support":"string","next_focus":"string"}`;
+
+const GROWTH_PROFILE_FORBIDDEN_TERMS = [
+  "诊断",
+  "评分",
+  "得分",
+  "分数",
+  "排名",
+  "领先",
+  "落后",
+  "等级",
+  "能力差",
+  "注意力不集中",
+  "发展落后",
+  "同龄比较",
+  "同龄人比较",
+] as const;
 
 function ageMonths(birthDate: string, observedAt: string): number {
   const b = new Date(`${birthDate}T00:00:00`);
@@ -152,6 +185,13 @@ export interface TeacherEditReviewParams {
   forwardHeaders?: Record<string, string>;
 }
 
+export interface GrowthProfileParams {
+  childName: string;
+  childGender: string;
+  observations: Observation[];
+  forwardHeaders?: Record<string, string>;
+}
+
 /** 组装教师修改审核消息：事实、旧草稿、修改内容和备注分区传给 Agent。 */
 export function buildTeacherEditReviewMessages(params: TeacherEditReviewParams): LlmMessage[] {
   const userPrompt = [
@@ -174,6 +214,32 @@ export function buildTeacherEditReviewMessages(params: TeacherEditReviewParams):
   ];
 }
 
+/** 只组装教师已经确认的观察；AI 草稿与工作流上下文不会进入成长档案输入。 */
+export function buildGrowthProfileMessages(params: GrowthProfileParams): LlmMessage[] {
+  const confirmedObservations = params.observations.filter(
+    (observation) => observation.status === "confirmed" && observation.confirmed_content,
+  );
+  const evidence = confirmedObservations.map((observation) => ({
+    status: observation.status,
+    id: observation.id,
+    observed_at: observation.observed_at,
+    context: observation.context,
+    raw_text: observation.raw_text,
+    confirmed_content: observation.confirmed_content,
+  }));
+  const userPrompt = [
+    `幼儿：${params.childName}（${params.childGender}）`,
+    "以下是该幼儿的已确认观察证据。每条记录都必须保持 status=confirmed 才能使用：",
+    JSON.stringify(evidence),
+    "请基于这些已确认观察生成 growth_profile JSON。只输出 JSON 对象。",
+  ].join("\n");
+
+  return [
+    { role: "system", content: GROWTH_PROFILE_SYSTEM_PROMPT },
+    { role: "user", content: userPrompt },
+  ];
+}
+
 async function invokeStructured<T>(
   messages: LlmMessage[],
   responseType: LlmResponseType,
@@ -182,6 +248,7 @@ async function invokeStructured<T>(
   invoke: typeof invokeLlm,
   forwardHeaders?: Record<string, string>,
   errorLabel = "AI 整理",
+  validate?: (data: T) => string | undefined,
 ): Promise<{ data: T; model: string }> {
   let lastError = "";
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -200,10 +267,15 @@ async function invokeStructured<T>(
     let failure = "";
     try {
       const parsed = schema.safeParse(extractJson(response.content));
-      if (parsed.success) return { data: parsed.data, model: response.model };
-      const issue = parsed.error.issues[0];
-      const where = issue?.path.join(".") || "输出";
-      failure = `schema 校验失败（${where}：${issue?.message || "不符合要求"}）`.slice(0, 240);
+      if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        const where = issue?.path.join(".") || "输出";
+        failure = `schema 校验失败（${where}：${issue?.message || "不符合要求"}）`.slice(0, 240);
+      } else {
+        const validationError = validate?.(parsed.data);
+        if (!validationError) return { data: parsed.data, model: response.model };
+        failure = validationError;
+      }
     } catch {
       failure = "输出不是可解析的 JSON";
     }
@@ -267,4 +339,34 @@ export async function organizeObservation(
     "AI 整理",
   );
   return { draft: result.data, model: result.model };
+}
+
+function validateGrowthProfileOutput(profile: GrowthProfileDraft): string | undefined {
+  const text = JSON.stringify(profile);
+  const forbidden = GROWTH_PROFILE_FORBIDDEN_TERMS.find((term) => text.includes(term));
+  return forbidden ? `成长档案输出包含不允许的定性词「${forbidden}」` : undefined;
+}
+
+export async function generateGrowthProfile(
+  params: GrowthProfileParams,
+  invoke: typeof invokeLlm = invokeLlm,
+): Promise<{ profile: GrowthProfileDraft; model: string }> {
+  const confirmedObservations = params.observations.filter(
+    (observation) => observation.status === "confirmed" && observation.confirmed_content,
+  );
+  if (confirmedObservations.length === 0) {
+    throw new Error("成长档案更新需要至少一条已确认观察");
+  }
+
+  const result = await invokeStructured(
+    buildGrowthProfileMessages({ ...params, observations: confirmedObservations }),
+    "growth_profile",
+    growthProfileSchema,
+    "请只依据 status=confirmed 的观察重新输出 growth_profile JSON，并移除诊断、评分、排名和同龄比较用语。",
+    invoke,
+    params.forwardHeaders,
+    "成长档案 Agent",
+    validateGrowthProfileOutput,
+  );
+  return { profile: result.data, model: result.model };
 }

@@ -16,10 +16,14 @@ CREATE TABLE IF NOT EXISTS children (
   class_name varchar(50) NOT NULL DEFAULT '向日葵班',
   avatar_emoji varchar(16),
   note text,
+  growth_profile jsonb,
   is_demo boolean NOT NULL DEFAULT false,
   created_at timestamptz DEFAULT now() NOT NULL,
   updated_at timestamptz
 );
+
+ALTER TABLE children
+  ADD COLUMN IF NOT EXISTS growth_profile jsonb;
 
 CREATE TABLE IF NOT EXISTS observations (
   id varchar(36) PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -257,6 +257,8 @@ export function ReviewClient({
         message?: string;
         requiresAgentConfirmation?: boolean;
         agentReview?: TeacherEditReviewOutput;
+        profileUpdateStatus?: 'updated' | 'failed';
+        profileUpdateMessage?: string;
       };
       if (!res.ok || !data.observation) {
         throw new Error(data.message ?? '确认归档失败，请稍后重试');
@@ -272,7 +274,13 @@ export function ReviewClient({
         );
         return;
       }
-      toast.success('已确认归档，内容进入幼儿正册');
+      if (data.profileUpdateStatus === 'failed') {
+        toast.info(data.profileUpdateMessage ?? '观察已确认，成长档案暂未更新，请稍后重试。');
+      } else if (data.profileUpdateStatus === 'updated') {
+        toast.success('已确认归档，成长档案已更新');
+      } else {
+        toast.success('已确认归档，内容进入幼儿正册');
+      }
       router.push(`/children/${child.id}`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '确认归档失败，请稍后重试');

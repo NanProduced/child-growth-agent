@@ -74,6 +74,16 @@ export const teacherEditReviewSchema = z.discriminatedUnion("decision", [
   }),
 ]);
 
+export const growthProfileSchema = z
+  .object({
+    summary: z.string().min(1, "成长小结不能为空").max(1200),
+    recent_change: z.string().min(1, "最近变化不能为空").max(800),
+    development_clues: z.array(z.string().min(1).max(300)).min(1).max(6),
+    next_support: z.string().min(1, "下一步支持不能为空").max(800),
+    next_focus: z.string().min(1, "下一次观察重点不能为空").max(500),
+  })
+  .strict();
+
 export const confirmObservationSchema = z.object({
   content: observationDraftSchema,
   teacher_note: z.string().max(500).optional(),

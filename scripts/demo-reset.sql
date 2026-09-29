@@ -47,9 +47,15 @@ where id = 'b2c20000-0000-4000-8000-000000000003'
   and is_demo = true
   and status <> 'ai_organized';
 
+-- 3) 清空演示幼儿的成长档案，让下一次确认重新演示 P1-D 更新链路。
+update children
+set growth_profile = null,
+    updated_at = now()
+where is_demo = true;
+
 commit;
 
--- 3) 演示数据集自检：期望 demo_children >= 3、confirmed >= 1、pending >= 1
+-- 4) 演示数据集自检：期望 demo_children >= 3、confirmed >= 1、pending >= 1
 select
   (select count(*) from children where is_demo) as demo_children,
   (select count(*) from observations where is_demo and status = 'confirmed') as confirmed_observations,

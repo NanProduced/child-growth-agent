@@ -34,6 +34,7 @@ export const children = pgTable(
     class_name: varchar("class_name", { length: 50 }).notNull().default("向日葵班"),
     avatar_emoji: varchar("avatar_emoji", { length: 16 }),
     note: text("note"),
+    growth_profile: jsonb("growth_profile"),
     is_demo: boolean("is_demo").notNull().default(false),
     created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updated_at: timestamp("updated_at", { withTimezone: true }),

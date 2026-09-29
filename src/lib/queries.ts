@@ -1,5 +1,12 @@
 import { query, queryOne } from "@/storage/database/pg-client";
-import type { AgentContext, Child, Observation, ObservationDraft, ObservationStatus } from "./types";
+import type {
+  AgentContext,
+  Child,
+  GrowthProfile,
+  Observation,
+  ObservationDraft,
+  ObservationStatus,
+} from "./types";
 
 /** 行来自 to_jsonb(table.*)，列名为 snake_case，显式映射为接口字段（与表结构语义一致） */
 type Row = Record<string, unknown>;
@@ -16,6 +23,7 @@ export function mapChild(row: Row): Child {
     class_name: str(row.class_name),
     avatar_emoji: strOrNull(row.avatar_emoji),
     note: strOrNull(row.note),
+    growth_profile: (row.growth_profile ?? null) as GrowthProfile | null,
     is_demo: Boolean(row.is_demo),
     created_at: str(row.created_at),
     updated_at: strOrNull(row.updated_at),
@@ -72,6 +80,22 @@ export async function createChild(input: {
     [input.name, input.gender, input.birth_date, input.class_name, input.avatar_emoji ?? null, input.note ?? null]
   );
   if (!row) throw new Error("新增幼儿失败：写入后未能读取记录");
+  return mapChild(row.data);
+}
+
+export async function updateChildGrowthProfile(
+  id: string,
+  growth_profile: GrowthProfile,
+): Promise<Child> {
+  const now = new Date().toISOString();
+  const row = await queryOne<{ data: Row }>(
+    `UPDATE children
+     SET growth_profile = $2::jsonb, updated_at = $3
+     WHERE id = $1
+     RETURNING to_jsonb(children.*) AS data`,
+    [id, JSON.stringify(growth_profile), now],
+  );
+  if (!row) throw new Error("保存成长档案失败：幼儿档案不存在");
   return mapChild(row.data);
 }
 
