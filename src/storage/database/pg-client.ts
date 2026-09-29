@@ -6,9 +6,11 @@ declare global {
 }
 
 function pool(): Pool {
-  const url = process.env.DATABASE_URL;
+  // Local development uses DATABASE_URL; Coze Programming injects PGDATABASE_URL
+  // for its managed PostgreSQL resource in production.
+  const url = process.env.DATABASE_URL?.trim() || process.env.PGDATABASE_URL?.trim();
   if (!url) {
-    throw new Error("DATABASE_URL is not set");
+    throw new Error("DATABASE_URL or PGDATABASE_URL is not set");
   }
   if (!global.__pgPool) {
     global.__pgPool = new Pool({ connectionString: url, max: 5 });

@@ -8,6 +8,8 @@ version = "0.1.9"
 appliedPatches = [ ]
 project_id = "7690843235199139866"
 project_name = "child-growth-agent"
+app_id = "7690936284390408235"
+
 
 [preview]
 preview_enable = "enabled"

@@ -83,7 +83,7 @@
 
 | 变量 | 用途 | 备注 |
 |---|---|---|
-| `DATABASE_URL` | pg 直连连接串 | **部署环境必配**（生产环境变量面板）。sslmode=require |
+| `DATABASE_URL` | pg 直连连接串 | 本地优先使用；扣子编程生产环境没有自定义值时回退到平台注入的 `PGDATABASE_URL` |
 | `TEACHER_PASSCODE` | 教师登录口令 | /api/auth/login 校验；本地 `.env` 有联调值 |
 
 本地 `.env` 不提交（.gitignore 已含）；`.env.example` 只保留变量名和说明。`.coze` 只保存项目与部署元数据，禁止写入数据库连接串、口令、API Key 或其他凭证。部署环境变量统一在扣子编程部署面板配置。
