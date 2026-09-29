@@ -6,8 +6,7 @@ project_type = "web"
 template = "nextjs"
 version = "0.1.9"
 appliedPatches = [ ]
-project_id = "7690748435154354216"
-app_id = "7690784152626528296"
+project_id = "7690843235199139866"
 project_name = "child-growth-agent"
 
 [preview]
