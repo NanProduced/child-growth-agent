@@ -88,6 +88,8 @@
 
 本地 `.env` 不提交（.gitignore 已含）；`.env.example` 保留字段说明。
 
+**`.coze` 的 `[env]` 段**（2025-09 追加）：同样的两个变量在 `/workspace/projects/.coze` 末尾的 `[env]` 段维护了一份，作为本地 coding agent 的唯一配置源（agent 从 `.coze` 读取环境配置）。该文件随 git 提交且含数据库凭证，务必保持仓库私有；改动连接信息时 `.env`、`.coze [env]`、部署面板「生产环境变量」三处要同步。
+
 ## 部署要点
 
 1. 部署前在扣子编程部署面板的"生产环境变量"配置 `DATABASE_URL` 与 `TEACHER_PASSCODE`，缺一不可
