@@ -174,7 +174,7 @@ export default function NewChildPage() {
       if (!res.ok || !data.child) {
         throw new Error(data.message ?? '建档失败，请稍后再试');
       }
-      toast.success(`已建立 ${data.child.name} 的幼儿档案`);
+      toast.success(`已建立 ${data.child.name} 的成长档案`);
       router.push(
         `/observations/new?child_id=${encodeURIComponent(data.child.id)}`,
       );
@@ -199,7 +199,7 @@ export default function NewChildPage() {
           <LogIn className="size-4" />
           <AlertTitle>需要教师登录</AlertTitle>
           <AlertDescription>
-            建立幼儿档案属于写操作，需教师身份验证。请点击右上角「教师登录」输入通行口令后再来。
+            建立成长档案属于写操作，需教师身份验证。请点击右上角「教师登录」输入通行口令后再来。
           </AlertDescription>
         </Alert>
       </div>
@@ -213,10 +213,10 @@ export default function NewChildPage() {
       <div>
         <h1 className="flex items-center gap-2 text-xl font-bold">
           <UserPlus className="size-5 text-amber-600" />
-          建立幼儿档案
+          建立成长档案
         </h1>
         <p className="mt-1 text-sm text-slate-600">
-          分三步完成：填基本信息、补充可选内容、确认建档，随后即可录入观察。
+          分三步完成基本信息、可选补充和确认，随后即可记录第一次观察。
         </p>
       </div>
 
@@ -258,7 +258,7 @@ export default function NewChildPage() {
         })}
       </ol>
 
-      <Card>
+      <Card className="border-amber-200/80">
         <CardHeader>
           <CardTitle className="text-base">{STEPS[step]}</CardTitle>
           <CardDescription>{STEP_HINTS[step]}</CardDescription>
@@ -444,7 +444,7 @@ export default function NewChildPage() {
             ) : (
               <Check className="size-4" />
             )}
-            {submitting ? '正在建档…' : '确认建档并录入观察'}
+                {submitting ? '正在建立…' : '建立成长档案并记录观察'}
           </Button>
         )}
       </div>

@@ -118,7 +118,7 @@ function DraftView({ draft }: { draft: ObservationDraft }) {
         </ul>
       </div>
       {draft.highlight_quote ? (
-        <div className="rounded-lg border-l-4 border-amber-300 bg-amber-50 px-3 py-2 text-slate-700">
+        <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-amber-900">
           <Quote className="mb-1 inline size-3.5 text-amber-500" /> {draft.highlight_quote}
         </div>
       ) : null}
@@ -306,7 +306,7 @@ export function ReviewClient({
   );
 
   return (
-    <div className="mx-auto max-w-2xl space-y-5">
+    <div className="mx-auto max-w-3xl space-y-6">
       <Button asChild variant="ghost" size="sm" className="-ml-2">
         <Link href={`/children/${child.id}`}>
           <ArrowLeft className="size-4" />
@@ -314,8 +314,8 @@ export function ReviewClient({
         </Link>
       </Button>
 
-      <Card>
-        <CardHeader className="pb-3">
+      <Card className="border-slate-200/90">
+        <CardHeader className="border-b bg-slate-50/60 pb-4">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-2xl">{child.avatar_emoji ?? '🧒'}</span>
             <CardTitle className="text-base">
@@ -332,7 +332,7 @@ export function ReviewClient({
         </CardHeader>
         <CardContent className="space-y-1.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
-            <FileText className="size-3.5" />
+            <FileText className="size-3.5 text-emerald-700" />
             观察原文（保存后不可修改，作为追溯依据）
           </div>
           <p className="whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-sm leading-7 text-slate-700">
@@ -341,19 +341,27 @@ export function ReviewClient({
         </CardContent>
       </Card>
 
-      <div
-        aria-label="观察处理进度"
-        className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500"
-      >
-        {workflowSteps.map((step, index) => (
-          <span
-            key={step}
-            aria-current={index === workflowStage ? 'step' : undefined}
-            className={index <= workflowStage ? 'font-medium text-emerald-700' : undefined}
-          >
-            {index > 0 ? '→ ' : ''}{step}
-          </span>
-        ))}
+      <div aria-label="观察处理进度" className="rounded-xl border bg-white p-3">
+        <div className="flex flex-wrap gap-2">
+          {workflowSteps.map((step, index) => (
+            <span
+              key={step}
+              aria-current={index === workflowStage ? 'step' : undefined}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs ${
+                index === workflowStage
+                  ? 'bg-emerald-100 font-medium text-emerald-800'
+                  : index < workflowStage
+                    ? 'bg-slate-100 text-slate-600'
+                    : 'text-slate-400'
+              }`}
+            >
+              <span className="flex size-4 items-center justify-center rounded-full bg-white/80 text-[10px]" aria-hidden="true">
+                {index + 1}
+              </span>
+              {step}
+            </span>
+          ))}
+        </div>
       </div>
 
       {authLoading ? (
@@ -373,12 +381,12 @@ export function ReviewClient({
       ) : null}
 
       {status === 'needs_input' && followUp ? (
-        <Card className="border-rose-200 bg-rose-50/50">
+        <Card className="border-sky-200 bg-sky-50/50">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
-              <MessageCircle className="size-5 text-rose-600" />
+              <MessageCircle className="size-5 text-sky-600" />
               补充信息
-              <Badge variant="outline" className="font-normal text-rose-700">
+              <Badge variant="outline" className="font-normal text-sky-700">
                 第 {followUp.round} / 2 轮
               </Badge>
             </CardTitle>
@@ -406,6 +414,7 @@ export function ReviewClient({
           {teacherReady ? (
             <CardFooter className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
               <Button
+                className="w-full sm:w-auto"
                 onClick={() => void handleFollowUp('answer')}
                 disabled={busy !== null || !followUpContent.trim()}
               >
@@ -414,6 +423,7 @@ export function ReviewClient({
               </Button>
               <Button
                 variant="outline"
+                className="w-full sm:w-auto"
                 onClick={() => void handleFollowUp('skip')}
                 disabled={busy !== null}
               >
@@ -421,6 +431,7 @@ export function ReviewClient({
               </Button>
               <Button
                 variant="ghost"
+                className="w-full sm:w-auto"
                 onClick={() => void handleFollowUp('stop')}
                 disabled={busy !== null}
               >
@@ -432,7 +443,7 @@ export function ReviewClient({
       ) : null}
 
       {status === 'confirmed' && confirmedContent ? (
-        <Card>
+        <Card className="border-emerald-200/90 bg-emerald-50/30">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <BadgeCheck className="size-5 text-emerald-600" />
@@ -450,13 +461,13 @@ export function ReviewClient({
       ) : null}
 
       {status === 'confirmed' && aiDraft ? (
-        <Card>
+        <Card className="border-violet-200/80 bg-violet-50/20">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm text-slate-600">
               <Sparkles className="size-4 text-violet-500" />
               追溯：AI 原始草稿（确认前版本）
             </CardTitle>
-            <CardDescription>保留 AI 草稿与教师确认稿，便于回顾整理过程。</CardDescription>
+            <CardDescription>AI 生成，仅为草稿；保留它与教师确认稿，便于回顾整理过程。</CardDescription>
           </CardHeader>
           <CardContent>
             <DraftView draft={aiDraft} />
@@ -465,7 +476,7 @@ export function ReviewClient({
       ) : null}
 
       {status !== 'confirmed' && status !== 'needs_input' && !form ? (
-        <Card>
+        <Card className="border-violet-200/80 bg-violet-50/20">
           <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
             <Sparkles className="size-8 text-violet-400" />
             <div className="text-sm text-slate-600">
@@ -487,14 +498,14 @@ export function ReviewClient({
       ) : null}
 
       {status === 'ai_organized' && form ? (
-        <Card>
+        <Card className="border-amber-200/90">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <AiBadge />
               AI 整理草稿（教师可修改）
             </CardTitle>
             <CardDescription>
-              请核对以下内容，可直接修改；确认后进入正册。原文始终不可修改。
+              AI 生成，仅为草稿。请核对并按需要修改；确认后才进入正册，原文始终不可修改。
               {aiModel ? ` · 模型：${aiModel}` : ''}
               {organizedAt ? ` · 整理时间：${formatDateTimeCn(organizedAt)}` : ''}
             </CardDescription>
@@ -587,9 +598,10 @@ export function ReviewClient({
             </div>
           </CardContent>
           {teacherReady && !reviewMatchesCurrent ? (
-            <CardFooter className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <CardFooter className="flex flex-col gap-2 border-t bg-slate-50/50 sm:flex-row sm:justify-end">
               <Button
                 variant="outline"
+                className="w-full sm:w-auto"
                 onClick={() => void handleOrganize()}
                 disabled={busy !== null}
               >
@@ -600,7 +612,7 @@ export function ReviewClient({
                 )}
                 重新生成
               </Button>
-              <Button onClick={() => void handleConfirm()} disabled={busy !== null}>
+              <Button onClick={() => void handleConfirm()} disabled={busy !== null} className="w-full sm:w-auto">
                 {busy === 'confirm' ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
@@ -636,6 +648,11 @@ export function ReviewClient({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm leading-6">
+            <div className="rounded-lg bg-white/75 px-3 py-2 font-medium text-slate-700">
+              {teacherEditReview.decision === 'accept'
+                ? '已理解这次修改，可以最终归档。'
+                : '需要澄清这次修改，再继续归档。'}
+            </div>
             <p className="text-slate-700">{teacherEditReview.summary}</p>
             {teacherEditReview.change_summary.length > 0 ? (
               <div>
@@ -666,9 +683,9 @@ export function ReviewClient({
             ) : null}
           </CardContent>
           {teacherReady ? (
-            <CardFooter className="justify-end">
+            <CardFooter className="justify-end border-t bg-white/60">
               {teacherEditReview.decision === 'accept' ? (
-                <Button onClick={() => void handleConfirm()} disabled={busy !== null}>
+                <Button onClick={() => void handleConfirm()} disabled={busy !== null} className="w-full sm:w-auto">
                   {busy === 'confirm' ? <Loader2 className="size-4 animate-spin" /> : <BadgeCheck className="size-4" />}
                   确认归档
                 </Button>
