@@ -93,7 +93,7 @@
 ## 部署要点
 
 1. 部署前在扣子编程部署面板的"生产环境变量"配置 `DATABASE_URL` 与 `TEACHER_PASSCODE`，缺一不可
-2. AI 整理功能依赖平台注入的 LLM 网关凭证（COZE_API_TOKEN 等），**本地沙箱无此凭证属正常现象**，部署环境自动注入；本地 `/api/observations/:id/organize` 会返回 200 + 业务错误提示
+2. AI 整理功能依赖平台注入的 LLM 网关凭证（COZE_API_TOKEN 等），**本地沙箱无此凭证属正常现象**，部署环境自动注入；本地 `/api/observations/:id/organize` 会返回 200 + 业务错误提示。实测：本地直接调 `coze-coding-dev-sdk` 的 LLMClient 报 "API key is required. Set COZE_API_TOKEN"（沙箱的 COZE_LOOP_API_TOKEN 是 agent 环境自有凭证，与应用无关）；若需本地真调 LLM，可在 `.env` 放自备的 `COZE_API_TOKEN`（SDK 标准变量名，勿提交），代码零改动
 3. 数据库迁移是幂等 DDL（CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS），部署后首次请求前无需手工执行
 4. `.coze` 的部署标识是**扣子编程**体系的：`project_id` 必须等于沙箱 `COZE_PROJECT_ID`（当前 `7690843235199139866`，与线上站点埋点上报一致）。初始化快照曾带入旧扣子（低代码平台）的 `project_id`/`app_id`，2025-09 已纠正为扣子编程值并移除无对应概念的 `app_id`——两平台 ID 互不相通，勿混用
 
