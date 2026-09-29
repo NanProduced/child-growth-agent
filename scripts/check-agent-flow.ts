@@ -4,16 +4,24 @@ import { requireTeacher } from '../src/lib/auth';
 import {
   buildFollowUpMessages,
   buildOrganizeMessages,
+  buildTeacherEditReviewMessages,
   judgeFollowUp,
   organizeObservation,
+  reviewTeacherEdit,
 } from '../src/lib/ai';
 import {
   appendFollowUpAction,
   nextFollowUpContext,
   shouldProceedToDraft,
 } from '../src/lib/observation-agent';
+import {
+  normalizeTeacherEditContent,
+  sameTeacherEditContent,
+  teacherEditSubmissionAction,
+} from '../src/lib/teacher-edit-review';
 import type { LlmResult } from '../src/lib/llm';
-import { followUpDecisionSchema } from '../src/lib/validation';
+import type { TeacherEditReview } from '../src/lib/types';
+import { followUpDecisionSchema, teacherEditReviewSchema } from '../src/lib/validation';
 
 const PARAMS = {
   childName: '测试幼儿',
@@ -31,6 +39,11 @@ const VALID_DRAFT = {
   highlights: ['把三块长积木并排搭成小桥。'],
   support_suggestions: ['提供不同长度的积木供幼儿继续探索。'],
   highlight_quote: '桥没有倒。',
+};
+
+const EDITED_CONTENT = {
+  ...VALID_DRAFT,
+  objective_description: '教师将发展表现描述调整为更贴近这次观察中的具体搭建行为。',
 };
 
 function reply(content: string): LlmResult {
@@ -105,6 +118,103 @@ async function main(): Promise<void> {
   assert.ok(buildOrganizeMessages(PARAMS).some((message) => message.content.includes(rawText)));
   assert.ok(buildFollowUpMessages({ ...PARAMS, agentContext: context }).some((message) => message.content.includes(rawText)));
 
+  // P1-C：服务端规范化教师修改，teacher_note 不参与修改检测。
+  assert.equal(teacherEditSubmissionAction(VALID_DRAFT, normalizeTeacherEditContent(VALID_DRAFT), undefined), 'confirm');
+  assert.equal(teacherEditSubmissionAction(VALID_DRAFT, EDITED_CONTENT, undefined), 'review');
+  assert.equal(
+    sameTeacherEditContent(
+      { ...EDITED_CONTENT, sub_domain: ' 科学探究 ', highlights: [...EDITED_CONTENT.highlights].reverse() },
+      EDITED_CONTENT,
+    ),
+    true,
+  );
+  assert.equal(teacherEditSubmissionAction(VALID_DRAFT, VALID_DRAFT, undefined), 'confirm');
+
+  const reviewReply = JSON.stringify({
+    decision: 'accept',
+    summary: '我已理解教师对观察描述的修改。',
+    change_summary: ['将发展表现描述调整为更贴近具体搭建行为'],
+    fact_check: 'supported',
+    question: '',
+  });
+  let reviewCalls = 0;
+  const reviewed = await reviewTeacherEdit(
+    {
+      rawText: rawText,
+      originalDraft: VALID_DRAFT,
+      content: normalizeTeacherEditContent(EDITED_CONTENT),
+      teacherNote: '教师认为原描述过于笼统。',
+    },
+    async (messages) => {
+      reviewCalls += 1;
+      assert.ok(messages.some((message) => message.content.includes(rawText)));
+      assert.ok(messages.some((message) => message.content.includes(JSON.stringify(VALID_DRAFT))));
+      assert.ok(messages.some((message) => message.content.includes(JSON.stringify(normalizeTeacherEditContent(EDITED_CONTENT)))));
+      assert.ok(messages.some((message) => message.content.includes('教师认为原描述过于笼统')));
+      return reply(reviewReply);
+    },
+  );
+  assert.equal(reviewed.review.decision, 'accept');
+  assert.equal(reviewCalls, 1);
+  assert.equal(teacherEditReviewSchema.safeParse(reviewed.review).success, true);
+
+  const acceptedReview: TeacherEditReview = {
+    ...reviewed.review,
+    content_snapshot: normalizeTeacherEditContent(EDITED_CONTENT),
+    reviewed_at: '2026-09-01T02:00:00.000Z',
+  };
+  assert.equal(teacherEditSubmissionAction(VALID_DRAFT, EDITED_CONTENT, acceptedReview), 'confirm');
+  assert.equal(
+    teacherEditSubmissionAction(
+      VALID_DRAFT,
+      EDITED_CONTENT,
+      { ...acceptedReview, decision: 'clarify', question: '请说明这处修改对应的具体行为。' },
+    ),
+    'clarify',
+  );
+  assert.equal(
+    teacherEditSubmissionAction(VALID_DRAFT, { ...EDITED_CONTENT, domain: '语言' }, acceptedReview),
+    'review',
+  );
+  assert.equal(
+    teacherEditSubmissionAction(VALID_DRAFT, VALID_DRAFT, acceptedReview),
+    'confirm',
+  );
+
+  let reviewRetryCalls = 0;
+  await assert.rejects(
+    reviewTeacherEdit(
+      { rawText, originalDraft: VALID_DRAFT, content: normalizeTeacherEditContent(EDITED_CONTENT) },
+      async () => {
+        reviewRetryCalls += 1;
+        throw new Error('审核网络失败');
+      },
+    ),
+    (error: Error) => error.message.includes('Agent 修改审核失败'),
+  );
+  assert.equal(reviewRetryCalls, 2);
+
+  let invalidReviewCalls = 0;
+  await assert.rejects(
+    reviewTeacherEdit(
+      { rawText, originalDraft: VALID_DRAFT, content: normalizeTeacherEditContent(EDITED_CONTENT) },
+      async () => {
+        invalidReviewCalls += 1;
+        return reply(
+          JSON.stringify({
+            decision: 'accept',
+            summary: '不应接受',
+            change_summary: [],
+            fact_check: 'unsupported',
+            question: '',
+          }),
+        );
+      },
+    ),
+    (error: Error) => error.message.includes('Agent 修改审核失败'),
+  );
+  assert.equal(invalidReviewCalls, 2);
+
   // 9) 未登录写接口 401；10) 未配置教师口令 503。
   const previousPasscode = process.env.TEACHER_PASSCODE;
   try {
@@ -117,7 +227,7 @@ async function main(): Promise<void> {
     else process.env.TEACHER_PASSCODE = previousPasscode;
   }
 
-  console.log(JSON.stringify({ passed: 10, total: 10 }));
+  console.log(JSON.stringify({ passed: 19, total: 19 }));
 }
 
 void main();

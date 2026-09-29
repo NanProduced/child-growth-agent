@@ -3,7 +3,10 @@ import { Config, LLMClient } from 'coze-coding-dev-sdk';
 import { FIVE_DOMAINS } from './types';
 
 export type LlmProvider = 'coze' | 'stepfun';
-export type LlmResponseType = 'follow_up_decision' | 'observation_draft';
+export type LlmResponseType =
+  | 'follow_up_decision'
+  | 'observation_draft'
+  | 'teacher_edit_review';
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -76,6 +79,28 @@ const STEPFUN_RESPONSE_FORMATS: Record<LlmResponseType, object> = {
           decision: { type: 'string', enum: ['ask', 'proceed'] },
           question: { type: 'string' },
           reason: { type: 'string' },
+        },
+      },
+    },
+  },
+  teacher_edit_review: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'teacher_edit_review',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['decision', 'summary', 'change_summary', 'fact_check', 'question'],
+        properties: {
+          decision: { type: 'string', enum: ['accept', 'clarify'] },
+          summary: { type: 'string' },
+          change_summary: { type: 'array', items: { type: 'string' } },
+          fact_check: {
+            type: 'string',
+            enum: ['supported', 'partially_supported', 'unsupported'],
+          },
+          question: { type: 'string' },
         },
       },
     },

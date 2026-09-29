@@ -19,6 +19,7 @@ export interface AgentFollowUp {
 
 export interface AgentContext {
   follow_up?: AgentFollowUp;
+  teacher_edit_review?: TeacherEditReview;
 }
 
 export interface FollowUpDecision {
@@ -41,6 +42,32 @@ export interface ObservationDraft {
   support_suggestions: string[];
   highlight_quote: string;
   teacher_note?: string;
+}
+
+export type TeacherEditContent = Pick<
+  ObservationDraft,
+  | "domain"
+  | "sub_domain"
+  | "objective_description"
+  | "highlights"
+  | "support_suggestions"
+  | "highlight_quote"
+>;
+
+export type TeacherEditReviewDecision = "accept" | "clarify";
+export type TeacherEditFactCheck = "supported" | "partially_supported" | "unsupported";
+
+export interface TeacherEditReviewOutput {
+  decision: TeacherEditReviewDecision;
+  summary: string;
+  change_summary: string[];
+  fact_check: TeacherEditFactCheck;
+  question: string;
+}
+
+export interface TeacherEditReview extends TeacherEditReviewOutput {
+  content_snapshot: TeacherEditContent;
+  reviewed_at: string;
 }
 
 export interface Child {

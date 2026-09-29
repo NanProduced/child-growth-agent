@@ -57,6 +57,23 @@ export const followUpActionSchema = z
     }
   });
 
+export const teacherEditReviewSchema = z.discriminatedUnion("decision", [
+  z.object({
+    decision: z.literal("accept"),
+    summary: z.string().min(1, "审核说明不能为空").max(500),
+    change_summary: z.array(z.string().min(1).max(300)).max(6),
+    fact_check: z.enum(["supported", "partially_supported"]),
+    question: z.literal(""),
+  }),
+  z.object({
+    decision: z.literal("clarify"),
+    summary: z.string().min(1, "审核说明不能为空").max(500),
+    change_summary: z.array(z.string().min(1).max(300)).max(6),
+    fact_check: z.enum(["supported", "partially_supported", "unsupported"]),
+    question: z.string().min(1, "澄清问题不能为空").max(500),
+  }),
+]);
+
 export const confirmObservationSchema = z.object({
   content: observationDraftSchema,
   teacher_note: z.string().max(500).optional(),

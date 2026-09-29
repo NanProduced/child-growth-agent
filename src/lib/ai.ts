@@ -1,7 +1,17 @@
 import { COZE_ORGANIZE_MODEL, getLlmProvider, invokeLlm } from "./llm";
 import type { LlmMessage, LlmResult, LlmResponseType } from "./llm";
-import type { AgentContext, FollowUpDecision, ObservationDraft } from "./types";
-import { followUpDecisionSchema, observationDraftSchema } from "./validation";
+import type {
+  AgentContext,
+  FollowUpDecision,
+  ObservationDraft,
+  TeacherEditContent,
+  TeacherEditReviewOutput,
+} from "./types";
+import {
+  followUpDecisionSchema,
+  observationDraftSchema,
+  teacherEditReviewSchema,
+} from "./validation";
 import { z } from "zod";
 
 /**
@@ -40,6 +50,17 @@ export const FOLLOW_UP_SYSTEM_PROMPT = `你是幼儿园教师的观察记录补�
 3. 禁止输出诊断、评分、等级、优劣判断或任何医疗心理结论。
 4. 只输出 JSON 对象，不要解释文字或代码块：{"decision":"ask|proceed","question":"string","reason":"string"}。
 5. decision=ask 时 question 与 reason 都必须具体有内容；decision=proceed 时 question 输出空字符串，reason 说明为什么现有证据足够。`;
+
+export const TEACHER_EDIT_REVIEW_SYSTEM_PROMPT = `你是幼儿园教师观察记录的修改审核助手。
+你的任务是理解教师为什么修改 AI 草稿，并核对修改内容是否能从原始观察或教师补充信息中找到依据。你不是重新评价幼儿，也不能替教师下结论。
+
+硬性要求：
+1. raw_text 和教师补充信息是事实依据；原始 AI 草稿只是被修改的旧版本，不能把 AI 草稿本身当成新的事实。
+2. 只核对事实一致性与修改意图；禁止诊断、评分、排名、等级或优劣判断。
+3. decision=accept 仅表示修改有依据或属于表达调整；decision=clarify 表示存在不清楚、部分依据或缺少依据的地方。
+4. fact_check 必须为 supported、partially_supported、unsupported 之一。
+5. decision=clarify 时 question 必须具体说明需要教师确认什么；decision=accept 时 question 输出空字符串。
+6. 只输出 JSON 对象，不要解释文字或代码块：{"decision":"accept|clarify","summary":"string","change_summary":[],"fact_check":"supported|partially_supported|unsupported","question":"string"}。`;
 
 function ageMonths(birthDate: string, observedAt: string): number {
   const b = new Date(`${birthDate}T00:00:00`);
@@ -122,6 +143,37 @@ export function buildFollowUpMessages(params: OrganizeParams): LlmMessage[] {
   ];
 }
 
+export interface TeacherEditReviewParams {
+  rawText: string;
+  originalDraft: ObservationDraft;
+  content: TeacherEditContent;
+  teacherNote?: string;
+  agentContext?: AgentContext | null;
+  forwardHeaders?: Record<string, string>;
+}
+
+/** 组装教师修改审核消息：事实、旧草稿、修改内容和备注分区传给 Agent。 */
+export function buildTeacherEditReviewMessages(params: TeacherEditReviewParams): LlmMessage[] {
+  const userPrompt = [
+    "原始观察 raw_text（唯一事实依据之一，不可修改）：",
+    params.rawText,
+    "教师此前补充信息（如有，仅作为事实上下文）：",
+    formatAgentAnswers(params.agentContext),
+    "原始 AI 草稿 ai_draft（只用于识别修改，不等于事实）：",
+    JSON.stringify(params.originalDraft),
+    "教师提交的修改 content：",
+    JSON.stringify(params.content),
+    "教师备注 teacher_note（用于理解修改意图，不属于 AI 内容字段）：",
+    params.teacherNote?.trim() || "未填写",
+    "请只输出 teacher_edit_review JSON。",
+  ].join("\n");
+
+  return [
+    { role: "system", content: TEACHER_EDIT_REVIEW_SYSTEM_PROMPT },
+    { role: "user", content: userPrompt },
+  ];
+}
+
 async function invokeStructured<T>(
   messages: LlmMessage[],
   responseType: LlmResponseType,
@@ -129,6 +181,7 @@ async function invokeStructured<T>(
   retryInstruction: string,
   invoke: typeof invokeLlm,
   forwardHeaders?: Record<string, string>,
+  errorLabel = "AI 整理",
 ): Promise<{ data: T; model: string }> {
   let lastError = "";
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -162,7 +215,7 @@ async function invokeStructured<T>(
     }
   }
 
-  throw new Error(`AI 整理失败，请重试。原因：${lastError || "模型输出不符合要求"}`);
+  throw new Error(`${errorLabel}失败，请重试。原因：${lastError || "模型输出不符合要求"}`);
 }
 
 export async function judgeFollowUp(
@@ -176,8 +229,25 @@ export async function judgeFollowUp(
     "请严格输出 decision=ask 或 decision=proceed；ask 必须同时填写具体 question 和 reason。",
     invoke,
     params.forwardHeaders,
+    "Agent 判断",
   );
   return { decision: result.data, model: result.model };
+}
+
+export async function reviewTeacherEdit(
+  params: TeacherEditReviewParams,
+  invoke: typeof invokeLlm = invokeLlm,
+): Promise<{ review: TeacherEditReviewOutput; model: string }> {
+  const result = await invokeStructured(
+    buildTeacherEditReviewMessages(params),
+    "teacher_edit_review",
+    teacherEditReviewSchema,
+    "请严格输出 teacher_edit_review JSON；clarify 时必须填写具体 question，不能自行接受缺少依据的修改。",
+    invoke,
+    params.forwardHeaders,
+    "Agent 修改审核",
+  );
+  return { review: result.data, model: result.model };
 }
 
 export async function organizeObservation(
@@ -194,6 +264,7 @@ export async function organizeObservation(
     "请严格按要求重新整理，只输出一个 JSON 对象；domain 只能取：健康、语言、社会、科学、艺术。",
     invoke,
     params.forwardHeaders,
+    "AI 整理",
   );
   return { draft: result.data, model: result.model };
 }
