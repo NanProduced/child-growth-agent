@@ -3,6 +3,7 @@ import { Config, LLMClient } from 'coze-coding-dev-sdk';
 import { FIVE_DOMAINS } from './types';
 
 export type LlmProvider = 'coze' | 'stepfun';
+export type LlmResponseType = 'follow_up_decision' | 'observation_draft';
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -26,40 +27,60 @@ export type LlmOptions = {
   temperature?: number;
   thinking?: 'enabled' | 'disabled';
   forwardHeaders?: Record<string, string>;
+  responseType?: LlmResponseType;
 };
 
 export const COZE_ORGANIZE_MODEL = 'doubao-seed-2-0-lite-260215';
 const DEFAULT_STEPFUN_BASE_URL = 'https://api.stepfun.com/step_plan/v1';
 const DEFAULT_STEPFUN_MODEL = 'step-5-preview';
 
-// StepFun 原生 JSON Schema 结构化输出：在 API 层把 domain 约束为五大领域枚举，Zod 仍作为入库前的最终校验
-const STEPFUN_DRAFT_RESPONSE_FORMAT = {
-  type: 'json_schema',
-  json_schema: {
-    name: 'observation_draft',
-    strict: true,
-    schema: {
-      type: 'object',
-      additionalProperties: false,
-      required: [
-        'domain',
-        'sub_domain',
-        'objective_description',
-        'highlights',
-        'support_suggestions',
-        'highlight_quote',
-      ],
-      properties: {
-        domain: { type: 'string', enum: [...FIVE_DOMAINS] },
-        sub_domain: { type: 'string' },
-        objective_description: { type: 'string' },
-        highlights: { type: 'array', items: { type: 'string' } },
-        support_suggestions: { type: 'array', items: { type: 'string' } },
-        highlight_quote: { type: 'string' },
+// StepFun 原生 JSON Schema 结构化输出；Zod 仍作为最终校验，不把非法输出静默映射成合法值。
+const STEPFUN_RESPONSE_FORMATS: Record<LlmResponseType, object> = {
+  observation_draft: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'observation_draft',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'domain',
+          'sub_domain',
+          'objective_description',
+          'highlights',
+          'support_suggestions',
+          'highlight_quote',
+        ],
+        properties: {
+          domain: { type: 'string', enum: [...FIVE_DOMAINS] },
+          sub_domain: { type: 'string' },
+          objective_description: { type: 'string' },
+          highlights: { type: 'array', items: { type: 'string' } },
+          support_suggestions: { type: 'array', items: { type: 'string' } },
+          highlight_quote: { type: 'string' },
+        },
       },
     },
   },
-} as const;
+  follow_up_decision: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'follow_up_decision',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['decision', 'question', 'reason'],
+        properties: {
+          decision: { type: 'string', enum: ['ask', 'proceed'] },
+          question: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+    },
+  },
+};
 
 type JsonRecord = Record<string, unknown>;
 
@@ -167,7 +188,7 @@ async function invokeStepFun(messages: LlmMessage[], options: LlmOptions): Promi
         model,
         messages,
         temperature: options.temperature ?? 0.3,
-        response_format: STEPFUN_DRAFT_RESPONSE_FORMAT,
+        response_format: STEPFUN_RESPONSE_FORMATS[options.responseType ?? 'observation_draft'],
       }),
     });
   } catch (error) {

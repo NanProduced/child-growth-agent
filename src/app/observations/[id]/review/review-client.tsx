@@ -9,6 +9,7 @@ import {
   FileText,
   Loader2,
   Lock,
+  MessageCircle,
   Quote,
   RefreshCw,
   Sparkles,
@@ -40,7 +41,14 @@ import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
 import { formatDateCn, formatDateTimeCn } from '@/lib/format';
-import { FIVE_DOMAINS, type Child, type Observation, type ObservationDraft } from '@/lib/types';
+import {
+  FIVE_DOMAINS,
+  type AgentContext,
+  type Child,
+  type FollowUpAction,
+  type Observation,
+  type ObservationDraft,
+} from '@/lib/types';
 
 interface DraftForm {
   domain: string;
@@ -127,13 +135,24 @@ export function ReviewClient({
   const [aiModel, setAiModel] = useState(observation.ai_model);
   const [organizedAt, setOrganizedAt] = useState(observation.ai_organized_at);
   const [aiDraft, setAiDraft] = useState<ObservationDraft | null>(observation.ai_draft);
+  const [agentContext, setAgentContext] = useState<AgentContext | null>(observation.agent_context);
   const [form, setForm] = useState<DraftForm | null>(draftToForm(observation.ai_draft));
   const [teacherNote, setTeacherNote] = useState(
     observation.confirmed_content?.teacher_note ?? ''
   );
-  const [busy, setBusy] = useState<null | 'organize' | 'confirm'>(null);
+  const [followUpContent, setFollowUpContent] = useState('');
+  const [busy, setBusy] = useState<null | 'organize' | 'follow-up' | 'confirm'>(null);
 
   const teacherReady = configured && isTeacher;
+
+  function applyObservation(updated: Observation) {
+    setAgentContext(updated.agent_context);
+    setAiDraft(updated.ai_draft);
+    setForm(draftToForm(updated.ai_draft));
+    setAiModel(updated.ai_model);
+    setOrganizedAt(updated.ai_organized_at);
+    setStatus(updated.status);
+  }
 
   async function handleOrganize() {
     setBusy('organize');
@@ -149,15 +168,48 @@ export function ReviewClient({
         throw new Error(data.message ?? 'AI 整理失败，请稍后重试');
       }
       const updated = data.observation;
-      setAiDraft(updated.ai_draft);
-      setForm(draftToForm(updated.ai_draft));
-      setAiModel(updated.ai_model);
-      setOrganizedAt(updated.ai_organized_at);
-      setStatus(updated.status);
-      toast.success('AI 整理完成，请核对后确认归档');
+      applyObservation(updated);
+      if (updated.status === 'needs_input') {
+        toast.info('这条观察还缺一项必要信息，请补充或选择跳过。');
+      } else {
+        toast.success('AI 整理完成，请核对后确认归档');
+      }
       router.refresh();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'AI 整理失败，请稍后重试');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleFollowUp(action: FollowUpAction) {
+    setBusy('follow-up');
+    try {
+      const res = await fetch(`/api/observations/${observation.id}/follow-up`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          content: action === 'answer' ? followUpContent.trim() : '',
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        observation?: Observation;
+        message?: string;
+      };
+      if (!res.ok || !data.observation) {
+        throw new Error(data.message ?? '补充信息处理失败，请稍后重试');
+      }
+      applyObservation(data.observation);
+      setFollowUpContent('');
+      if (data.observation.status === 'needs_input') {
+        toast.info('已记录补充信息，Agent 还有一个必要问题。');
+      } else {
+        toast.success('已按当前信息生成 AI 整理草稿');
+      }
+      router.refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '补充信息处理失败，请稍后重试');
     } finally {
       setBusy(null);
     }
@@ -210,6 +262,10 @@ export function ReviewClient({
   const updateForm = (patch: Partial<DraftForm>) =>
     setForm((prev) => (prev ? { ...prev, ...patch } : prev));
 
+  const workflowStage = status === 'draft' ? 0 : status === 'needs_input' ? 1 : status === 'ai_organized' ? 2 : 3;
+  const workflowSteps = ['已保存', '补充信息（按需）', 'AI 整理', '教师确认'];
+  const followUp = agentContext?.follow_up;
+
   return (
     <div className="mx-auto max-w-2xl space-y-5">
       <Button asChild variant="ghost" size="sm" className="-ml-2">
@@ -246,6 +302,21 @@ export function ReviewClient({
         </CardContent>
       </Card>
 
+      <div
+        aria-label="观察处理进度"
+        className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500"
+      >
+        {workflowSteps.map((step, index) => (
+          <span
+            key={step}
+            aria-current={index === workflowStage ? 'step' : undefined}
+            className={index <= workflowStage ? 'font-medium text-emerald-700' : undefined}
+          >
+            {index > 0 ? '→ ' : ''}{step}
+          </span>
+        ))}
+      </div>
+
       {authLoading ? (
         <div className="flex justify-center py-8 text-slate-400">
           <Loader2 className="size-5 animate-spin" />
@@ -260,6 +331,65 @@ export function ReviewClient({
               : '服务端尚未配置教师口令（TEACHER_PASSCODE），写入与 AI 调用已默认禁用；配置环境变量并重启后可用。'}
           </AlertDescription>
         </Alert>
+      ) : null}
+
+      {status === 'needs_input' && followUp ? (
+        <Card className="border-rose-200 bg-rose-50/50">
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <MessageCircle className="size-5 text-rose-600" />
+              补充信息
+              <Badge variant="outline" className="font-normal text-rose-700">
+                第 {followUp.round} / 2 轮
+              </Badge>
+            </CardTitle>
+            <CardDescription>
+              Agent 只在补充内容会影响发展线索或支持建议时提问。原始观察保持不变。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="rounded-lg bg-white px-3 py-3">
+              <p className="font-medium leading-6 text-slate-800">{followUp.question}</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">为什么需要：{followUp.reason}</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="follow-up-content">教师补充（可跳过）</Label>
+              <Textarea
+                id="follow-up-content"
+                rows={3}
+                value={followUpContent}
+                onChange={(e) => setFollowUpContent(e.target.value)}
+                placeholder="写下你记得的具体行为、原话或支持方式"
+                maxLength={2000}
+              />
+            </div>
+          </CardContent>
+          {teacherReady ? (
+            <CardFooter className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+              <Button
+                onClick={() => void handleFollowUp('answer')}
+                disabled={busy !== null || !followUpContent.trim()}
+              >
+                {busy === 'follow-up' ? <Loader2 className="size-4 animate-spin" /> : null}
+                回答并继续
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => void handleFollowUp('skip')}
+                disabled={busy !== null}
+              >
+                跳过，直接整理
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => void handleFollowUp('stop')}
+                disabled={busy !== null}
+              >
+                不再追问
+              </Button>
+            </CardFooter>
+          ) : null}
+        </Card>
       ) : null}
 
       {status === 'confirmed' && confirmedContent ? (
@@ -295,7 +425,7 @@ export function ReviewClient({
         </Card>
       ) : null}
 
-      {status !== 'confirmed' && !form ? (
+      {status !== 'confirmed' && status !== 'needs_input' && !form ? (
         <Card>
           <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
             <Sparkles className="size-8 text-violet-400" />
@@ -317,7 +447,7 @@ export function ReviewClient({
         </Card>
       ) : null}
 
-      {status !== 'confirmed' && form ? (
+      {status === 'ai_organized' && form ? (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">

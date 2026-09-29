@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireTeacher } from "@/lib/auth";
 import { createObservation, listObservations } from "@/lib/queries";
+import { OBSERVATION_STATUSES, type ObservationStatus } from "@/lib/types";
 import { createObservationSchema } from "@/lib/validation";
 
 /**
@@ -11,7 +12,14 @@ import { createObservationSchema } from "@/lib/validation";
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const childId = params.get("child_id") ?? undefined;
-  const status = params.get("status") ?? undefined;
+  const requestedStatus = params.get("status") ?? undefined;
+  if (
+    requestedStatus &&
+    !(OBSERVATION_STATUSES as readonly string[]).includes(requestedStatus)
+  ) {
+    return NextResponse.json({ message: "观察状态筛选条件不合法" }, { status: 400 });
+  }
+  const status = requestedStatus as ObservationStatus | undefined;
   try {
     const observations = await listObservations({ childId, status: status || undefined });
     return NextResponse.json({ observations });

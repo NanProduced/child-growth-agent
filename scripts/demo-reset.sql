@@ -39,6 +39,7 @@ where is_demo = true
 --    保留原文与 AI 草稿，仅清除确认结果、回到「待确认」状态。
 update observations
 set status = 'ai_organized',
+    agent_context = null,
     confirmed_content = null,
     confirmed_at = null,
     updated_at = now()

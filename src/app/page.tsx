@@ -52,7 +52,10 @@ export default async function DashboardPage() {
     observationsByChild.set(observation.child_id, childObservations);
   }
   const totalObs = observations.length;
+  const pendingDraft = observations.filter((o) => o.status === 'draft').length;
+  const pendingInput = observations.filter((o) => o.status === 'needs_input').length;
   const pendingConfirm = observations.filter((o) => o.status === 'ai_organized').length;
+  const pendingReview = pendingDraft + pendingInput + pendingConfirm;
   const confirmedObservations = observations.filter(
     (o) => o.status === 'confirmed' && o.confirmed_content,
   );
@@ -83,6 +86,12 @@ export default async function DashboardPage() {
             <Link href="/observations?status=ai_organized">
               <UserCheck className="size-4" />
               待我确认（{pendingConfirm}）
+            </Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link href="/observations?status=needs_input">
+              <ClipboardList className="size-4" />
+              待补充信息（{pendingInput}）
             </Link>
           </Button>
         </div>
@@ -124,14 +133,12 @@ export default async function DashboardPage() {
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription className="flex items-center gap-1">
-                  <UserCheck className="size-4" /> 待教师确认
+                  <UserCheck className="size-4" /> 待教师处理
                 </CardDescription>
-                <CardTitle className="text-2xl">{pendingConfirm}</CardTitle>
+                <CardTitle className="text-2xl">{pendingReview}</CardTitle>
               </CardHeader>
               <CardContent className="text-xs text-slate-500">
-                <Link href="/observations?status=ai_organized" className="hover:underline">
-                  查看待确认记录 →
-                </Link>
+                <span>待判断 {pendingDraft} · 待补充 {pendingInput} · 待确认 {pendingConfirm}</span>
               </CardContent>
             </Card>
             <Card>
@@ -222,7 +229,7 @@ export default async function DashboardPage() {
                   const childObservations = observationsByChild.get(child.id) ?? [];
                   const latest = childObservations[0];
                   const pendingCount = childObservations.filter(
-                    (observation) => observation.status === 'ai_organized',
+                    (observation) => observation.status !== 'confirmed',
                   ).length;
                   let warmLabel = '正在了解';
                   if (childObservations.length > 0) {
@@ -269,7 +276,7 @@ export default async function DashboardPage() {
                             <span className="text-slate-500">观察 {childObservations.length} 条</span>
                             {pendingCount > 0 ? (
                               <Badge variant="secondary" className="bg-amber-100 text-amber-800">
-                                待确认 {pendingCount} 条
+                                待处理 {pendingCount} 条
                               </Badge>
                             ) : (
                               <span className="text-slate-400">暂无待确认</span>

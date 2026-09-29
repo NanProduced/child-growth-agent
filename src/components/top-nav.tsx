@@ -71,7 +71,7 @@ export function TopNav() {
 
   return (
     <header className="sticky top-0 z-40 border-b bg-white/90 backdrop-blur">
-      <div className="mx-auto flex h-14 w-full max-w-5xl items-center gap-2 px-4">
+      <div className="mx-auto flex h-14 w-full max-w-5xl items-center gap-1 px-4 sm:gap-2">
         <Link href="/" className="mr-2 flex shrink-0 items-center gap-2">
           <span className="flex size-8 items-center justify-center rounded-lg bg-amber-100 text-amber-600">
             <GraduationCap className="size-5" />
@@ -79,12 +79,13 @@ export function TopNav() {
           <span className="hidden text-sm font-semibold sm:inline">幼儿成长观察</span>
         </Link>
 
-        <nav className="flex flex-1 items-center gap-1 overflow-x-auto">
+        <nav className="min-w-0 flex flex-1 items-center gap-0 overflow-hidden sm:gap-1">
           {NAV.map((item) => (
             <Link
               key={item.href}
               href={item.href}
-              className={`flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm transition-colors ${
+              aria-label={item.label}
+              className={`flex shrink-0 items-center gap-1.5 rounded-md px-1 py-1.5 text-sm transition-colors sm:px-2.5 ${
                 isActive(item.href)
                   ? "bg-amber-100 font-medium text-amber-800"
                   : "text-slate-600 hover:bg-slate-100"

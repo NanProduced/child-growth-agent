@@ -29,15 +29,15 @@ export async function POST(
     if (!observation) {
       return NextResponse.json({ message: "观察记录不存在" }, { status: 404 });
     }
-    if (observation.status === "draft") {
-      return NextResponse.json(
-        { message: "请先生成并核对 AI 整理草稿，再进行确认归档。" },
-        { status: 409 }
-      );
-    }
     if (observation.status === "confirmed") {
       return NextResponse.json(
         { message: "该记录已确认归档，无需重复确认。" },
+        { status: 409 }
+      );
+    }
+    if (observation.status !== "ai_organized") {
+      return NextResponse.json(
+        { message: "请先生成并核对 AI 整理草稿，再进行确认归档。" },
         { status: 409 }
       );
     }

@@ -33,6 +33,30 @@ export const createObservationSchema = z.object({
   raw_text: z.string().min(10, "观察原文至少 10 个字").max(5000, "观察原文最长 5000 字"),
 });
 
+export const followUpDecisionSchema = z.discriminatedUnion("decision", [
+  z.object({
+    decision: z.literal("ask"),
+    question: z.string().min(1, "追问内容不能为空").max(300),
+    reason: z.string().min(1, "追问原因不能为空").max(500),
+  }),
+  z.object({
+    decision: z.literal("proceed"),
+    question: z.string().max(300),
+    reason: z.string().min(1, "判断原因不能为空").max(500),
+  }),
+]);
+
+export const followUpActionSchema = z
+  .object({
+    action: z.enum(["answer", "skip", "stop"]),
+    content: z.string().max(2000).optional().default(""),
+  })
+  .superRefine((value, ctx) => {
+    if (value.action === "answer" && !value.content.trim()) {
+      ctx.addIssue({ code: "custom", path: ["content"], message: "请填写补充信息，或选择跳过/停止追问" });
+    }
+  });
+
 export const confirmObservationSchema = z.object({
   content: observationDraftSchema,
   teacher_note: z.string().max(500).optional(),

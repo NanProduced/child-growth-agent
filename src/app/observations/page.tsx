@@ -18,7 +18,8 @@ export const metadata: Metadata = {
 
 const TABS: { key: ObservationStatus | 'all'; label: string }[] = [
   { key: 'all', label: '全部' },
-  { key: 'draft', label: '待 AI 整理' },
+  { key: 'draft', label: '待判断' },
+  { key: 'needs_input', label: '待补充信息' },
   { key: 'ai_organized', label: '待确认' },
   { key: 'confirmed', label: '已确认' },
 ];
@@ -29,7 +30,7 @@ export default async function ObservationsPage({
   searchParams: Promise<{ status?: string }>;
 }) {
   const { status } = await searchParams;
-  const valid: ObservationStatus[] = ['draft', 'ai_organized', 'confirmed'];
+  const valid: ObservationStatus[] = ['draft', 'needs_input', 'ai_organized', 'confirmed'];
   const active = valid.includes(status as ObservationStatus)
     ? (status as ObservationStatus)
     : 'all';

@@ -46,7 +46,7 @@ export const children = pgTable(
 
 /**
  * 观察记录
- * status 生命周期：draft(原文已保存) -> ai_organized(AI 已整理待确认) -> confirmed(教师已确认)
+ * status 生命周期：draft(原文已保存) -> needs_input(等待必要补充) -> ai_organized(AI 已整理待确认) -> confirmed(教师已确认)
  * raw_text 为教师原文，确认流程不修改原文；AI 草稿与教师确认稿分列保存，便于追溯。
  */
 export const observations = pgTable(
@@ -62,6 +62,7 @@ export const observations = pgTable(
     context: varchar("context", { length: 200 }),
     raw_text: text("raw_text").notNull(),
     status: varchar("status", { length: 20 }).notNull().default("draft"),
+    agent_context: jsonb("agent_context"),
     ai_draft: jsonb("ai_draft"),
     ai_model: varchar("ai_model", { length: 80 }),
     ai_organized_at: timestamp("ai_organized_at", { withTimezone: true }),

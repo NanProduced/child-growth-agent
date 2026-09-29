@@ -1,4 +1,31 @@
-export type ObservationStatus = "draft" | "ai_organized" | "confirmed";
+export const OBSERVATION_STATUSES = ["draft", "needs_input", "ai_organized", "confirmed"] as const;
+export type ObservationStatus = (typeof OBSERVATION_STATUSES)[number];
+
+export type FollowUpAction = "answer" | "skip" | "stop";
+
+export interface AgentFollowUpAnswer {
+  action: FollowUpAction;
+  content: string;
+  created_at: string;
+}
+
+export interface AgentFollowUp {
+  round: number;
+  question: string;
+  reason: string;
+  answers: AgentFollowUpAnswer[];
+  stopped: boolean;
+}
+
+export interface AgentContext {
+  follow_up?: AgentFollowUp;
+}
+
+export interface FollowUpDecision {
+  decision: "ask" | "proceed";
+  question: string;
+  reason: string;
+}
 
 export const FIVE_DOMAINS = ["健康", "语言", "社会", "科学", "艺术"] as const;
 
@@ -36,6 +63,7 @@ export interface Observation {
   context: string | null;
   raw_text: string;
   status: ObservationStatus;
+  agent_context: AgentContext | null;
   ai_draft: ObservationDraft | null;
   ai_model: string | null;
   ai_organized_at: string | null;

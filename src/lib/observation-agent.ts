@@ -1,0 +1,100 @@
+import { judgeFollowUp, organizeObservation } from "./ai";
+import { invokeLlm } from "./llm";
+import {
+  updateObservationAgentContext,
+  updateObservationAiDraft,
+} from "./queries";
+import type {
+  AgentContext,
+  Child,
+  FollowUpAction,
+  FollowUpDecision,
+  Observation,
+} from "./types";
+
+export function appendFollowUpAction(
+  context: AgentContext,
+  action: FollowUpAction,
+  content: string,
+  createdAt = new Date().toISOString(),
+): AgentContext {
+  if (!context.follow_up) throw new Error("当前没有待补充问题");
+  return {
+    ...context,
+    follow_up: {
+      ...context.follow_up,
+      answers: [
+        ...context.follow_up.answers,
+        { action, content: content.trim(), created_at: createdAt },
+      ],
+      stopped: context.follow_up.stopped || action === "stop",
+    },
+  };
+}
+
+export function nextFollowUpContext(
+  context: AgentContext | null,
+  decision: FollowUpDecision,
+): AgentContext {
+  const previous = context?.follow_up;
+  return {
+    ...(context ?? {}),
+    follow_up: {
+      round: (previous?.round ?? 0) + 1,
+      question: decision.question,
+      reason: decision.reason,
+      answers: previous?.answers ?? [],
+      stopped: false,
+    },
+  };
+}
+
+/** 已跳过、停止或完成两轮后，禁止再次追问，直接进入草稿整理。 */
+export function shouldProceedToDraft(context: AgentContext | null): boolean {
+  const followUp = context?.follow_up;
+  if (!followUp) return false;
+  const lastAction = followUp.answers.at(-1)?.action;
+  return followUp.stopped || followUp.round >= 2 || lastAction === "skip";
+}
+
+type ObservationAgentInput = {
+  observation: Observation;
+  child: Child;
+  forwardHeaders?: Record<string, string>;
+  invoke?: typeof invokeLlm;
+};
+
+export async function processObservationAgent({
+  observation,
+  child,
+  forwardHeaders,
+  invoke = invokeLlm,
+}: ObservationAgentInput): Promise<Observation> {
+  const baseParams = {
+    childName: child.name,
+    childGender: child.gender,
+    childBirthDate: child.birth_date,
+    observedAt: observation.observed_at,
+    context: observation.context,
+    rawText: observation.raw_text,
+    forwardHeaders,
+  };
+  const context = observation.agent_context;
+
+  if (!shouldProceedToDraft(context)) {
+    const judged = await judgeFollowUp({ ...baseParams, agentContext: context }, invoke);
+    if (judged.decision.decision === "ask" && (context?.follow_up?.round ?? 0) < 2) {
+      return updateObservationAgentContext(
+        observation.id,
+        nextFollowUpContext(context, judged.decision),
+        "needs_input",
+      );
+    }
+  }
+
+  const { draft, model } = await organizeObservation(
+    { ...baseParams, agentContext: context },
+    invoke,
+  );
+  return updateObservationAiDraft(observation.id, draft, model);
+}
