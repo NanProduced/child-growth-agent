@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { ArrowUpRight, ClipboardCheck, Leaf, Sparkles, Sprout, UserPlus } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AiBadge, DemoBadge } from '@/components/status-badges';
+import { AiBadge } from '@/components/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -110,7 +110,6 @@ export default async function ActivitiesPage() {
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <h2 className="font-semibold text-slate-900">{child.name}</h2>
-                        {child.is_demo ? <DemoBadge /> : null}
                       </div>
                       <p className="mt-1 text-sm text-slate-500">
                         {classLabel(child.class_stage, child.class_name) ?? '未分班'} ·{' '}

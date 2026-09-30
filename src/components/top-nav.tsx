@@ -85,7 +85,7 @@ export function TopNav() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-amber-100/80 bg-white/90 backdrop-blur">
-      <div className="mx-auto flex h-14 w-full max-w-5xl items-center gap-1 px-4 sm:gap-2">
+      <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-1 px-4 sm:gap-2 lg:px-8">
         <Link href="/" className="mr-2 flex shrink-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2">
           <span className="flex size-8 items-center justify-center rounded-lg bg-amber-100 text-amber-600">
             <GraduationCap className="size-5" />

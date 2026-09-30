@@ -17,7 +17,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
+import { AiBadge, StatusBadge } from '@/components/status-badges';
 import {
   ageText,
   classLabel,
@@ -263,7 +263,6 @@ export default async function ChildDetailPage({
                     查看班级
                   </Link>
                 ) : null}
-                {child.is_demo ? <DemoBadge /> : null}
               </div>
               <p className="mt-1 text-sm text-slate-500">
                 出生日期 {formatDateCn(child.birth_date)} · 当前 {ageText(child.birth_date)}

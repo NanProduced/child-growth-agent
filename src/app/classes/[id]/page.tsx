@@ -14,7 +14,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
+import { AiBadge, StatusBadge } from '@/components/status-badges';
 import { ageText, excerpt, formatDateCn } from '@/lib/format';
 import { getClass, getClassChildren, listObservations } from '@/lib/queries';
 import {
@@ -199,7 +199,6 @@ export default async function ClassDetailPage({
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <span className="font-medium text-slate-900">{child.name}</span>
-                            {child.is_demo ? <DemoBadge /> : null}
                           </div>
                           <p className="mt-0.5 text-xs text-slate-500">{ageText(child.birth_date)}</p>
                         </div>

@@ -30,7 +30,6 @@ export function StatusBadge({ status }: { status: ObservationStatus }) {
     </Badge>
   );
 }
-
 /** 按参赛要求：所有 AI 生成的可见内容需明确标记 */
 export function AiBadge() {
   return (
@@ -41,18 +40,6 @@ export function AiBadge() {
     >
       <Sparkles className="size-3" />
       AI 生成
-    </Badge>
-  );
-}
-
-export function DemoBadge() {
-  return (
-    <Badge
-      variant="outline"
-      className="border-slate-300 bg-slate-50 text-slate-500"
-      title="演示用合成数据，非真实幼儿信息"
-    >
-      合成数据
     </Badge>
   );
 }

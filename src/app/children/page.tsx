@@ -6,7 +6,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { DemoBadge, StatusBadge } from '@/components/status-badges';
+import { StatusBadge } from '@/components/status-badges';
 import { ageText, classLabel, excerpt, formatDateCn } from '@/lib/format';
 import { listChildren, listClasses, listObservations } from '@/lib/queries';
 import type { Child, Observation, SchoolClass } from '@/lib/types';
@@ -66,7 +66,7 @@ export default async function ChildrenPage({
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">成长档案</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-            从最近一次观察回到每个小朋友的成长片段。演示档案均为合成数据。
+            从最近一次观察回到每个小朋友的成长片段。
           </p>
         </div>
         <Button asChild className="w-full sm:w-auto">
@@ -174,7 +174,6 @@ export default async function ChildrenPage({
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <h2 className="font-semibold text-slate-900">{child.name}</h2>
-                          {child.is_demo ? <DemoBadge /> : null}
                         </div>
                         <p className="mt-1 text-sm text-slate-500">
                           {classLabel(child.class_stage, child.class_name) ?? '未分班'} ·{' '}

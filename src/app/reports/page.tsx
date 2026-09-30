@@ -13,7 +13,7 @@ import {
 
 import { DraftView } from '@/components/draft-view';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AiBadge, DemoBadge } from '@/components/status-badges';
+import { AiBadge } from '@/components/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -164,7 +164,6 @@ export default async function ReportsPage({
                     <Badge variant="secondary">
                       {classLabel(selected.class_stage, selected.class_name) ?? '未分班'}
                     </Badge>
-                    {selected.is_demo ? <DemoBadge /> : null}
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-600">
                     <Badge

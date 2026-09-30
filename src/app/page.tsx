@@ -10,7 +10,6 @@ import {
   CircleAlert,
   ClipboardCheck,
   Clock3,
-  Info,
   ListTodo,
   PenLine,
   Sprout,
@@ -21,7 +20,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
+import { AiBadge, StatusBadge } from '@/components/status-badges';
 import { classLabel, excerpt, formatDateCn, schoolClassLabel } from '@/lib/format';
 import { listChildren, listClasses, listObservations } from '@/lib/queries';
 import type { Child, Observation, SchoolClass } from '@/lib/types';
@@ -400,7 +399,6 @@ export default async function DashboardPage() {
                             <span className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
                               <span>{formatDateCn(observation.observed_at)}</span>
                               {observation.observed_class ? <span>{schoolClassLabel(observation.observed_class)}</span> : null}
-                              {child?.is_demo ? <DemoBadge /> : null}
                             </span>
                             <span className="mt-1 block text-sm font-medium text-slate-800">
                               {child?.name ?? '未知幼儿'}
@@ -434,11 +432,6 @@ export default async function DashboardPage() {
             </section>
           </section>
 
-          <Alert className="bg-white/70">
-            <Info className="size-4" />
-            <AlertTitle>演示数据说明</AlertTitle>
-            <AlertDescription>页面中的合成数据已标注“合成数据”，不涉及真实幼儿信息。</AlertDescription>
-          </Alert>
         </>
       )}
     </div>

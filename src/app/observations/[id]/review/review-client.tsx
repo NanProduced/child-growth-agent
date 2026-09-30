@@ -16,7 +16,7 @@ import {
 import { toast } from 'sonner';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
+import { AiBadge, StatusBadge } from '@/components/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { DraftView } from '@/components/draft-view';
 import { Button } from '@/components/ui/button';
@@ -279,7 +279,6 @@ export function ReviewClient({
             <CardTitle className="text-base">
               {child.name} · {formatDateCn(observation.observed_at)}
             </CardTitle>
-            {observation.is_demo ? <DemoBadge /> : null}
             <span className="ml-auto flex items-center gap-2">
               <StatusBadge status={status} />
             </span>
