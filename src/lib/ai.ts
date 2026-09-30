@@ -1,9 +1,11 @@
 import { COZE_ORGANIZE_MODEL, getLlmProvider, invokeLlm } from "./llm";
 import type { LlmMessage, LlmResult, LlmResponseType } from "./llm";
 import type {
+  ActivitySupportDraft,
   AgentContext,
   FollowUpDecision,
   GrowthProfileDraft,
+  GrowthProfile,
   Observation,
   ObservationDraft,
   TeacherEditContent,
@@ -11,6 +13,7 @@ import type {
 } from "./types";
 import {
   followUpDecisionSchema,
+  activitySupportDraftSchema,
   observationDraftSchema,
   teacherEditReviewSchema,
   growthProfileSchema,
@@ -79,7 +82,29 @@ export const GROWTH_PROFILE_SYSTEM_PROMPT = `你是幼儿园教师的成长档�
 输出结构：
 {"summary":"string","recent_change":"string","development_clues":["string"],"next_support":"string","next_focus":"string"}`;
 
-const GROWTH_PROFILE_FORBIDDEN_TERMS = [
+export const ACTIVITY_SUPPORT_SYSTEM_PROMPT = `你是幼儿园教师的活动支持建议助手，熟悉《3-6岁儿童学习与发展指南》。
+你的任务是根据同一个幼儿已经由教师确认的观察证据和已确认的成长档案小结，给教师提供少量、具体、可执行的活动支持建议。
+
+硬性要求：
+1. 只使用输入中 status=confirmed 且有 confirmed_content 的观察，以及明确标记为已确认来源的成长档案小结；不得使用 draft、needs_input、ai_organized、ai_draft 或教师未确认的内容。
+2. 只生成 2 到 3 条建议。每条 steps 必须是 2 到 4 个教师可以直接照做的简单步骤。
+3. materials 没有特别材料时输出空数组；不要为了凑内容添加复杂或昂贵材料。
+4. observe 必须写教师可以继续观察的具体行为、语言或互动；adaptation 必须写根据幼儿当下反应如何降低难度、增加选择或改变支持方式。
+5. evidence 至少包含一条证据线索，并以输入中出现的观察领域开头（例如“科学：……”）；证据应来自已确认观察中的具体行为或语言，不得虚构。
+6. 不生成医疗诊断、心理诊断、能力评分、排名、等级、同龄比较或优劣判断，不使用含义相同的评判性表达。
+7. 全部使用中文，只输出一个 JSON 对象，不要解释文字或代码块标记。
+
+输出结构：
+{"suggestions":[{"title":"string","purpose":"string","steps":["string"],"materials":["string"],"observe":"string","adaptation":"string","evidence":["string"]}]}`;
+
+const DEVELOPMENT_FORBIDDEN_TERMS = [
+  "自闭症",
+  "多动症",
+  "注意力缺陷",
+  "抑郁",
+  "焦虑",
+  "智商",
+  "智力低下",
   "诊断",
   "评分",
   "得分",
@@ -94,6 +119,8 @@ const GROWTH_PROFILE_FORBIDDEN_TERMS = [
   "同龄比较",
   "同龄人比较",
 ] as const;
+
+const GROWTH_PROFILE_FORBIDDEN_TERMS = DEVELOPMENT_FORBIDDEN_TERMS;
 
 function ageMonths(birthDate: string, observedAt: string): number {
   const b = new Date(`${birthDate}T00:00:00`);
@@ -192,6 +219,14 @@ export interface GrowthProfileParams {
   forwardHeaders?: Record<string, string>;
 }
 
+export interface ActivitySupportParams {
+  childName: string;
+  childGender: string;
+  observations: Observation[];
+  growthProfile?: GrowthProfile | null;
+  forwardHeaders?: Record<string, string>;
+}
+
 /** 组装教师修改审核消息：事实、旧草稿、修改内容和备注分区传给 Agent。 */
 export function buildTeacherEditReviewMessages(params: TeacherEditReviewParams): LlmMessage[] {
   const userPrompt = [
@@ -236,6 +271,59 @@ export function buildGrowthProfileMessages(params: GrowthProfileParams): LlmMess
 
   return [
     { role: "system", content: GROWTH_PROFILE_SYSTEM_PROMPT },
+    { role: "user", content: userPrompt },
+  ];
+}
+
+function confirmedObservations(observations: Observation[]): Observation[] {
+  return observations.filter(
+    (observation) => observation.status === "confirmed" && observation.confirmed_content,
+  );
+}
+
+function supportedGrowthProfile(
+  profile: GrowthProfile | null | undefined,
+  observations: Observation[],
+): GrowthProfile | null {
+  if (!profile || !Array.isArray(profile.source_observation_ids) || profile.source_observation_ids.length === 0) {
+    return null;
+  }
+  const confirmedIds = new Set(confirmedObservations(observations).map((observation) => observation.id));
+  return profile.source_observation_ids.every((id) => confirmedIds.has(id)) ? profile : null;
+}
+
+/** 组装活动支持任务：只携带确认观察和仍有确认来源的成长小结。 */
+export function buildActivitySupportMessages(params: ActivitySupportParams): LlmMessage[] {
+  const confirmed = confirmedObservations(params.observations);
+  const evidence = confirmed.map((observation) => ({
+    status: observation.status,
+    id: observation.id,
+    observed_at: observation.observed_at,
+    context: observation.context,
+    raw_text: observation.raw_text,
+    confirmed_content: observation.confirmed_content,
+  }));
+  const profile = supportedGrowthProfile(params.growthProfile, params.observations);
+  const confirmedProfile = profile
+    ? {
+        summary: profile.summary,
+        recent_change: profile.recent_change,
+        development_clues: profile.development_clues,
+        next_support: profile.next_support,
+        next_focus: profile.next_focus,
+      }
+    : "暂无可用的已确认成长小结";
+  const userPrompt = [
+    `幼儿：${params.childName}（${params.childGender}）`,
+    "已确认成长档案小结（只可作为已确认观察的归纳，不是新的事实）：",
+    JSON.stringify(confirmedProfile),
+    "以下是可使用的已确认观察证据。每条记录都必须保持 status=confirmed：",
+    JSON.stringify(evidence),
+    "请生成 2 到 3 条活动支持建议，只输出 activity_support JSON。",
+  ].join("\n");
+
+  return [
+    { role: "system", content: ACTIVITY_SUPPORT_SYSTEM_PROMPT },
     { role: "user", content: userPrompt },
   ];
 }
@@ -347,6 +435,26 @@ function validateGrowthProfileOutput(profile: GrowthProfileDraft): string | unde
   return forbidden ? `成长档案输出包含不允许的定性词「${forbidden}」` : undefined;
 }
 
+function validateActivitySupportOutput(
+  output: ActivitySupportDraft,
+  observations: Observation[],
+): string | undefined {
+  const text = JSON.stringify(output);
+  const forbidden = DEVELOPMENT_FORBIDDEN_TERMS.find((term) => text.includes(term));
+  if (forbidden) return `活动支持建议包含不允许的定性词「${forbidden}」`;
+
+  const domains = new Set(
+    confirmedObservations(observations)
+      .map((observation) => observation.confirmed_content?.domain)
+      .filter((domain): domain is string => Boolean(domain)),
+  );
+  if (domains.size === 0) return "已确认观察缺少可追溯的观察领域";
+  if (output.suggestions.some((suggestion) => !suggestion.evidence.some((item) => [...domains].some((domain) => item.includes(domain))))) {
+    return "每条活动建议都必须带有对应的已确认观察领域证据";
+  }
+  return undefined;
+}
+
 export async function generateGrowthProfile(
   params: GrowthProfileParams,
   invoke: typeof invokeLlm = invokeLlm,
@@ -369,4 +477,26 @@ export async function generateGrowthProfile(
     validateGrowthProfileOutput,
   );
   return { profile: result.data, model: result.model };
+}
+
+export async function generateActivitySupport(
+  params: ActivitySupportParams,
+  invoke: typeof invokeLlm = invokeLlm,
+): Promise<{ activitySupport: ActivitySupportDraft; model: string }> {
+  const confirmed = confirmedObservations(params.observations);
+  if (confirmed.length === 0) {
+    throw new Error("活动支持建议需要至少一条已确认观察");
+  }
+
+  const result = await invokeStructured(
+    buildActivitySupportMessages({ ...params, observations: confirmed }),
+    "activity_support",
+    activitySupportDraftSchema,
+    "请严格输出 2 到 3 条 activity_support 建议；每条必须有 2 到 4 个步骤、观察提示、调整方式和带观察领域的证据线索，并移除诊断、评分、排名和同龄比较用语。",
+    invoke,
+    params.forwardHeaders,
+    "活动支持 Agent",
+    (output) => validateActivitySupportOutput(output, confirmed),
+  );
+  return { activitySupport: result.data, model: result.model };
 }

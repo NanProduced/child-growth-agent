@@ -84,6 +84,32 @@ export const growthProfileSchema = z
   })
   .strict();
 
+const activitySupportSuggestionSchema = z
+  .object({
+    title: z.string().min(1, "活动名称不能为空").max(120),
+    purpose: z.string().min(1, "支持意图不能为空").max(500),
+    steps: z.array(z.string().min(1).max(300)).min(2).max(4),
+    materials: z.array(z.string().min(1).max(100)).max(8),
+    observe: z.string().min(1, "观察提示不能为空").max(500),
+    adaptation: z.string().min(1, "调整方式不能为空").max(500),
+    evidence: z.array(z.string().min(1).max(300)).min(1).max(4),
+  })
+  .strict();
+
+export const activitySupportDraftSchema = z
+  .object({
+    suggestions: z.array(activitySupportSuggestionSchema).min(2).max(3),
+  })
+  .strict();
+
+export const activitySupportSchema = activitySupportDraftSchema
+  .extend({
+    source_observation_ids: z.array(z.string().min(1)).min(1),
+    ai_model: z.string().min(1).max(100),
+    generated_at: z.string().min(1).max(100),
+  })
+  .strict();
+
 export const confirmObservationSchema = z.object({
   content: observationDraftSchema,
   teacher_note: z.string().max(500).optional(),
