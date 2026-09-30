@@ -9,6 +9,7 @@ import {
   FileText,
   Loader2,
   Lock,
+  MessageCircle,
   Quote,
   RefreshCw,
   Sparkles,
@@ -40,7 +41,18 @@ import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
 import { formatDateCn, formatDateTimeCn } from '@/lib/format';
-import { FIVE_DOMAINS, type Child, type Observation, type ObservationDraft } from '@/lib/types';
+import { sameTeacherEditContent } from '@/lib/teacher-edit-review';
+import {
+  FIVE_DOMAINS,
+  type AgentContext,
+  type Child,
+  type FollowUpAction,
+  type Observation,
+  type ObservationDraft,
+  type TeacherEditContent,
+  type TeacherEditReview,
+  type TeacherEditReviewOutput,
+} from '@/lib/types';
 
 interface DraftForm {
   domain: string;
@@ -63,6 +75,17 @@ function draftToForm(d: ObservationDraft | null): DraftForm | null {
     highlightText: d.highlights.join('\n'),
     suggestionText: d.support_suggestions.join('\n'),
     highlight_quote: d.highlight_quote,
+  };
+}
+
+function formToContent(form: DraftForm): TeacherEditContent {
+  return {
+    domain: form.domain,
+    sub_domain: form.sub_domain.trim(),
+    objective_description: form.objective_description.trim(),
+    highlights: toLines(form.highlightText),
+    support_suggestions: toLines(form.suggestionText),
+    highlight_quote: form.highlight_quote.trim(),
   };
 }
 
@@ -95,7 +118,7 @@ function DraftView({ draft }: { draft: ObservationDraft }) {
         </ul>
       </div>
       {draft.highlight_quote ? (
-        <div className="rounded-lg border-l-4 border-amber-300 bg-amber-50 px-3 py-2 text-slate-700">
+        <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-amber-900">
           <Quote className="mb-1 inline size-3.5 text-amber-500" /> {draft.highlight_quote}
         </div>
       ) : null}
@@ -127,13 +150,28 @@ export function ReviewClient({
   const [aiModel, setAiModel] = useState(observation.ai_model);
   const [organizedAt, setOrganizedAt] = useState(observation.ai_organized_at);
   const [aiDraft, setAiDraft] = useState<ObservationDraft | null>(observation.ai_draft);
+  const [agentContext, setAgentContext] = useState<AgentContext | null>(observation.agent_context);
+  const [teacherEditReview, setTeacherEditReview] = useState<TeacherEditReview | null>(
+    observation.agent_context?.teacher_edit_review ?? null,
+  );
   const [form, setForm] = useState<DraftForm | null>(draftToForm(observation.ai_draft));
   const [teacherNote, setTeacherNote] = useState(
     observation.confirmed_content?.teacher_note ?? ''
   );
-  const [busy, setBusy] = useState<null | 'organize' | 'confirm'>(null);
+  const [followUpContent, setFollowUpContent] = useState('');
+  const [busy, setBusy] = useState<null | 'organize' | 'follow-up' | 'confirm'>(null);
 
   const teacherReady = configured && isTeacher;
+
+  function applyObservation(updated: Observation) {
+    setAgentContext(updated.agent_context);
+    setTeacherEditReview(updated.agent_context?.teacher_edit_review ?? null);
+    setAiDraft(updated.ai_draft);
+    setForm(draftToForm(updated.ai_draft));
+    setAiModel(updated.ai_model);
+    setOrganizedAt(updated.ai_organized_at);
+    setStatus(updated.status);
+  }
 
   async function handleOrganize() {
     setBusy('organize');
@@ -149,12 +187,12 @@ export function ReviewClient({
         throw new Error(data.message ?? 'AI 整理失败，请稍后重试');
       }
       const updated = data.observation;
-      setAiDraft(updated.ai_draft);
-      setForm(draftToForm(updated.ai_draft));
-      setAiModel(updated.ai_model);
-      setOrganizedAt(updated.ai_organized_at);
-      setStatus(updated.status);
-      toast.success('AI 整理完成，请核对后确认归档');
+      applyObservation(updated);
+      if (updated.status === 'needs_input') {
+        toast.info('这条观察还缺一项必要信息，请补充或选择跳过。');
+      } else {
+        toast.success('AI 整理完成，请核对后确认归档');
+      }
       router.refresh();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'AI 整理失败，请稍后重试');
@@ -163,19 +201,42 @@ export function ReviewClient({
     }
   }
 
+  async function handleFollowUp(action: FollowUpAction) {
+    setBusy('follow-up');
+    try {
+      const res = await fetch(`/api/observations/${observation.id}/follow-up`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          content: action === 'answer' ? followUpContent.trim() : '',
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        observation?: Observation;
+        message?: string;
+      };
+      if (!res.ok || !data.observation) {
+        throw new Error(data.message ?? '补充信息处理失败，请稍后重试');
+      }
+      applyObservation(data.observation);
+      setFollowUpContent('');
+      if (data.observation.status === 'needs_input') {
+        toast.info('已记录补充信息，Agent 还有一个必要问题。');
+      } else {
+        toast.success('已按当前信息生成 AI 整理草稿');
+      }
+      router.refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '补充信息处理失败，请稍后重试');
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function handleConfirm() {
     if (!form) return;
-    const payload = {
-      content: {
-        domain: form.domain,
-        sub_domain: form.sub_domain.trim(),
-        objective_description: form.objective_description.trim(),
-        highlights: toLines(form.highlightText),
-        support_suggestions: toLines(form.suggestionText),
-        highlight_quote: form.highlight_quote.trim(),
-      },
-      teacher_note: teacherNote.trim() || undefined,
-    };
+    const payload = { content: formToContent(form), teacher_note: teacherNote.trim() || undefined };
     if (!payload.content.sub_domain || !payload.content.objective_description) {
       toast.error('请补全子领域与发展表现说明');
       return;
@@ -194,11 +255,32 @@ export function ReviewClient({
       const data = (await res.json().catch(() => ({}))) as {
         observation?: Observation;
         message?: string;
+        requiresAgentConfirmation?: boolean;
+        agentReview?: TeacherEditReviewOutput;
+        profileUpdateStatus?: 'updated' | 'failed';
+        profileUpdateMessage?: string;
       };
       if (!res.ok || !data.observation) {
         throw new Error(data.message ?? '确认归档失败，请稍后重试');
       }
-      toast.success('已确认归档，内容进入幼儿正册');
+      if (data.requiresAgentConfirmation) {
+        setAgentContext(data.observation.agent_context);
+        setTeacherEditReview(data.observation.agent_context?.teacher_edit_review ?? null);
+        setStatus(data.observation.status);
+        toast.info(
+          data.agentReview?.decision === 'clarify'
+            ? 'Agent 需要你进一步澄清这处修改。'
+            : 'Agent 已完成修改审核，请进行最终归档。',
+        );
+        return;
+      }
+      if (data.profileUpdateStatus === 'failed') {
+        toast.info(data.profileUpdateMessage ?? '观察已确认，成长档案暂未更新，请稍后重试。');
+      } else if (data.profileUpdateStatus === 'updated') {
+        toast.success('已确认归档，成长档案已更新');
+      } else {
+        toast.success('已确认归档，内容进入幼儿正册');
+      }
       router.push(`/children/${child.id}`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '确认归档失败，请稍后重试');
@@ -210,8 +292,21 @@ export function ReviewClient({
   const updateForm = (patch: Partial<DraftForm>) =>
     setForm((prev) => (prev ? { ...prev, ...patch } : prev));
 
+  const workflowStage = status === 'draft' ? 0 : status === 'needs_input' ? 1 : status === 'ai_organized' ? 2 : 3;
+  const workflowSteps = ['已保存', '补充信息（按需）', 'AI 整理', '教师确认'];
+  const followUp = agentContext?.follow_up;
+  const currentContent = form ? formToContent(form) : null;
+  const contentChanged = Boolean(
+    currentContent && observation.ai_draft && !sameTeacherEditContent(observation.ai_draft, currentContent),
+  );
+  const reviewMatchesCurrent = Boolean(
+    currentContent &&
+      teacherEditReview &&
+      sameTeacherEditContent(teacherEditReview.content_snapshot, currentContent),
+  );
+
   return (
-    <div className="mx-auto max-w-2xl space-y-5">
+    <div className="mx-auto max-w-3xl space-y-6">
       <Button asChild variant="ghost" size="sm" className="-ml-2">
         <Link href={`/children/${child.id}`}>
           <ArrowLeft className="size-4" />
@@ -219,8 +314,8 @@ export function ReviewClient({
         </Link>
       </Button>
 
-      <Card>
-        <CardHeader className="pb-3">
+      <Card className="border-slate-200/90">
+        <CardHeader className="border-b bg-slate-50/60 pb-4">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-2xl">{child.avatar_emoji ?? '🧒'}</span>
             <CardTitle className="text-base">
@@ -237,7 +332,7 @@ export function ReviewClient({
         </CardHeader>
         <CardContent className="space-y-1.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
-            <FileText className="size-3.5" />
+            <FileText className="size-3.5 text-emerald-700" />
             观察原文（保存后不可修改，作为追溯依据）
           </div>
           <p className="whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-sm leading-7 text-slate-700">
@@ -245,6 +340,29 @@ export function ReviewClient({
           </p>
         </CardContent>
       </Card>
+
+      <div aria-label="观察处理进度" className="rounded-xl border bg-white p-3">
+        <div className="flex flex-wrap gap-2">
+          {workflowSteps.map((step, index) => (
+            <span
+              key={step}
+              aria-current={index === workflowStage ? 'step' : undefined}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs ${
+                index === workflowStage
+                  ? 'bg-emerald-100 font-medium text-emerald-800'
+                  : index < workflowStage
+                    ? 'bg-slate-100 text-slate-600'
+                    : 'text-slate-400'
+              }`}
+            >
+              <span className="flex size-4 items-center justify-center rounded-full bg-white/80 text-[10px]" aria-hidden="true">
+                {index + 1}
+              </span>
+              {step}
+            </span>
+          ))}
+        </div>
+      </div>
 
       {authLoading ? (
         <div className="flex justify-center py-8 text-slate-400">
@@ -262,8 +380,70 @@ export function ReviewClient({
         </Alert>
       ) : null}
 
+      {status === 'needs_input' && followUp ? (
+        <Card className="border-sky-200 bg-sky-50/50">
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <MessageCircle className="size-5 text-sky-600" />
+              补充信息
+              <Badge variant="outline" className="font-normal text-sky-700">
+                第 {followUp.round} / 2 轮
+              </Badge>
+            </CardTitle>
+            <CardDescription>
+              Agent 只在补充内容会影响发展线索或支持建议时提问。原始观察保持不变。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="rounded-lg bg-white px-3 py-3">
+              <p className="font-medium leading-6 text-slate-800">{followUp.question}</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">为什么需要：{followUp.reason}</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="follow-up-content">教师补充（可跳过）</Label>
+              <Textarea
+                id="follow-up-content"
+                rows={3}
+                value={followUpContent}
+                onChange={(e) => setFollowUpContent(e.target.value)}
+                placeholder="写下你记得的具体行为、原话或支持方式"
+                maxLength={2000}
+              />
+            </div>
+          </CardContent>
+          {teacherReady ? (
+            <CardFooter className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+              <Button
+                className="w-full sm:w-auto"
+                onClick={() => void handleFollowUp('answer')}
+                disabled={busy !== null || !followUpContent.trim()}
+              >
+                {busy === 'follow-up' ? <Loader2 className="size-4 animate-spin" /> : null}
+                回答并继续
+              </Button>
+              <Button
+                variant="outline"
+                className="w-full sm:w-auto"
+                onClick={() => void handleFollowUp('skip')}
+                disabled={busy !== null}
+              >
+                跳过，直接整理
+              </Button>
+              <Button
+                variant="ghost"
+                className="w-full sm:w-auto"
+                onClick={() => void handleFollowUp('stop')}
+                disabled={busy !== null}
+              >
+                不再追问
+              </Button>
+            </CardFooter>
+          ) : null}
+        </Card>
+      ) : null}
+
       {status === 'confirmed' && confirmedContent ? (
-        <Card>
+        <Card className="border-emerald-200/90 bg-emerald-50/30">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <BadgeCheck className="size-5 text-emerald-600" />
@@ -281,13 +461,13 @@ export function ReviewClient({
       ) : null}
 
       {status === 'confirmed' && aiDraft ? (
-        <Card>
+        <Card className="border-violet-200/80 bg-violet-50/20">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm text-slate-600">
               <Sparkles className="size-4 text-violet-500" />
               追溯：AI 原始草稿（确认前版本）
             </CardTitle>
-            <CardDescription>保留 AI 草稿与教师确认稿，便于回顾整理过程。</CardDescription>
+            <CardDescription>AI 生成，仅为草稿；保留它与教师确认稿，便于回顾整理过程。</CardDescription>
           </CardHeader>
           <CardContent>
             <DraftView draft={aiDraft} />
@@ -295,8 +475,8 @@ export function ReviewClient({
         </Card>
       ) : null}
 
-      {status !== 'confirmed' && !form ? (
-        <Card>
+      {status !== 'confirmed' && status !== 'needs_input' && !form ? (
+        <Card className="border-violet-200/80 bg-violet-50/20">
           <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
             <Sparkles className="size-8 text-violet-400" />
             <div className="text-sm text-slate-600">
@@ -317,20 +497,29 @@ export function ReviewClient({
         </Card>
       ) : null}
 
-      {status !== 'confirmed' && form ? (
-        <Card>
+      {status === 'ai_organized' && form ? (
+        <Card className="border-amber-200/90">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <AiBadge />
               AI 整理草稿（教师可修改）
             </CardTitle>
             <CardDescription>
-              请核对以下内容，可直接修改；确认后进入正册。原文始终不可修改。
+              AI 生成，仅为草稿。请核对并按需要修改；确认后才进入正册，原文始终不可修改。
               {aiModel ? ` · 模型：${aiModel}` : ''}
               {organizedAt ? ` · 整理时间：${formatDateTimeCn(organizedAt)}` : ''}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {contentChanged && !reviewMatchesCurrent ? (
+              <Alert className="border-amber-200 bg-amber-50/70">
+                <Sparkles className="size-4 text-amber-600" />
+                <AlertTitle>检测到你修改了 AI 整理内容</AlertTitle>
+                <AlertDescription>
+                  提交后 Agent 会先核对修改与原始观察，再完成归档；教师备注单独变化不会触发这一步。
+                </AlertDescription>
+              </Alert>
+            ) : null}
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label>发展领域（五大领域）</Label>
@@ -361,8 +550,9 @@ export function ReviewClient({
             </div>
 
             <div className="space-y-1.5">
-              <Label>发展表现说明</Label>
+              <Label htmlFor="objective-description">发展表现说明</Label>
               <Textarea
+                id="objective-description"
                 rows={3}
                 value={form.objective_description}
                 onChange={(e) => updateForm({ objective_description: e.target.value })}
@@ -407,10 +597,11 @@ export function ReviewClient({
               />
             </div>
           </CardContent>
-          {teacherReady ? (
-            <CardFooter className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+          {teacherReady && !reviewMatchesCurrent ? (
+            <CardFooter className="flex flex-col gap-2 border-t bg-slate-50/50 sm:flex-row sm:justify-end">
               <Button
                 variant="outline"
+                className="w-full sm:w-auto"
                 onClick={() => void handleOrganize()}
                 disabled={busy !== null}
               >
@@ -421,14 +612,92 @@ export function ReviewClient({
                 )}
                 重新生成
               </Button>
-              <Button onClick={() => void handleConfirm()} disabled={busy !== null}>
+              <Button onClick={() => void handleConfirm()} disabled={busy !== null} className="w-full sm:w-auto">
                 {busy === 'confirm' ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
                   <BadgeCheck className="size-4" />
                 )}
-                确认归档
+                {contentChanged ? '提交修改审核' : '确认归档'}
               </Button>
+            </CardFooter>
+          ) : null}
+        </Card>
+      ) : null}
+
+      {status === 'ai_organized' && reviewMatchesCurrent && teacherEditReview ? (
+        <Card
+          className={
+            teacherEditReview.decision === 'accept'
+              ? 'border-emerald-200 bg-emerald-50/50'
+              : 'border-amber-200 bg-amber-50/60'
+          }
+        >
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              {teacherEditReview.decision === 'accept' ? (
+                <BadgeCheck className="size-5 text-emerald-600" />
+              ) : (
+                <MessageCircle className="size-5 text-amber-600" />
+              )}
+              <AiBadge />
+              Agent 修改审核
+            </CardTitle>
+            <CardDescription>
+              审核结果绑定当前教师修改内容；再次修改后需要重新审核。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm leading-6">
+            <div className="rounded-lg bg-white/75 px-3 py-2 font-medium text-slate-700">
+              {teacherEditReview.decision === 'accept'
+                ? '已理解这次修改，可以最终归档。'
+                : '需要澄清这次修改，再继续归档。'}
+            </div>
+            <p className="text-slate-700">{teacherEditReview.summary}</p>
+            {teacherEditReview.change_summary.length > 0 ? (
+              <div>
+                <div className="font-medium text-slate-700">修改摘要</div>
+                <ul className="list-disc space-y-1 pl-5 text-slate-600">
+                  {teacherEditReview.change_summary.map((item, index) => (
+                    <li key={`${item}-${index}`}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            <div className="text-slate-600">
+              原始观察依据：
+              <span className="ml-1 font-medium text-slate-800">
+                {teacherEditReview.fact_check === 'supported'
+                  ? '有依据'
+                  : teacherEditReview.fact_check === 'partially_supported'
+                    ? '部分有依据'
+                    : '依据不足'}
+              </span>
+            </div>
+            {teacherEditReview.decision === 'clarify' ? (
+              <Alert className="border-amber-200 bg-white/70">
+                <MessageCircle className="size-4 text-amber-600" />
+                <AlertTitle>还需要澄清</AlertTitle>
+                <AlertDescription>{teacherEditReview.question}</AlertDescription>
+              </Alert>
+            ) : null}
+          </CardContent>
+          {teacherReady ? (
+            <CardFooter className="justify-end border-t bg-white/60">
+              {teacherEditReview.decision === 'accept' ? (
+                <Button onClick={() => void handleConfirm()} disabled={busy !== null} className="w-full sm:w-auto">
+                  {busy === 'confirm' ? <Loader2 className="size-4 animate-spin" /> : <BadgeCheck className="size-4" />}
+                  确认归档
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  onClick={() => document.getElementById('objective-description')?.focus()}
+                  disabled={busy !== null}
+                >
+                  返回修改
+                </Button>
+              )}
             </CardFooter>
           ) : null}
         </Card>

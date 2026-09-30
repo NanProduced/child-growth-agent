@@ -17,7 +17,18 @@ export function StatusBadge({ status }: { status: ObservationStatus }) {
       </Badge>
     );
   }
-  return <Badge variant="secondary">待 AI 整理</Badge>;
+  if (status === "needs_input") {
+    return (
+      <Badge variant="secondary" className="bg-rose-100 text-rose-700">
+        待补充信息
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="secondary" className="bg-sky-100 text-sky-700">
+      已保存 · 待判断
+    </Badge>
+  );
 }
 
 /** 按参赛要求：所有 AI 生成的可见内容需明确标记 */

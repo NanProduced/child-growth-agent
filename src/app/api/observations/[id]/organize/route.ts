@@ -1,13 +1,14 @@
 import { HeaderUtils } from "coze-coding-dev-sdk";
 import { NextRequest, NextResponse } from "next/server";
-import { organizeObservation } from "@/lib/ai";
 import { requireTeacher } from "@/lib/auth";
-import { getChild, getObservation, updateObservationAiDraft } from "@/lib/queries";
+import { processObservationAgent } from "@/lib/observation-agent";
+import { getChild, getObservation } from "@/lib/queries";
 
 /**
- * AI 整理（真实模型调用）：需教师身份。
+ * Agent 判断与 AI 整理（真实模型调用）：需教师身份。
  * - 已确认归档的记录不再允许 AI 改写（保护确认稿与追溯链）；
- * - 原文 raw_text 永不改动，仅写入 ai_draft 草稿。
+ * - 信息不足时只保存 agent_context 并进入 needs_input；
+ * - 原文 raw_text 永不改动，仅写入 agent_context 或 ai_draft 草稿。
  */
 export async function POST(
   request: NextRequest,
@@ -34,17 +35,11 @@ export async function POST(
       return NextResponse.json({ message: "关联幼儿档案不存在" }, { status: 400 });
     }
 
-    const { draft, model } = await organizeObservation({
-      childName: child.name,
-      childGender: child.gender,
-      childBirthDate: child.birth_date,
-      observedAt: observation.observed_at,
-      context: observation.context,
-      rawText: observation.raw_text,
+    const updated = await processObservationAgent({
+      observation,
+      child,
       forwardHeaders: HeaderUtils.extractForwardHeaders(request.headers),
     });
-
-    const updated = await updateObservationAiDraft(observation.id, draft, model);
     return NextResponse.json({ observation: updated });
   } catch (e) {
     return NextResponse.json(

@@ -16,10 +16,14 @@ CREATE TABLE IF NOT EXISTS children (
   class_name varchar(50) NOT NULL DEFAULT '向日葵班',
   avatar_emoji varchar(16),
   note text,
+  growth_profile jsonb,
   is_demo boolean NOT NULL DEFAULT false,
   created_at timestamptz DEFAULT now() NOT NULL,
   updated_at timestamptz
 );
+
+ALTER TABLE children
+  ADD COLUMN IF NOT EXISTS growth_profile jsonb;
 
 CREATE TABLE IF NOT EXISTS observations (
   id varchar(36) PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -28,6 +32,7 @@ CREATE TABLE IF NOT EXISTS observations (
   context varchar(200),
   raw_text text NOT NULL,
   status varchar(20) NOT NULL DEFAULT 'draft',
+  agent_context jsonb,
   ai_draft jsonb,
   ai_model varchar(80),
   ai_organized_at timestamptz,
@@ -106,7 +111,6 @@ ON CONFLICT (id) DO UPDATE SET
   child_id = EXCLUDED.child_id,
   observed_at = EXCLUDED.observed_at,
   context = EXCLUDED.context,
-  raw_text = EXCLUDED.raw_text,
   status = EXCLUDED.status,
   ai_draft = EXCLUDED.ai_draft,
   ai_model = EXCLUDED.ai_model,

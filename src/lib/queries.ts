@@ -1,5 +1,12 @@
 import { query, queryOne } from "@/storage/database/pg-client";
-import type { Child, Observation, ObservationDraft, ObservationStatus } from "./types";
+import type {
+  AgentContext,
+  Child,
+  GrowthProfile,
+  Observation,
+  ObservationDraft,
+  ObservationStatus,
+} from "./types";
 
 /** 行来自 to_jsonb(table.*)，列名为 snake_case，显式映射为接口字段（与表结构语义一致） */
 type Row = Record<string, unknown>;
@@ -16,6 +23,7 @@ export function mapChild(row: Row): Child {
     class_name: str(row.class_name),
     avatar_emoji: strOrNull(row.avatar_emoji),
     note: strOrNull(row.note),
+    growth_profile: (row.growth_profile ?? null) as GrowthProfile | null,
     is_demo: Boolean(row.is_demo),
     created_at: str(row.created_at),
     updated_at: strOrNull(row.updated_at),
@@ -30,6 +38,7 @@ export function mapObservation(row: Row): Observation {
     context: strOrNull(row.context),
     raw_text: str(row.raw_text),
     status: (str(row.status) || "draft") as ObservationStatus,
+    agent_context: (row.agent_context ?? null) as AgentContext | null,
     ai_draft: (row.ai_draft ?? null) as ObservationDraft | null,
     ai_model: strOrNull(row.ai_model),
     ai_organized_at: strOrNull(row.ai_organized_at),
@@ -71,6 +80,22 @@ export async function createChild(input: {
     [input.name, input.gender, input.birth_date, input.class_name, input.avatar_emoji ?? null, input.note ?? null]
   );
   if (!row) throw new Error("新增幼儿失败：写入后未能读取记录");
+  return mapChild(row.data);
+}
+
+export async function updateChildGrowthProfile(
+  id: string,
+  growth_profile: GrowthProfile,
+): Promise<Child> {
+  const now = new Date().toISOString();
+  const row = await queryOne<{ data: Row }>(
+    `UPDATE children
+     SET growth_profile = $2::jsonb, updated_at = $3
+     WHERE id = $1
+     RETURNING to_jsonb(children.*) AS data`,
+    [id, JSON.stringify(growth_profile), now],
+  );
+  if (!row) throw new Error("保存成长档案失败：幼儿档案不存在");
   return mapChild(row.data);
 }
 
@@ -147,6 +172,24 @@ export async function updateObservationAiDraft(
     [id, JSON.stringify(ai_draft), ai_model, now]
   );
   if (!row) throw new Error("保存 AI 整理结果失败：记录不存在");
+  return mapObservation(row.data);
+}
+
+/** 保存 Agent 工作流上下文；不修改 raw_text 与 confirmed_content。 */
+export async function updateObservationAgentContext(
+  id: string,
+  agent_context: AgentContext,
+  status: ObservationStatus,
+): Promise<Observation> {
+  const now = new Date().toISOString();
+  const row = await queryOne<{ data: Row }>(
+    `UPDATE observations
+     SET agent_context = $2::jsonb, status = $3, updated_at = $4
+     WHERE id = $1
+     RETURNING to_jsonb(observations.*) AS data`,
+    [id, JSON.stringify(agent_context), status, now],
+  );
+  if (!row) throw new Error("保存补充信息失败：记录不存在");
   return mapObservation(row.data);
 }
 

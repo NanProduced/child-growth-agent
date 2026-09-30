@@ -1,12 +1,37 @@
+import { HeaderUtils } from "coze-coding-dev-sdk";
 import { NextRequest, NextResponse } from "next/server";
+import { reviewTeacherEdit } from "@/lib/ai";
 import { requireTeacher } from "@/lib/auth";
-import { confirmObservation, getObservation } from "@/lib/queries";
+import {
+  confirmObservation,
+  getObservation,
+  getChild,
+  listObservations,
+  updateObservationAgentContext,
+} from "@/lib/queries";
+import {
+  updateGrowthProfileSafely,
+  type ProfileUpdateResult,
+} from "@/lib/growth-profile";
+import {
+  normalizeTeacherEditContent,
+  sameTeacherEditContent,
+  teacherEditSubmissionAction,
+} from "@/lib/teacher-edit-review";
+import type { AgentContext } from "@/lib/types";
 import { confirmObservationSchema } from "@/lib/validation";
 
 /**
- * 教师确认：AI 草稿经教师核对/修改后写入 confirmed_content，状态置为 confirmed。
- * 只有进入过 AI 整理（ai_organized）的记录可以确认；原文与 AI 草稿保留可追溯。
+ * 教师确认：未修改 AI 草稿时直接确认；修改 AI 内容时先进行 Agent 修改审核。
+ * 只有审核 accept 且提交内容仍与审核快照一致时，才写入 confirmed_content。
  */
+
+function withoutTeacherEditReview(context: AgentContext): AgentContext {
+  const next = { ...context };
+  delete next.teacher_edit_review;
+  return next;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -29,24 +54,117 @@ export async function POST(
     if (!observation) {
       return NextResponse.json({ message: "观察记录不存在" }, { status: 404 });
     }
-    if (observation.status === "draft") {
-      return NextResponse.json(
-        { message: "请先生成并核对 AI 整理草稿，再进行确认归档。" },
-        { status: 409 }
-      );
-    }
     if (observation.status === "confirmed") {
       return NextResponse.json(
         { message: "该记录已确认归档，无需重复确认。" },
         { status: 409 }
       );
     }
+    if (observation.status !== "ai_organized") {
+      return NextResponse.json(
+        { message: "请先生成并核对 AI 整理草稿，再进行确认归档。" },
+        { status: 409 }
+      );
+    }
 
-    const confirmed = await confirmObservation(observation.id, {
-      ...parsed.data.content,
-      teacher_note: parsed.data.teacher_note?.trim() ? parsed.data.teacher_note.trim() : undefined,
+    if (!observation.ai_draft) {
+      return NextResponse.json(
+        { message: "当前记录缺少 AI 原始草稿，不能进行教师修改审核。" },
+        { status: 409 },
+      );
+    }
+
+    const submittedContent = parsed.data.content;
+    const normalizedContent = normalizeTeacherEditContent(submittedContent);
+    const currentReview = observation.agent_context?.teacher_edit_review;
+    const reviewMatches = Boolean(
+      currentReview && sameTeacherEditContent(currentReview.content_snapshot, submittedContent),
+    );
+    const teacherNote = parsed.data.teacher_note?.trim() || undefined;
+    const submissionAction = teacherEditSubmissionAction(
+      observation.ai_draft,
+      normalizedContent,
+      currentReview,
+    );
+
+    if (submissionAction === "confirm") {
+      if (currentReview && !reviewMatches) {
+        await updateObservationAgentContext(
+          observation.id,
+          withoutTeacherEditReview(observation.agent_context ?? {}),
+          "ai_organized",
+        );
+      }
+      const confirmed = await confirmObservation(observation.id, {
+        ...submittedContent,
+        teacher_note: teacherNote,
+      });
+      let profileUpdate: ProfileUpdateResult = {
+        status: "failed",
+        message: "观察已确认，但成长档案暂未更新，请稍后重试。",
+      };
+      try {
+        const child = await getChild(confirmed.child_id);
+        if (!child) throw new Error("关联幼儿档案不存在");
+        const confirmedObservations = await listObservations({
+          childId: confirmed.child_id,
+          status: "confirmed",
+        });
+        profileUpdate = await updateGrowthProfileSafely(child, confirmedObservations, {
+          forwardHeaders: HeaderUtils.extractForwardHeaders(request.headers),
+        });
+      } catch (error) {
+        console.error("确认后更新成长档案失败：", error);
+      }
+      return NextResponse.json({
+        observation: confirmed,
+        profileUpdateStatus: profileUpdate.status,
+        profileUpdateMessage: profileUpdate.message,
+        growthProfile: profileUpdate.growthProfile,
+      });
+    }
+
+    if (submissionAction === "clarify" && currentReview) {
+      return NextResponse.json({
+        observation,
+        requiresAgentConfirmation: true,
+        agentReview: currentReview,
+      });
+    }
+
+    const reviewContext = observation.agent_context
+      ? withoutTeacherEditReview(observation.agent_context)
+      : {};
+    if (currentReview) {
+      await updateObservationAgentContext(observation.id, reviewContext, "ai_organized");
+    }
+
+    const { review } = await reviewTeacherEdit({
+      rawText: observation.raw_text,
+      originalDraft: observation.ai_draft,
+      content: normalizedContent,
+      teacherNote,
+      agentContext: reviewContext,
+      forwardHeaders: HeaderUtils.extractForwardHeaders(request.headers),
     });
-    return NextResponse.json({ observation: confirmed });
+    const reviewedAt = new Date().toISOString();
+    const updated = await updateObservationAgentContext(
+      observation.id,
+      {
+        ...reviewContext,
+        teacher_edit_review: {
+          ...review,
+          content_snapshot: normalizedContent,
+          reviewed_at: reviewedAt,
+        },
+      },
+      "ai_organized",
+    );
+    return NextResponse.json({
+      observation: updated,
+      requiresAgentConfirmation: true,
+      agentReview: review,
+    });
   } catch (e) {
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "确认归档失败" },

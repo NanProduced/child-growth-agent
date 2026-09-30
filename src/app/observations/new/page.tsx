@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Loader2, LogIn, PenLine, Send } from 'lucide-react';
+import { Baby, Loader2, LogIn, PenLine, Send, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -130,20 +131,45 @@ export default function NewObservationPage() {
     );
   }
 
+  if (!loadingChildren && children.length === 0) {
+    return (
+      <div className="mx-auto max-w-lg py-10">
+        <Card>
+          <CardContent className="flex flex-col items-center gap-4 py-10 text-center">
+            <span className="flex size-11 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+              <Baby className="size-5" />
+            </span>
+            <div>
+              <h2 className="font-medium">还没有成长档案，先建立一个成长档案</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                建档完成后会自动回到这里录入第一次观察。
+              </p>
+            </div>
+            <Button asChild>
+              <Link href="/children/new">
+                <UserPlus className="size-4" />
+                建立成长档案
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <div>
         <h1 className="flex items-center gap-2 text-xl font-bold">
-          <PenLine className="size-5 text-amber-600" />
-          录入观察
+          <PenLine className="size-5 text-emerald-600" />
+          开始记录观察
         </h1>
         <p className="mt-1 text-sm text-slate-600">
-          用白描方式记录幼儿的具体行为与语言（发生了什么、说了什么），保存后原文不可修改，
-          AI 将据此整理分析卡片。
+          用白描方式记录幼儿的具体行为与语言。保存后原文不可修改，AI 会据此整理一张待确认草稿。
         </p>
       </div>
 
-      <Card>
+      <Card className="border-emerald-200/80">
         <CardHeader>
           <CardTitle className="text-base">观察信息</CardTitle>
           <CardDescription>带 * 为必填</CardDescription>
@@ -218,7 +244,7 @@ export default function NewObservationPage() {
             disabled={submitting || loadingChildren}
           >
             {submitting ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-            保存并进入 AI 整理
+            保存观察并继续整理
           </Button>
         </CardContent>
       </Card>

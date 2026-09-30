@@ -6,11 +6,11 @@ import { TopNav } from '@/components/top-nav';
 
 export const metadata: Metadata = {
   title: {
-    default: '幼儿成长观察与活动支持智能体',
-    template: '%s | 幼儿成长观察',
+    default: '芽芽观察',
+    template: '%s | 芽芽观察',
   },
   description:
-    '面向幼儿园教师：观察录入 → AI 整理 → 教师确认 → 阶段回顾与活动建议。AI 产出仅作草稿，教师确认为准。',
+    '面向幼儿园教师的轻量成长观察应用：记录事实、确认观察、持续回看。',
 };
 
 export default function RootLayout({
@@ -20,7 +20,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN">
-      <body className="min-h-screen bg-amber-50/40 antialiased">
+      <body className="min-h-screen bg-amber-50/50 antialiased">
         <TeacherProvider>
           <TopNav />
           <main className="mx-auto w-full max-w-5xl px-4 pb-16 pt-6">{children}</main>

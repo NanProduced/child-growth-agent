@@ -1,6 +1,13 @@
 import { Config, LLMClient } from 'coze-coding-dev-sdk';
 
+import { FIVE_DOMAINS } from './types';
+
 export type LlmProvider = 'coze' | 'stepfun';
+export type LlmResponseType =
+  | 'follow_up_decision'
+  | 'observation_draft'
+  | 'teacher_edit_review'
+  | 'growth_profile';
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -24,11 +31,104 @@ export type LlmOptions = {
   temperature?: number;
   thinking?: 'enabled' | 'disabled';
   forwardHeaders?: Record<string, string>;
+  responseType?: LlmResponseType;
 };
 
 export const COZE_ORGANIZE_MODEL = 'doubao-seed-2-0-lite-260215';
 const DEFAULT_STEPFUN_BASE_URL = 'https://api.stepfun.com/step_plan/v1';
 const DEFAULT_STEPFUN_MODEL = 'step-5-preview';
+export const DEFAULT_STEPFUN_TIMEOUT_MS = 60_000;
+const MIN_STEPFUN_TIMEOUT_MS = 1_000;
+const MAX_STEPFUN_TIMEOUT_MS = 120_000;
+
+// StepFun 原生 JSON Schema 结构化输出；Zod 仍作为最终校验，不把非法输出静默映射成合法值。
+const STEPFUN_RESPONSE_FORMATS: Record<LlmResponseType, object> = {
+  observation_draft: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'observation_draft',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'domain',
+          'sub_domain',
+          'objective_description',
+          'highlights',
+          'support_suggestions',
+          'highlight_quote',
+        ],
+        properties: {
+          domain: { type: 'string', enum: [...FIVE_DOMAINS] },
+          sub_domain: { type: 'string' },
+          objective_description: { type: 'string' },
+          highlights: { type: 'array', items: { type: 'string' } },
+          support_suggestions: { type: 'array', items: { type: 'string' } },
+          highlight_quote: { type: 'string' },
+        },
+      },
+    },
+  },
+  follow_up_decision: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'follow_up_decision',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['decision', 'question', 'reason'],
+        properties: {
+          decision: { type: 'string', enum: ['ask', 'proceed'] },
+          question: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+    },
+  },
+  teacher_edit_review: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'teacher_edit_review',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['decision', 'summary', 'change_summary', 'fact_check', 'question'],
+        properties: {
+          decision: { type: 'string', enum: ['accept', 'clarify'] },
+          summary: { type: 'string' },
+          change_summary: { type: 'array', items: { type: 'string' } },
+          fact_check: {
+            type: 'string',
+            enum: ['supported', 'partially_supported', 'unsupported'],
+          },
+          question: { type: 'string' },
+        },
+      },
+    },
+  },
+  growth_profile: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'growth_profile',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['summary', 'recent_change', 'development_clues', 'next_support', 'next_focus'],
+        properties: {
+          summary: { type: 'string' },
+          recent_change: { type: 'string' },
+          development_clues: { type: 'array', items: { type: 'string' } },
+          next_support: { type: 'string' },
+          next_focus: { type: 'string' },
+        },
+      },
+    },
+  },
+};
 
 type JsonRecord = Record<string, unknown>;
 
@@ -75,18 +175,71 @@ function errorMessage(payload: unknown): string | null {
   return null;
 }
 
-async function readJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (!text.trim()) return null;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return null;
+class StepFunTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`StepFun 请求超时（${timeoutMs}ms）`);
+    this.name = 'StepFunTimeoutError';
   }
+}
+
+function timeoutRace(signal: AbortSignal, timeoutMs: number): {
+  promise: Promise<never>;
+  cancel: () => void;
+} {
+  let onAbort: () => void = () => undefined;
+  const promise = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new StepFunTimeoutError(timeoutMs));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
+  return {
+    promise,
+    cancel: () => signal.removeEventListener('abort', onAbort),
+  };
+}
+
+async function readJsonWithSignal(
+  response: Response,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<unknown> {
+  const timeout = timeoutRace(signal, timeoutMs);
+  try {
+    const text = await Promise.race([response.text(), timeout.promise]);
+    if (!text.trim()) return null;
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return null;
+    }
+  } finally {
+    timeout.cancel();
+  }
+}
+
+function isStepFunTimeout(error: unknown, signal: AbortSignal): boolean {
+  return (
+    signal.aborted ||
+    (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError'))
+  );
 }
 
 function getStepFunModel(): string {
   return process.env.STEPFUN_MODEL?.trim() || DEFAULT_STEPFUN_MODEL;
+}
+
+export function getStepFunTimeoutMs(): number {
+  const raw = process.env.STEPFUN_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_STEPFUN_TIMEOUT_MS;
+  const value = Number(raw);
+  if (
+    !Number.isInteger(value) ||
+    value < MIN_STEPFUN_TIMEOUT_MS ||
+    value > MAX_STEPFUN_TIMEOUT_MS
+  ) {
+    return DEFAULT_STEPFUN_TIMEOUT_MS;
+  }
+  return value;
 }
 
 export function getLlmProvider(): LlmProvider {
@@ -122,6 +275,8 @@ async function invokeStepFun(messages: LlmMessage[], options: LlmOptions): Promi
     '',
   );
   const model = getStepFunModel();
+  const timeoutMs = getStepFunTimeoutMs();
+  const signal = AbortSignal.timeout(timeoutMs);
   const requestUrl = `${baseUrl}/chat/completions`;
 
   let response: Response;
@@ -136,15 +291,27 @@ async function invokeStepFun(messages: LlmMessage[], options: LlmOptions): Promi
         model,
         messages,
         temperature: options.temperature ?? 0.3,
-        response_format: { type: 'json_object' },
+        response_format: STEPFUN_RESPONSE_FORMATS[options.responseType ?? 'observation_draft'],
       }),
+      signal,
     });
   } catch (error) {
+    if (isStepFunTimeout(error, signal)) {
+      throw new Error(`StepFun 请求超时（${timeoutMs}ms），请稍后重试`);
+    }
     const message = error instanceof Error ? error.message : '网络请求失败';
     throw new Error(`StepFun 请求失败：${redact(message, apiKey)}`);
   }
 
-  const payload = await readJson(response);
+  let payload: unknown;
+  try {
+    payload = await readJsonWithSignal(response, signal, timeoutMs);
+  } catch (error) {
+    if (isStepFunTimeout(error, signal)) {
+      throw new Error(`StepFun 请求超时（${timeoutMs}ms），请稍后重试`);
+    }
+    throw error;
+  }
   if (!response.ok) {
     const message = errorMessage(payload) ?? `HTTP ${response.status}`;
     throw new Error(`StepFun 请求失败：${redact(message, apiKey)}`);

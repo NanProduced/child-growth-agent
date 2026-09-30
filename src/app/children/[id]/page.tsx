@@ -4,12 +4,10 @@ import { notFound } from 'next/navigation';
 import {
   ArrowLeft,
   ClipboardCheck,
-  FlaskConical,
-  HeartPulse,
-  Languages,
-  Palette,
+  Eye,
+  Lightbulb,
   PenLine,
-  Users,
+  Sprout,
 } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -17,31 +15,118 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
-import { ageText, excerpt, formatDateCn } from '@/lib/format';
+import { ageText, excerpt, formatDateCn, formatDateTimeCn } from '@/lib/format';
+import { buildGrowthProfileFallback } from '@/lib/growth-profile';
 import { getChild, listObservations } from '@/lib/queries';
-import { FIVE_DOMAINS, type Child, type Observation } from '@/lib/types';
+import type { Child, GrowthProfileDraft, Observation } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {
-  title: '幼儿档案详情',
+  title: '成长档案详情',
 };
 
-type Domain = (typeof FIVE_DOMAINS)[number];
+function ProfileCard({
+  title,
+  icon,
+  children,
+  className,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <Card className={className}>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          {icon}
+          {title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>{children}</CardContent>
+    </Card>
+  );
+}
 
-const DOMAIN_META: Record<
-  Domain,
-  { icon: typeof HeartPulse; hint: string }
-> = {
-  健康: { icon: HeartPulse, hint: '身体动作、生活习惯与自我照料' },
-  语言: { icon: Languages, hint: '表达、倾听与交流' },
-  社会: { icon: Users, hint: '同伴交往、规则与情绪表达' },
-  科学: { icon: FlaskConical, hint: '发现、提问与探索' },
-  艺术: { icon: Palette, hint: '感受、表现与创造' },
-};
+function GrowthProfileSections({
+  profile,
+  updatedAt,
+  isFallback,
+}: {
+  profile: GrowthProfileDraft;
+  updatedAt: string | null;
+  isFallback: boolean;
+}) {
+  return (
+    <>
+      <section aria-labelledby="growth-summary-title" className="space-y-3">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 id="growth-summary-title" className="text-base font-semibold">
+              成长小结
+            </h2>
+            <p className="mt-1 text-xs text-slate-500">基于已确认观察更新</p>
+          </div>
+          <Badge variant="outline" className="font-normal">
+            {isFallback ? '根据现有观察呈现' : '已更新'}
+          </Badge>
+        </div>
+        <Card className="border-emerald-200 bg-emerald-50/50">
+          <CardContent className="space-y-3 p-5 sm:p-6">
+            <p className="max-w-3xl text-[15px] leading-7 text-slate-700">{profile.summary}</p>
+            <p className="text-xs leading-5 text-slate-500">
+              {isFallback
+                ? '已有确认观察会先在这里呈现；下一次确认后，Agent 会继续更新这段小结。'
+                : `最近更新：${formatDateTimeCn(updatedAt)}`}
+            </p>
+          </CardContent>
+        </Card>
+      </section>
 
-function isDomain(value: string): value is Domain {
-  return (FIVE_DOMAINS as readonly string[]).includes(value);
+      <section className="grid gap-4 md:grid-cols-2">
+        <ProfileCard
+          title="最近变化"
+          icon={<ClipboardCheck className="size-4 text-amber-600" aria-hidden="true" />}
+        >
+          <p className="text-sm leading-7 text-slate-600">{profile.recent_change}</p>
+        </ProfileCard>
+
+        <ProfileCard
+          title="观察到的线索"
+          icon={<Eye className="size-4 text-sky-600" aria-hidden="true" />}
+        >
+          <ul className="space-y-2 text-sm leading-6 text-slate-600">
+            {profile.development_clues.map((clue, index) => (
+              <li key={`${clue}-${index}`} className="flex gap-2">
+                <span className="mt-2 size-1.5 shrink-0 rounded-full bg-sky-400" aria-hidden="true" />
+                <span>{clue}</span>
+              </li>
+            ))}
+          </ul>
+        </ProfileCard>
+      </section>
+
+      <section aria-labelledby="next-support-title">
+        <ProfileCard
+          title="下一步支持"
+          icon={<Lightbulb className="size-4 text-emerald-600" aria-hidden="true" />}
+          className="border-sky-200 bg-sky-50/40"
+        >
+          <div className="space-y-4 text-sm leading-7 text-slate-600">
+            <p>{profile.next_support}</p>
+            <div className="rounded-lg bg-white/80 p-4">
+              <h3 id="next-support-title" className="mb-1 flex items-center gap-2 font-medium text-slate-700">
+                下一次可以继续看看
+              </h3>
+              <p>{profile.next_focus}</p>
+            </div>
+          </div>
+        </ProfileCard>
+      </section>
+    </>
+  );
 }
 
 export default async function ChildDetailPage({
@@ -104,18 +189,12 @@ export default async function ChildDetailPage({
   const confirmedObservations = observations.filter(
     (observation) => observation.status === 'confirmed' && observation.confirmed_content,
   );
-  const domainObservations = new Map<Domain, Observation[]>();
-  for (const observation of confirmedObservations) {
-    const domain = observation.confirmed_content?.domain;
-    if (!domain || !isDomain(domain)) continue;
-    const records = domainObservations.get(domain) ?? [];
-    records.push(observation);
-    domainObservations.set(domain, records);
-  }
-  const latestConfirmed = confirmedObservations[0];
+  const fallbackProfile = buildGrowthProfileFallback(confirmedObservations);
+  const profile = child.growth_profile ?? fallbackProfile;
+  const isFallback = !child.growth_profile && Boolean(fallbackProfile);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <Button asChild variant="ghost" size="sm" className="-ml-2">
         <Link href="/children">
           <ArrowLeft className="size-4" />
@@ -123,21 +202,21 @@ export default async function ChildDetailPage({
         </Link>
       </Button>
 
-      <Card>
-        <CardContent className="flex flex-wrap items-start justify-between gap-5 p-6">
+      <section className="rounded-2xl border bg-white p-5 sm:p-6">
+        <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex min-w-0 items-start gap-4">
             <span className="flex size-14 shrink-0 items-center justify-center rounded-full bg-amber-100 text-4xl">
               {child.avatar_emoji ?? '🧒'}
             </span>
             <div className="min-w-0">
-              <CardTitle className="flex flex-wrap items-center gap-2 text-lg">
-                {child.name}
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-xl font-semibold tracking-tight text-slate-900">{child.name}</h1>
                 <Badge variant="outline" className="font-normal">
                   {child.gender}
                 </Badge>
                 <Badge variant="secondary">{child.class_name}</Badge>
                 {child.is_demo ? <DemoBadge /> : null}
-              </CardTitle>
+              </div>
               <p className="mt-1 text-sm text-slate-500">
                 出生日期 {formatDateCn(child.birth_date)} · 当前 {ageText(child.birth_date)}
               </p>
@@ -146,142 +225,65 @@ export default async function ChildDetailPage({
               ) : null}
             </div>
           </div>
-          <Button asChild size="lg" className="shrink-0">
+          <Button asChild size="lg" className="w-full shrink-0 sm:w-auto">
             <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>
               <PenLine className="size-4" />
               记录一次观察
             </Link>
           </Button>
-        </CardContent>
-      </Card>
-
-      <section>
-        <div className="mb-3 flex items-end justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold">五大领域发展线索</h2>
-            <p className="mt-1 text-xs text-slate-500">仅显示教师已确认的观察证据</p>
-          </div>
-          <span className="text-xs text-slate-500">已确认 {confirmedObservations.length} 条</span>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-          {FIVE_DOMAINS.map((domain) => {
-            const records = domainObservations.get(domain) ?? [];
-            const latest = records[0];
-            const Icon = DOMAIN_META[domain].icon;
-            const content = latest?.confirmed_content;
-            const summary = content?.objective_description || content?.highlight_quote;
-
-            return (
-              <Card key={domain} className="h-full">
-                <CardHeader className="pb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="flex size-8 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
-                      <Icon className="size-4" aria-hidden="true" />
-                    </span>
-                    <CardTitle className="text-base">{domain}</CardTitle>
-                  </div>
-                  <p className="text-xs text-slate-500">
-                    {records.length > 0 ? `已确认 ${records.length} 条观察` : '正在了解'}
-                  </p>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {latest ? (
-                    <>
-                      <p className="text-xs text-slate-500">
-                        最近观察：{formatDateCn(latest.observed_at)}
-                      </p>
-                      <p className="line-clamp-3 text-sm leading-6 text-slate-600">
-                        {excerpt(summary || latest.raw_text, 88)}
-                      </p>
-                    </>
-                  ) : (
-                    <p className="text-sm leading-6 text-slate-500">
-                      {DOMAIN_META[domain].hint}，等待新的观察记录。
-                    </p>
-                  )}
-                </CardContent>
-              </Card>
-            );
-          })}
         </div>
       </section>
 
-      <section className="grid gap-4 md:grid-cols-[minmax(0,1.4fr)_minmax(260px,0.6fr)]">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <ClipboardCheck className="size-4 text-amber-600" />
-              最近变化
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {latestConfirmed ? (
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <span className="font-medium">{formatDateCn(latestConfirmed.observed_at)}</span>
-                  {latestConfirmed.context ? (
-                    <span className="text-xs text-slate-500">{latestConfirmed.context}</span>
-                  ) : null}
-                  <StatusBadge status={latestConfirmed.status} />
-                </div>
-                <p className="text-sm leading-6 text-slate-600">
-                  {excerpt(
-                    latestConfirmed.confirmed_content?.objective_description ||
-                      latestConfirmed.confirmed_content?.highlight_quote ||
-                      latestConfirmed.raw_text,
-                    140,
-                  )}
-                </p>
-              </div>
-            ) : (
-              <p className="text-sm leading-6 text-slate-500">
-                {observations.length > 0
-                  ? `当前已有 ${observations.length} 条观察，教师确认后会在这里呈现。`
-                  : '还没有已确认的观察，记录一次具体行为就能开始积累。'}
+      {profile ? (
+        <GrowthProfileSections
+          profile={profile}
+          updatedAt={child.growth_profile?.updated_at ?? null}
+          isFallback={isFallback}
+        />
+      ) : (
+        <Card className="border-dashed border-emerald-200 bg-emerald-50/40">
+          <CardContent className="flex flex-col items-start gap-3 p-5 sm:p-6">
+            <Sprout className="size-6 text-emerald-600" aria-hidden="true" />
+            <div>
+              <h2 className="font-semibold text-slate-800">成长小结</h2>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
+                还没有已确认的观察。确认一条具体记录后，这里会开始积累成长小结、最近变化和下一步支持。
               </p>
-            )}
+            </div>
           </CardContent>
         </Card>
+      )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">档案小结</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm text-slate-600">
-            <p>已确认观察 {confirmedObservations.length} 条</p>
-            <p>覆盖领域 {domainObservations.size} / {FIVE_DOMAINS.length}</p>
-            <p className="text-xs leading-5 text-slate-500">
-              这里记录的是教师确认过的观察证据，不做分数或等级评价。
-            </p>
-          </CardContent>
-        </Card>
-      </section>
-
-      <section>
-        <div className="mb-3 flex items-end justify-between gap-3">
+      <section aria-labelledby="observation-timeline-title">
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold">观察时间线（{observations.length}）</h2>
+            <h2 id="observation-timeline-title" className="text-base font-semibold">
+              观察证据时间线
+            </h2>
             <p className="mt-1 text-xs text-slate-500">原文保留，点击记录可进入查看与确认</p>
           </div>
-          {observations.length > 0 ? (
-            <Button asChild variant="outline" size="sm">
-              <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>
-                <PenLine className="size-4" />
-                再记一条
-              </Link>
-            </Button>
-          ) : null}
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-slate-500">共 {observations.length} 条</span>
+            {observations.length > 0 ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>
+                  <PenLine className="size-4" />
+                  再记一条
+                </Link>
+              </Button>
+            ) : null}
+          </div>
         </div>
         {observations.length === 0 ? (
           <Card>
             <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
               <span className="flex size-11 items-center justify-center rounded-full bg-amber-100 text-amber-700">
-                <ClipboardCheck className="size-5" />
+                <ClipboardCheck className="size-5" aria-hidden="true" />
               </span>
               <div>
                 <h3 className="font-medium">还没有观察记录</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  从一次具体行为开始，逐步形成这个孩子的观察档案。
+                  从一次具体行为开始，逐步形成这个小朋友的观察档案。
                 </p>
               </div>
               <Button asChild>
@@ -293,16 +295,22 @@ export default async function ChildDetailPage({
             </CardContent>
           </Card>
         ) : (
-          <div className="space-y-3">
+          <div className="relative space-y-4 border-l border-amber-200 pl-5 sm:pl-7">
             {observations.map((obs) => (
-              <Link key={obs.id} href={`/observations/${obs.id}/review`} className="block">
-                <Card className="transition-shadow hover:shadow-md">
-                  <CardContent className="space-y-1.5 py-3">
+              <Link
+                key={obs.id}
+                href={`/observations/${obs.id}/review`}
+                className="group relative block"
+              >
+                <span
+                  className="absolute -left-[25px] top-5 size-2.5 rounded-full bg-amber-400 ring-4 ring-amber-50 transition-colors group-hover:bg-emerald-500 sm:-left-[33px]"
+                  aria-hidden="true"
+                />
+                <Card className="transition-colors group-hover:border-amber-300">
+                  <CardContent className="space-y-2 p-4">
                     <div className="flex flex-wrap items-center gap-2 text-sm">
                       <span className="font-medium">{formatDateCn(obs.observed_at)}</span>
-                      {obs.context ? (
-                        <span className="text-xs text-slate-500">{obs.context}</span>
-                      ) : null}
+                      {obs.context ? <span className="text-xs text-slate-500">{obs.context}</span> : null}
                       {obs.confirmed_content?.domain ? (
                         <Badge variant="outline" className="font-normal">
                           {obs.confirmed_content.domain}
@@ -313,7 +321,10 @@ export default async function ChildDetailPage({
                         <StatusBadge status={obs.status} />
                       </span>
                     </div>
-                    <p className="text-sm text-slate-600">{excerpt(obs.raw_text, 100)}</p>
+                    <p className="text-sm leading-6 text-slate-600">{excerpt(obs.raw_text, 120)}</p>
+                    {obs.status === 'confirmed' ? (
+                      <p className="text-xs text-emerald-700">这条记录已进入成长档案依据</p>
+                    ) : null}
                   </CardContent>
                 </Card>
               </Link>
