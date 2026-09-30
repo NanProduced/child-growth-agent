@@ -1,8 +1,9 @@
 import { z } from "zod";
-import { FIVE_DOMAINS } from "./types";
+import { CLASS_STAGES, FIVE_DOMAINS } from "./types";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const SCHOOL_YEAR_RE = /^\d{4}-\d{4}$/;
 
 /** 观察整理卡片（AI 草稿与教师确认提交体共用） */
 export const observationDraftSchema = z.object({
@@ -14,16 +15,42 @@ export const observationDraftSchema = z.object({
   highlight_quote: z.string().min(1, "请填写原文金句").max(500),
 });
 
-export const createChildSchema = z.object({
-  name: z.string().min(1, "请填写姓名").max(50),
-  gender: z.enum(["男", "女", "其他"], { message: "请选择性别" }),
-  birth_date: z
+export const createChildSchema = z
+  .object({
+    name: z.string().min(1, "请填写姓名").max(50),
+    gender: z.enum(["男", "女", "其他"], { message: "请选择性别" }),
+    birth_date: z
+      .string()
+      .min(1, "请选择出生日期")
+      .regex(DATE_RE, "出生日期格式应为 YYYY-MM-DD"),
+    /** 优先用 class_id 分班；class_name 只用于按名称匹配已存在的班级，不再作为唯一来源 */
+    class_id: z.string().regex(UUID_RE, "班级标识不合法").optional(),
+    class_name: z.string().min(1, "班级名称不能为空").max(50).optional(),
+    avatar_emoji: z.string().max(16).optional(),
+    note: z.string().max(2000).optional(),
+  })
+  .refine((value) => Boolean(value.class_id || value.class_name), {
+    message: "请选择班级：提交 class_id，或填写已存在的班级名称",
+  });
+
+export const createClassSchema = z.object({
+  name: z.string().min(1, "请填写班级名称").max(50, "班级名称最长 50 字"),
+  stage: z.enum(CLASS_STAGES, { message: "学段须为 small（小班）/ middle（中班）/ large（大班）" }),
+  school_year: z
     .string()
-    .min(1, "请选择出生日期")
-    .regex(DATE_RE, "出生日期格式应为 YYYY-MM-DD"),
-  class_name: z.string().min(1).max(50).default("向日葵班"),
-  avatar_emoji: z.string().max(16).optional(),
-  note: z.string().max(2000).optional(),
+    .min(1, "请填写学年")
+    .regex(SCHOOL_YEAR_RE, "学年格式应为 2026-2027"),
+  is_active: z.boolean().optional().default(true),
+});
+
+export const updateClassSchema = createClassSchema.partial();
+
+export const enrollChildSchema = z.object({
+  child_id: z.string().regex(UUID_RE, "幼儿标识不合法"),
+  start_date: z
+    .string()
+    .regex(DATE_RE, "分班日期格式应为 YYYY-MM-DD")
+    .optional(),
 });
 
 export const createObservationSchema = z.object({

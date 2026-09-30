@@ -25,6 +25,29 @@ CREATE TABLE IF NOT EXISTS children (
 ALTER TABLE children
   ADD COLUMN IF NOT EXISTS growth_profile jsonb;
 
+-- 班级领域模型（与 src/storage/database/shared/schema.ts 一致；演示班级与分班数据见本文件末尾）
+CREATE TABLE IF NOT EXISTS classes (
+  id varchar(36) PRIMARY KEY DEFAULT gen_random_uuid(),
+  name varchar(50) NOT NULL,
+  stage varchar(10) NOT NULL,
+  school_year varchar(20) NOT NULL,
+  is_active boolean NOT NULL DEFAULT true,
+  is_demo boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz,
+  CONSTRAINT classes_name_school_year_unique UNIQUE (name, school_year),
+  CONSTRAINT classes_stage_check CHECK (stage IN ('small', 'middle', 'large'))
+);
+
+CREATE TABLE IF NOT EXISTS child_class_enrollments (
+  id varchar(36) PRIMARY KEY DEFAULT gen_random_uuid(),
+  child_id varchar(36) NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+  class_id varchar(36) NOT NULL REFERENCES classes(id) ON DELETE RESTRICT,
+  start_date date NOT NULL,
+  end_date date,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS observations (
   id varchar(36) PRIMARY KEY DEFAULT gen_random_uuid(),
   child_id varchar(36) NOT NULL REFERENCES children(id) ON DELETE CASCADE,
@@ -43,9 +66,34 @@ CREATE TABLE IF NOT EXISTS observations (
   updated_at timestamptz
 );
 
+ALTER TABLE observations
+  ADD COLUMN IF NOT EXISTS class_id varchar(36);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conname = 'observations_class_id_fkey'
+       AND conrelid = 'observations'::regclass
+  ) THEN
+    ALTER TABLE observations
+      ADD CONSTRAINT observations_class_id_fkey
+      FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE RESTRICT;
+  END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS children_class_name_idx ON children(class_name);
 CREATE INDEX IF NOT EXISTS children_created_at_idx ON children(created_at);
+CREATE INDEX IF NOT EXISTS classes_stage_idx ON classes(stage);
+CREATE INDEX IF NOT EXISTS classes_is_active_idx ON classes(is_active);
+CREATE INDEX IF NOT EXISTS enrollments_child_id_idx ON child_class_enrollments(child_id);
+CREATE INDEX IF NOT EXISTS enrollments_class_id_idx ON child_class_enrollments(class_id);
+CREATE UNIQUE INDEX IF NOT EXISTS enrollments_current_child_idx
+  ON child_class_enrollments(child_id)
+  WHERE end_date IS NULL;
 CREATE INDEX IF NOT EXISTS observations_child_id_idx ON observations(child_id);
+CREATE INDEX IF NOT EXISTS observations_class_id_idx ON observations(class_id);
 CREATE INDEX IF NOT EXISTS observations_status_idx ON observations(status);
 CREATE INDEX IF NOT EXISTS observations_created_at_idx ON observations(created_at);
 CREATE INDEX IF NOT EXISTS observations_child_observed_idx ON observations(child_id, observed_at);
@@ -53,11 +101,11 @@ CREATE INDEX IF NOT EXISTS observations_child_observed_idx ON observations(child
 INSERT INTO children (id, name, gender, birth_date, class_name, avatar_emoji, note, is_demo, created_at)
 VALUES
   ('a1c10000-0000-4000-8000-000000000001', '糖糖', '女', '2022-05-18', '向日葵班', '🍬', '慢热细腻，观察力强；由外婆接送，喜欢在娃娃家给"宝宝"讲故事。', true, '2026-09-25T08:00:00+08:00'),
-  ('a1c10000-0000-4000-8000-000000000002', '果果', '男', '2022-11-18', '向日葵班', '🍎', '精力充沛，大动作发展快；喜欢车和积木，语言正处于短句快速发展阶段。', true, '2026-09-25T08:00:00+08:00'),
+  ('a1c10000-0000-4000-8000-000000000002', '果果', '男', '2022-11-18', '彩虹班', '🍎', '精力充沛，大动作发展快；喜欢车和积木，语言正处于短句快速发展阶段。', true, '2026-09-25T08:00:00+08:00'),
   ('a1c10000-0000-4000-8000-000000000003', '朵朵', '女', '2022-01-18', '向日葵班', '🌸', '乐于助人，是小组里的"小姐姐"；对新事物好奇，总有很多问题。', true, '2026-09-25T08:00:00+08:00'),
   ('a1c10000-0000-4000-8000-000000000004', '乐乐', '男', '2022-03-18', '向日葵班', '🚗', '专注力持续较久，搭积木时能独自玩很久；情绪平稳，规则意识在建立中。', true, '2026-09-25T08:00:00+08:00'),
   ('a1c10000-0000-4000-8000-000000000005', '悠悠', '女', '2023-01-18', '彩虹班', '🎀', '九月刚升入彩虹班，分离焦虑已缓解；喜欢涂鸦和唱歌，节奏感好。', true, '2026-09-25T08:00:00+08:00'),
-  ('a1c10000-0000-4000-8000-000000000006', '石头', '男', '2021-09-18', '彩虹班', '🦖', '恐龙知识丰富，常在分享时间做"小讲解员"；正在学习与同伴协商角色。', true, '2026-09-25T08:00:00+08:00')
+  ('a1c10000-0000-4000-8000-000000000006', '石头', '男', '2021-09-18', '蒲公英班', '🦖', '恐龙知识丰富，常在分享时间做"小讲解员"；正在学习与同伴协商角色。', true, '2026-09-25T08:00:00+08:00')
 ON CONFLICT (id) DO UPDATE SET
   name = EXCLUDED.name,
   gender = EXCLUDED.gender,
@@ -119,3 +167,49 @@ ON CONFLICT (id) DO UPDATE SET
   confirmed_at = EXCLUDED.confirmed_at,
   is_demo = EXCLUDED.is_demo
 WHERE observations.is_demo = true;
+
+-- 演示班级（小班 / 中班 / 大班各一个，与 scripts/upgrade-classes.sql 的映射一致）
+INSERT INTO classes (id, name, stage, school_year, is_active, is_demo, created_at)
+VALUES
+  ('c3c30000-0000-4000-8000-000000000001', '向日葵班', 'middle', '2026-2027', true, true, '2026-09-01T08:00:00+08:00'),
+  ('c3c30000-0000-4000-8000-000000000002', '彩虹班', 'small', '2026-2027', true, true, '2026-09-01T08:00:00+08:00'),
+  ('c3c30000-0000-4000-8000-000000000003', '蒲公英班', 'large', '2026-2027', true, true, '2026-09-01T08:00:00+08:00')
+ON CONFLICT (id) DO UPDATE SET
+  name = EXCLUDED.name,
+  stage = EXCLUDED.stage,
+  school_year = EXCLUDED.school_year,
+  is_active = EXCLUDED.is_active,
+  is_demo = EXCLUDED.is_demo
+WHERE classes.is_demo = true;
+
+-- 演示儿童分班：石头保留一条已结束的向日葵班历史，用于演示转班后的班级语境
+INSERT INTO child_class_enrollments (id, child_id, class_id, start_date, end_date)
+SELECT v.id, v.child_id, v.class_id, v.start_date, v.end_date
+FROM (VALUES
+  ('d4d40000-0000-4000-8000-000000000001', 'a1c10000-0000-4000-8000-000000000001', 'c3c30000-0000-4000-8000-000000000001', '2026-09-01'::date, NULL::date),
+  ('d4d40000-0000-4000-8000-000000000002', 'a1c10000-0000-4000-8000-000000000002', 'c3c30000-0000-4000-8000-000000000002', '2026-09-01'::date, NULL::date),
+  ('d4d40000-0000-4000-8000-000000000003', 'a1c10000-0000-4000-8000-000000000003', 'c3c30000-0000-4000-8000-000000000001', '2026-09-01'::date, NULL::date),
+  ('d4d40000-0000-4000-8000-000000000004', 'a1c10000-0000-4000-8000-000000000004', 'c3c30000-0000-4000-8000-000000000001', '2026-09-01'::date, NULL::date),
+  ('d4d40000-0000-4000-8000-000000000005', 'a1c10000-0000-4000-8000-000000000005', 'c3c30000-0000-4000-8000-000000000002', '2026-09-01'::date, NULL::date),
+  ('d4d40000-0000-4000-8000-000000000006', 'a1c10000-0000-4000-8000-000000000006', 'c3c30000-0000-4000-8000-000000000001', '2026-09-01'::date, '2026-09-20'::date),
+  ('d4d40000-0000-4000-8000-000000000007', 'a1c10000-0000-4000-8000-000000000006', 'c3c30000-0000-4000-8000-000000000003', '2026-09-21'::date, NULL::date)
+) AS v(id, child_id, class_id, start_date, end_date)
+WHERE EXISTS (SELECT 1 FROM children c WHERE c.id = v.child_id)
+  AND EXISTS (SELECT 1 FROM classes k WHERE k.id = v.class_id)
+ON CONFLICT (id) DO NOTHING;
+
+-- 回填观察发生时班级快照（按观察日期落在哪段归属），只填 class_id 为空的行
+UPDATE observations o
+   SET class_id = (
+     SELECT e.class_id
+       FROM child_class_enrollments e
+      WHERE e.child_id = o.child_id
+        AND e.start_date <= o.observed_at
+        AND (e.end_date IS NULL OR e.end_date >= o.observed_at)
+      ORDER BY e.start_date DESC
+      LIMIT 1
+   )
+ WHERE o.class_id IS NULL
+   AND EXISTS (
+     SELECT 1 FROM child_class_enrollments e WHERE e.child_id = o.child_id
+   );

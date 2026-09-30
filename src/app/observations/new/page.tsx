@@ -7,6 +7,7 @@ import { Baby, Loader2, LogIn, PenLine, Send, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -26,7 +27,7 @@ import {
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
-import { todayStr } from '@/lib/format';
+import { classLabel, todayStr } from '@/lib/format';
 import type { Child } from '@/lib/types';
 
 export default function NewObservationPage() {
@@ -68,9 +69,15 @@ export default function NewObservationPage() {
     };
   }, []);
 
+  const selectedChild = children.find((c) => c.id === childId) ?? null;
+
   async function handleSubmit() {
     if (!childId) {
       toast.error('请选择幼儿');
+      return;
+    }
+    if (selectedChild && !selectedChild.class_id) {
+      toast.error('该幼儿尚未分班，请先在成长档案中完成分班');
       return;
     }
     if (!observedAt) {
@@ -187,7 +194,8 @@ export default function NewObservationPage() {
                 <SelectContent>
                   {children.map((c) => (
                     <SelectItem key={c.id} value={c.id}>
-                      {c.avatar_emoji} {c.name}（{c.class_name}）
+                      {c.avatar_emoji} {c.name}（
+                      {classLabel(c.class_stage, c.class_name) ?? '未分班'}）
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -203,6 +211,16 @@ export default function NewObservationPage() {
               />
             </div>
           </div>
+
+          {selectedChild ? (
+            <div className="rounded-lg border bg-slate-50/70 px-3 py-2.5 text-xs leading-5 text-slate-500">
+              发生班级：
+              <Badge variant="secondary" className="mx-1 font-normal">
+                {classLabel(selectedChild.class_stage, selectedChild.class_name) ?? '未分班'}
+              </Badge>
+              随幼儿档案自动带入，保存时写入这条观察，之后不能在观察里修改。
+            </div>
+          ) : null}
 
           <div className="space-y-1.5">
             <Label htmlFor="context">观察情境（选填）</Label>

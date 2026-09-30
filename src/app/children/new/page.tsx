@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft,
@@ -25,10 +26,17 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
-import { ageText, formatDateCn } from '@/lib/format';
-import type { Child } from '@/lib/types';
+import { ageText, classLabel, formatDateCn } from '@/lib/format';
+import { CLASS_STAGES, CLASS_STAGE_LABELS, type Child, type SchoolClass } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { createChildSchema } from '@/lib/validation';
 
@@ -36,7 +44,7 @@ type FieldKey =
   | 'name'
   | 'gender'
   | 'birth_date'
-  | 'class_name'
+  | 'class_id'
   | 'avatar_emoji'
   | 'note';
 
@@ -46,7 +54,8 @@ interface FormState {
   name: string;
   gender: string;
   birth_date: string;
-  class_name: string;
+  stage: string;
+  class_id: string;
   avatar_emoji: string;
   note: string;
 }
@@ -54,26 +63,25 @@ interface FormState {
 const STEPS = ['基本信息', '可选补充', '提交确认'] as const;
 
 const STEP_HINTS = [
-  '姓名、性别、出生日期为必填项。',
-  '班级默认「向日葵班」，头像与备注可以留空。',
+  '姓名、性别、出生日期与班级为必填项。',
+  '头像与备注可以留空。',
   '确认信息无误后建档，随后直接录入第一次观察。',
 ] as const;
 
 const STEP_FIELDS: readonly FieldKey[][] = [
-  ['name', 'gender', 'birth_date'],
-  ['class_name', 'avatar_emoji', 'note'],
-  ['name', 'gender', 'birth_date', 'class_name', 'avatar_emoji', 'note'],
+  ['name', 'gender', 'birth_date', 'class_id'],
+  ['avatar_emoji', 'note'],
+  ['name', 'gender', 'birth_date', 'class_id', 'avatar_emoji', 'note'],
 ];
 
 const GENDERS = ['男', '女', '其他'] as const;
 const EMOJI_PRESETS = ['🧒', '👦', '👧', '🐣', '🌻', '⭐'];
 
-/** 统一清洗输入：去首尾空格，班级留空回退默认值 */
+/** 统一清洗输入：去首尾空格；班级必须来自选择，不留默认值 */
 function normalize(form: FormState): FormState {
   return {
     ...form,
     name: form.name.trim(),
-    class_name: form.class_name.trim() || '向日葵班',
     avatar_emoji: form.avatar_emoji.trim(),
     note: form.note.trim(),
   };
@@ -83,16 +91,21 @@ function normalize(form: FormState): FormState {
 function collectErrors(form: FormState, fields: readonly FieldKey[]): FieldErrors {
   const errors: FieldErrors = {};
   const parsed = createChildSchema.safeParse(normalize(form));
-  if (parsed.success) return errors;
-  for (const issue of parsed.error.issues) {
-    const key = issue.path[0];
-    if (
-      typeof key === 'string' &&
-      (fields as readonly string[]).includes(key) &&
-      !(key in errors)
-    ) {
-      errors[key as FieldKey] = issue.message;
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      const key = issue.path[0];
+      if (
+        typeof key === 'string' &&
+        (fields as readonly string[]).includes(key) &&
+        !(key in errors)
+      ) {
+        errors[key as FieldKey] = issue.message;
+      }
     }
+  }
+  // 班级是必填项：对象级 refine 没有字段路径，单独给出明确提示
+  if ((fields as readonly string[]).includes('class_id') && !form.class_id) {
+    errors.class_id = '请选择班级（先选学段，再选班级）';
   }
   return errors;
 }
@@ -111,19 +124,51 @@ export default function NewChildPage() {
     name: '',
     gender: '',
     birth_date: '',
-    class_name: '向日葵班',
+    stage: '',
+    class_id: '',
     avatar_emoji: '',
     note: '',
   });
+  const [classes, setClasses] = useState<SchoolClass[]>([]);
+  const [loadingClasses, setLoadingClasses] = useState(true);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submitting, setSubmitting] = useState(false);
 
-  function setField<K extends keyof FormState>(key: K, value: string) {
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/classes')
+      .then((r) => r.json())
+      .then((data: { classes?: SchoolClass[] }) => {
+        if (alive) setClasses(data.classes ?? []);
+      })
+      .catch(() => {
+        if (alive) toast.error('班级加载失败，请刷新重试');
+      })
+      .finally(() => {
+        if (alive) setLoadingClasses(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  function setField<K extends FieldKey>(key: K, value: string) {
     setForm((prev) => ({ ...prev, [key]: value }));
     setErrors((prev) => {
       if (!prev[key]) return prev;
       const next = { ...prev };
       delete next[key];
+      return next;
+    });
+  }
+
+  /** 切换学段后清空已选班级，避免跨学段误选 */
+  function setStage(value: string) {
+    setForm((prev) => ({ ...prev, stage: value, class_id: '' }));
+    setErrors((prev) => {
+      if (!prev.class_id) return prev;
+      const next = { ...prev };
+      delete next.class_id;
       return next;
     });
   }
@@ -162,7 +207,7 @@ export default function NewChildPage() {
           name: payload.name,
           gender: payload.gender,
           birth_date: payload.birth_date,
-          class_name: payload.class_name,
+          class_id: payload.class_id,
           avatar_emoji: payload.avatar_emoji || undefined,
           note: payload.note || undefined,
         }),
@@ -207,6 +252,11 @@ export default function NewChildPage() {
   }
 
   const preview = normalize(form);
+  const activeClasses = classes.filter((c) => c.is_active);
+  const selectedClass = classes.find((c) => c.id === form.class_id) ?? null;
+  const previewClassLabel = selectedClass
+    ? classLabel(selectedClass.stage, selectedClass.name)
+    : null;
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
@@ -309,26 +359,67 @@ export default function NewChildPage() {
                 />
                 <ErrorText message={errors.birth_date} />
               </div>
+
+              <div className="space-y-1.5">
+                <Label>班级 *</Label>
+                {loadingClasses ? (
+                  <div className="flex items-center gap-2 text-sm text-slate-400">
+                    <Loader2 className="size-4 animate-spin" />
+                    班级加载中…
+                  </div>
+                ) : activeClasses.length === 0 ? (
+                  <div className="rounded-lg border border-dashed p-3 text-sm leading-6 text-slate-500">
+                    还没有可用班级，请先到「班级」页面创建或启用班级。
+                    <Button asChild variant="link" size="sm" className="px-1">
+                      <Link href="/classes">去创建班级</Link>
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Select value={form.stage} onValueChange={setStage}>
+                      <SelectTrigger className="w-full" aria-label="选择学段">
+                        <SelectValue placeholder="选择学段" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CLASS_STAGES.map((value) => (
+                          <SelectItem key={value} value={value}>
+                            {CLASS_STAGE_LABELS[value]}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Select
+                      value={form.class_id}
+                      onValueChange={(value) => setField('class_id', value)}
+                      disabled={!form.stage}
+                    >
+                      <SelectTrigger className="w-full" aria-label="选择班级">
+                        <SelectValue
+                          placeholder={form.stage ? '选择班级' : '请先选择学段'}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {activeClasses
+                          .filter((c) => c.stage === form.stage)
+                          .map((c) => (
+                            <SelectItem key={c.id} value={c.id}>
+                              {c.name}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                <p className="text-xs text-slate-400">
+                  先选学段再选班级；分班后可在儿童档案中转班，历史归属会保留。
+                </p>
+                <ErrorText message={errors.class_id} />
+              </div>
             </>
           ) : null}
 
           {step === 1 ? (
             <>
-              <div className="space-y-1.5">
-                <Label htmlFor="class-name">班级</Label>
-                <Input
-                  id="class-name"
-                  placeholder="向日葵班"
-                  maxLength={50}
-                  value={form.class_name}
-                  onChange={(e) => setField('class_name', e.target.value)}
-                />
-                <p className="text-xs text-slate-400">
-                  留空将自动使用默认班级「向日葵班」。
-                </p>
-                <ErrorText message={errors.class_name} />
-              </div>
-
               <div className="space-y-1.5">
                 <Label htmlFor="avatar-emoji">头像 Emoji（选填）</Label>
                 <div className="flex flex-wrap items-center gap-2">
@@ -387,7 +478,7 @@ export default function NewChildPage() {
                     <Badge variant="outline" className="font-normal">
                       {preview.gender}
                     </Badge>
-                    <Badge variant="secondary">{preview.class_name}</Badge>
+                    <Badge variant="secondary">{previewClassLabel ?? '未选择班级'}</Badge>
                   </p>
                   <p className="mt-1 text-sm text-slate-500">
                     出生 {formatDateCn(form.birth_date)} · 当前{' '}

@@ -11,16 +11,30 @@ import {
 } from 'lucide-react';
 
 import { ActivitySupportSection } from '@/components/activity-support-section';
+import { TransferClassDialog } from '@/components/class-dialogs';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
-import { ageText, excerpt, formatDateCn, formatDateTimeCn } from '@/lib/format';
+import {
+  ageText,
+  classLabel,
+  excerpt,
+  formatDateCn,
+  formatDateTimeCn,
+  schoolClassLabel,
+} from '@/lib/format';
 import { hasCurrentActivitySupport } from '@/lib/activity-support';
 import { buildGrowthProfileFallback } from '@/lib/growth-profile';
-import { getChild, listObservations } from '@/lib/queries';
-import type { Child, GrowthProfileDraft, Observation } from '@/lib/types';
+import { getChild, listClasses, listEnrollments, listObservations } from '@/lib/queries';
+import type {
+  Child,
+  ChildClassEnrollment,
+  GrowthProfileDraft,
+  Observation,
+  SchoolClass,
+} from '@/lib/types';
 import { activitySupportSchema } from '@/lib/validation';
 
 export const dynamic = 'force-dynamic';
@@ -166,8 +180,14 @@ export default async function ChildDetailPage({
   if (!child) notFound();
 
   let observations: Observation[] = [];
+  let enrollments: ChildClassEnrollment[] = [];
+  let classes: SchoolClass[] = [];
   try {
-    observations = await listObservations({ childId: id });
+    [observations, enrollments, classes] = await Promise.all([
+      listObservations({ childId: id }),
+      listEnrollments(id),
+      listClasses(),
+    ]);
   } catch (e) {
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
@@ -225,7 +245,17 @@ export default async function ChildDetailPage({
                 <Badge variant="outline" className="font-normal">
                   {child.gender}
                 </Badge>
-                <Badge variant="secondary">{child.class_name}</Badge>
+                <Badge variant="secondary">
+                  {classLabel(child.class_stage, child.class_name) ?? '未分班'}
+                </Badge>
+                {child.current_class ? (
+                  <Link
+                    href={`/classes/${child.current_class.id}`}
+                    className="text-xs text-emerald-700 hover:text-emerald-800"
+                  >
+                    查看班级
+                  </Link>
+                ) : null}
                 {child.is_demo ? <DemoBadge /> : null}
               </div>
               <p className="mt-1 text-sm text-slate-500">
@@ -236,14 +266,48 @@ export default async function ChildDetailPage({
               ) : null}
             </div>
           </div>
-          <Button asChild size="lg" className="w-full shrink-0 sm:w-auto">
-            <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>
-              <PenLine className="size-4" />
-              记录一次观察
-            </Link>
-          </Button>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <TransferClassDialog child={child} classes={classes} />
+            <Button asChild size="lg" className="w-full sm:w-auto">
+              <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>
+                <PenLine className="size-4" />
+                记录一次观察
+              </Link>
+            </Button>
+          </div>
         </div>
       </section>
+
+      {enrollments.length > 1 ? (
+        <section className="rounded-xl border bg-white p-4 sm:p-5" aria-labelledby="class-trail-title">
+          <h2 id="class-trail-title" className="text-sm font-medium text-slate-700">
+            成长轨迹 · 班级
+          </h2>
+          <ul className="mt-3 space-y-2">
+            {enrollments.map((enrollment) => {
+              const klass = classes.find((c) => c.id === enrollment.class_id);
+              const isCurrent = !enrollment.end_date;
+              return (
+                <li key={enrollment.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-600">
+                  <span
+                    className={`size-1.5 shrink-0 rounded-full ${isCurrent ? 'bg-emerald-500' : 'bg-amber-300'}`}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {formatDateCn(enrollment.start_date)} 至{' '}
+                    {enrollment.end_date ? formatDateCn(enrollment.end_date) : '今'}
+                  </span>
+                  <span className="text-slate-300">·</span>
+                  <span className={isCurrent ? 'font-medium text-slate-800' : ''}>
+                    {classLabel(klass?.stage ?? null, klass?.name ?? enrollment.class_id)}
+                    {isCurrent ? '（当前）' : ''}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
 
       {profile ? (
         <GrowthProfileSections
@@ -328,6 +392,11 @@ export default async function ChildDetailPage({
                     <div className="flex flex-wrap items-center gap-2 text-sm">
                       <span className="font-medium">{formatDateCn(obs.observed_at)}</span>
                       {obs.context ? <span className="text-xs text-slate-500">{obs.context}</span> : null}
+                      {obs.observed_class && obs.class_id !== child.class_id ? (
+                        <span className="text-xs text-slate-500">
+                          当时在 {schoolClassLabel(obs.observed_class)}
+                        </span>
+                      ) : null}
                       {obs.confirmed_content?.domain ? (
                         <Badge variant="outline" className="font-normal">
                           {obs.confirmed_content.domain}
