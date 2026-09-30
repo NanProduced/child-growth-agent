@@ -7,9 +7,9 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
-import { excerpt, formatDateCn } from '@/lib/format';
-import { listChildren, listObservations } from '@/lib/queries';
-import type { Child, Observation, ObservationStatus } from '@/lib/types';
+import { classLabel, excerpt, formatDateCn, schoolClassLabel } from '@/lib/format';
+import { listChildren, listClasses, listObservations } from '@/lib/queries';
+import type { Child, Observation, ObservationStatus, SchoolClass } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -32,12 +32,19 @@ const STATUS_PRIORITY: Record<ObservationStatus, number> = {
   confirmed: 3,
 };
 
+const chipClass = (active: boolean) =>
+  `rounded-full border px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 ${
+    active
+      ? 'border-emerald-300 bg-emerald-50 font-medium text-emerald-800'
+      : 'border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:bg-amber-50/50'
+  }`;
+
 export default async function ObservationsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string }>;
+  searchParams: Promise<{ status?: string; class?: string }>;
 }) {
-  const { status } = await searchParams;
+  const { status, class: classParam } = await searchParams;
   const valid: ObservationStatus[] = ['draft', 'needs_input', 'ai_organized', 'confirmed'];
   const active = valid.includes(status as ObservationStatus)
     ? (status as ObservationStatus)
@@ -45,22 +52,45 @@ export default async function ObservationsPage({
 
   let observations: Observation[] = [];
   let children: Child[] = [];
+  let classes: SchoolClass[] = [];
   let dbError: string | null = null;
   try {
-    [observations, children] = await Promise.all([listObservations(), listChildren()]);
+    [observations, children, classes] = await Promise.all([
+      listObservations(),
+      listChildren(),
+      listClasses(),
+    ]);
   } catch (e) {
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
 
+  const activeClass =
+    classParam && classes.some((klass) => klass.id === classParam) ? classParam : 'all';
+  const scoped =
+    activeClass === 'all'
+      ? observations
+      : observations.filter((observation) => observation.class_id === activeClass);
   const childrenById = new Map(children.map((child) => [child.id, child]));
-  const filtered = active === 'all'
-    ? observations
-    : observations.filter((observation) => observation.status === active);
-  const shown = active === 'all'
-    ? [...filtered].sort((a, b) => STATUS_PRIORITY[a.status] - STATUS_PRIORITY[b.status])
-    : filtered;
+  const filtered =
+    active === 'all' ? scoped : scoped.filter((observation) => observation.status === active);
+  const shown =
+    active === 'all'
+      ? [...filtered].sort((a, b) => STATUS_PRIORITY[a.status] - STATUS_PRIORITY[b.status])
+      : filtered;
   const countOf = (key: ObservationStatus | 'all') =>
-    key === 'all' ? observations.length : observations.filter((observation) => observation.status === key).length;
+    key === 'all'
+      ? scoped.length
+      : scoped.filter((observation) => observation.status === key).length;
+  const hrefWith = (next: { status?: string; class?: string }) => {
+    const params = new URLSearchParams();
+    const nextStatus = next.status ?? (active === 'all' ? '' : active);
+    const nextClass = next.class ?? (activeClass === 'all' ? '' : activeClass);
+    if (nextStatus) params.set('status', nextStatus);
+    if (nextClass) params.set('class', nextClass);
+    const query = params.toString();
+    return query ? `/observations?${query}` : '/observations';
+  };
+  const nothingAtAll = active === 'all' && activeClass === 'all';
 
   return (
     <div className="space-y-7">
@@ -83,18 +113,39 @@ export default async function ObservationsPage({
         {TABS.map((tab) => (
           <Link
             key={tab.key}
-            href={tab.key === 'all' ? '/observations' : `/observations?status=${tab.key}`}
+            href={hrefWith({ status: tab.key === 'all' ? '' : tab.key })}
             aria-current={active === tab.key ? 'page' : undefined}
-            className={`rounded-full border px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 ${
-              active === tab.key
-                ? 'border-emerald-300 bg-emerald-50 font-medium text-emerald-800'
-                : 'border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:bg-amber-50/50'
-            }`}
+            className={chipClass(active === tab.key)}
           >
             {tab.label} <span className="text-xs opacity-70">{countOf(tab.key)}</span>
           </Link>
         ))}
       </nav>
+
+      {classes.length > 0 ? (
+        <nav aria-label="按班级筛选观察记录" className="flex flex-wrap gap-2">
+          <Link
+            href={hrefWith({ class: '' })}
+            aria-current={activeClass === 'all' ? 'page' : undefined}
+            className={chipClass(activeClass === 'all')}
+          >
+            全部班级 <span className="text-xs opacity-70">{observations.length}</span>
+          </Link>
+          {classes.map((klass) => (
+            <Link
+              key={klass.id}
+              href={hrefWith({ class: klass.id })}
+              aria-current={activeClass === klass.id ? 'page' : undefined}
+              className={chipClass(activeClass === klass.id)}
+            >
+              {classLabel(klass.stage, klass.name)}{' '}
+              <span className="text-xs opacity-70">
+                {observations.filter((observation) => observation.class_id === klass.id).length}
+              </span>
+            </Link>
+          ))}
+        </nav>
+      ) : null}
 
       {dbError ? (
         <Alert variant="destructive">
@@ -107,12 +158,12 @@ export default async function ObservationsPage({
             <ClipboardList className="size-6 text-emerald-600" aria-hidden="true" />
             <div>
               <h2 className="font-medium text-slate-800">
-                {active === 'all' ? '还没有观察记录' : '当前筛选下没有记录'}
+                {nothingAtAll ? '还没有观察记录' : '当前筛选下没有记录'}
               </h2>
               <p className="mt-1 text-sm leading-6 text-slate-500">
-                {active === 'all'
+                {nothingAtAll
                   ? '从一次具体行为开始，保存后再进入 AI 整理。'
-                  : '可以切换其他状态，或开始记录一条新的观察。'}
+                  : '可以切换其他状态或班级，或开始记录一条新的观察。'}
               </p>
             </div>
             <Button asChild size="sm">
@@ -141,6 +192,11 @@ export default async function ObservationsPage({
                     {formatDateCn(observation.observed_at)}
                     {observation.context ? ` · ${observation.context}` : ''}
                   </span>
+                  {schoolClassLabel(observation.observed_class) ? (
+                    <span className="text-xs text-slate-500">
+                      {schoolClassLabel(observation.observed_class)}
+                    </span>
+                  ) : null}
                   {observation.is_demo ? <DemoBadge /> : null}
                   <span className="ml-auto flex items-center gap-2">
                     {observation.ai_draft ? <AiBadge /> : null}

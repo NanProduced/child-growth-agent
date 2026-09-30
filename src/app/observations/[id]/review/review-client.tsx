@@ -40,7 +40,7 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
-import { formatDateCn, formatDateTimeCn } from '@/lib/format';
+import { formatDateCn, formatDateTimeCn, schoolClassLabel } from '@/lib/format';
 import { sameTeacherEditContent } from '@/lib/teacher-edit-review';
 import {
   FIVE_DOMAINS,
@@ -250,6 +250,7 @@ export function ReviewClient({
     setForm((prev) => (prev ? { ...prev, ...patch } : prev));
 
   const workflowStage = status === 'draft' ? 0 : status === 'needs_input' ? 1 : status === 'ai_organized' ? 2 : 3;
+  const observedClassText = schoolClassLabel(observation.observed_class);
   const workflowSteps = ['已保存', '补充信息（按需）', 'AI 整理', '教师确认'];
   const followUp = agentContext?.follow_up;
   const currentContent = form ? formToContent(form) : null;
@@ -283,6 +284,9 @@ export function ReviewClient({
               <StatusBadge status={status} />
             </span>
           </div>
+          {observedClassText ? (
+            <CardDescription>发生时班级：{observedClassText}</CardDescription>
+          ) : null}
           {observation.context ? (
             <CardDescription>观察情境：{observation.context}</CardDescription>
           ) : null}

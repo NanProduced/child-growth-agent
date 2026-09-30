@@ -17,9 +17,9 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
-import { ageText, excerpt, formatDateCn } from '@/lib/format';
-import { listChildren, listObservations } from '@/lib/queries';
-import type { Child, Observation } from '@/lib/types';
+import { ageText, classLabel, excerpt, formatDateCn, schoolClassLabel } from '@/lib/format';
+import { listChildren, listClasses, listObservations } from '@/lib/queries';
+import type { Child, Observation, SchoolClass } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,17 +27,47 @@ export const metadata: Metadata = {
   title: '工作台',
 };
 
-export default async function DashboardPage() {
+const chipClass = (active: boolean) =>
+  `rounded-full border px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 ${
+    active
+      ? 'border-emerald-300 bg-emerald-50 font-medium text-emerald-800'
+      : 'border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:bg-amber-50/50'
+  }`;
+
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ class?: string }>;
+}) {
+  const { class: classParam } = await searchParams;
   let children: Child[] = [];
   let observations: Observation[] = [];
+  let classes: SchoolClass[] = [];
   let dbError: string | null = null;
   try {
-    [children, observations] = await Promise.all([
+    [children, observations, classes] = await Promise.all([
       listChildren(),
       listObservations({ limit: 1000 }),
+      listClasses(),
     ]);
   } catch (e) {
     dbError = e instanceof Error ? e.message : '数据库连接失败';
+  }
+
+  const totalChildren = children.length;
+  const childCountByClass = new Map<string, number>();
+  for (const child of children) {
+    if (!child.class_id) continue;
+    childCountByClass.set(child.class_id, (childCountByClass.get(child.class_id) ?? 0) + 1);
+  }
+
+  const activeClass =
+    classParam && classes.some((klass) => klass.id === classParam) ? classParam : 'all';
+  if (activeClass !== 'all') {
+    children = children.filter((child) => child.class_id === activeClass);
+    observations = observations.filter(
+      (observation) => observation.class_id === activeClass,
+    );
   }
 
   const childrenById = new Map(children.map((child) => [child.id, child]));
@@ -84,6 +114,29 @@ export default async function DashboardPage() {
           aria-hidden="true"
         />
       </section>
+
+      {!dbError && classes.length > 0 ? (
+        <nav aria-label="按班级查看工作台" className="flex flex-wrap gap-2">
+          <Link
+            href="/"
+            aria-current={activeClass === 'all' ? 'page' : undefined}
+            className={chipClass(activeClass === 'all')}
+          >
+            全部班级 <span className="text-xs opacity-70">{totalChildren}</span>
+          </Link>
+          {classes.map((klass) => (
+            <Link
+              key={klass.id}
+              href={`/?class=${klass.id}`}
+              aria-current={activeClass === klass.id ? 'page' : undefined}
+              className={chipClass(activeClass === klass.id)}
+            >
+              {classLabel(klass.stage, klass.name)}{' '}
+              <span className="text-xs opacity-70">{childCountByClass.get(klass.id) ?? 0}</span>
+            </Link>
+          ))}
+        </nav>
+      ) : null}
 
       {dbError ? (
         <Alert variant="destructive">
@@ -148,6 +201,11 @@ export default async function DashboardPage() {
                             {formatDateCn(observation.observed_at)}
                             {observation.context ? ` · ${observation.context}` : ''}
                           </span>
+                          {schoolClassLabel(observation.observed_class) ? (
+                            <span className="text-xs text-slate-500">
+                              {schoolClassLabel(observation.observed_class)}
+                            </span>
+                          ) : null}
                           {child?.is_demo ? <DemoBadge /> : null}
                           <span className="ml-auto flex items-center gap-2">
                             {observation.ai_draft ? <AiBadge /> : null}
@@ -276,7 +334,8 @@ export default async function DashboardPage() {
                             {child.is_demo ? <DemoBadge /> : null}
                           </div>
                           <div className="mt-1 text-xs text-slate-500">
-                            {child.class_name} · {ageText(child.birth_date)}
+                            {classLabel(child.class_stage, child.class_name) ?? '未分班'} ·{' '}
+                            {ageText(child.birth_date)}
                           </div>
                         </div>
                       </div>

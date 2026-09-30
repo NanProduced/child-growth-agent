@@ -19,7 +19,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { hasCurrentActivitySupport } from '@/lib/activity-support';
 import { buildGrowthProfileFallback } from '@/lib/growth-profile';
-import { formatDateCn, formatDateTimeCn } from '@/lib/format';
+import { classLabel, formatDateCn, formatDateTimeCn } from '@/lib/format';
 import { listChildren, listObservations } from '@/lib/queries';
 import { activitySupportSchema } from '@/lib/validation';
 import type { ActivitySupport, Child, Observation, ObservationDraft } from '@/lib/types';
@@ -161,7 +161,9 @@ export default async function ReportsPage({
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">
                       {selected.name}
                     </h2>
-                    <Badge variant="secondary">{selected.class_name}</Badge>
+                    <Badge variant="secondary">
+                      {classLabel(selected.class_stage, selected.class_name) ?? '未分班'}
+                    </Badge>
                     {selected.is_demo ? <DemoBadge /> : null}
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-600">

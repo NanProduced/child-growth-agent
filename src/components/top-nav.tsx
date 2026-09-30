@@ -14,6 +14,7 @@ import {
   LogIn,
   LogOut,
   MoreHorizontal,
+  Users,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -39,6 +40,7 @@ import { useTeacher } from "@/components/teacher-provider";
 
 const NAV = [
   { href: "/", label: "工作台", icon: Home },
+  { href: "/classes", label: "班级", icon: Users },
   { href: "/children", label: "成长档案", icon: GraduationCap },
   { href: "/observations", label: "观察记录", icon: ClipboardList },
 ];

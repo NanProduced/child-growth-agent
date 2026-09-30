@@ -1,5 +1,20 @@
 /** 页面展示用的格式化工具 */
 
+import { CLASS_STAGE_LABELS, type ClassStage, type SchoolClass } from "./types";
+
+/** 「中班 · 向日葵班」；没有班级名时返回 null */
+export function classLabel(
+  stage: ClassStage | null | undefined,
+  name: string | null | undefined,
+): string | null {
+  if (!name) return null;
+  return stage ? `${CLASS_STAGE_LABELS[stage]} · ${name}` : name;
+}
+
+export function schoolClassLabel(klass: SchoolClass | null | undefined): string | null {
+  return klass ? classLabel(klass.stage, klass.name) : null;
+}
+
 export function formatDateCn(dateStr: string | null | undefined): string {
   if (!dateStr) return "—";
   const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);

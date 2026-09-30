@@ -108,6 +108,12 @@ export interface TeacherEditReview extends TeacherEditReviewOutput {
 export const CLASS_STAGES = ["small", "middle", "large"] as const;
 export type ClassStage = (typeof CLASS_STAGES)[number];
 
+export const CLASS_STAGE_LABELS: Record<ClassStage, string> = {
+  small: "小班",
+  middle: "中班",
+  large: "大班",
+};
+
 /** 班级实体：停用用 is_active 表示，不做物理删除 */
 export interface SchoolClass {
   id: string;

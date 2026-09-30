@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { hasCurrentActivitySupport } from '@/lib/activity-support';
-import { ageText, formatDateTimeCn } from '@/lib/format';
+import { ageText, classLabel, formatDateTimeCn } from '@/lib/format';
 import { listChildren, listObservations } from '@/lib/queries';
 import { activitySupportSchema } from '@/lib/validation';
 import type { ActivitySupport, Child, Observation } from '@/lib/types';
@@ -113,7 +113,8 @@ export default async function ActivitiesPage() {
                         {child.is_demo ? <DemoBadge /> : null}
                       </div>
                       <p className="mt-1 text-sm text-slate-500">
-                        {child.class_name} · {ageText(child.birth_date)}
+                        {classLabel(child.class_stage, child.class_name) ?? '未分班'} ·{' '}
+                        {ageText(child.birth_date)}
                       </p>
                     </div>
                     <ArrowUpRight

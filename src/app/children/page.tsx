@@ -7,9 +7,9 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { DemoBadge, StatusBadge } from '@/components/status-badges';
-import { ageText, excerpt, formatDateCn } from '@/lib/format';
-import { listChildren, listObservations } from '@/lib/queries';
-import type { Child, Observation } from '@/lib/types';
+import { ageText, classLabel, excerpt, formatDateCn } from '@/lib/format';
+import { listChildren, listClasses, listObservations } from '@/lib/queries';
+import type { Child, Observation, SchoolClass } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,18 +17,41 @@ export const metadata: Metadata = {
   title: '成长档案',
 };
 
-export default async function ChildrenPage() {
+const chipClass = (active: boolean) =>
+  `rounded-full border px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 ${
+    active
+      ? 'border-emerald-300 bg-emerald-50 font-medium text-emerald-800'
+      : 'border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:bg-amber-50/50'
+  }`;
+
+export default async function ChildrenPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ class?: string }>;
+}) {
+  const { class: classParam } = await searchParams;
   let children: Child[] = [];
   let observations: Observation[] = [];
+  let classes: SchoolClass[] = [];
   let dbError: string | null = null;
   try {
-    [children, observations] = await Promise.all([
+    [children, observations, classes] = await Promise.all([
       listChildren(),
       listObservations({ limit: 1000 }),
+      listClasses(),
     ]);
   } catch (e) {
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
+
+  const activeClass =
+    classParam && classes.some((klass) => klass.id === classParam) ? classParam : 'all';
+  const shownChildren =
+    activeClass === 'all' ? children : children.filter((child) => child.class_id === activeClass);
+  const countOf = (classId: string) =>
+    classId === 'all'
+      ? children.length
+      : children.filter((child) => child.class_id === classId).length;
 
   const observationsByChild = new Map<string, Observation[]>();
   for (const observation of observations) {
@@ -53,6 +76,29 @@ export default async function ChildrenPage() {
           </Link>
         </Button>
       </div>
+
+      {classes.length > 0 ? (
+        <nav aria-label="按班级筛选成长档案" className="flex flex-wrap gap-2">
+          <Link
+            href="/children"
+            aria-current={activeClass === 'all' ? 'page' : undefined}
+            className={chipClass(activeClass === 'all')}
+          >
+            全部班级 <span className="text-xs opacity-70">{countOf('all')}</span>
+          </Link>
+          {classes.map((klass) => (
+            <Link
+              key={klass.id}
+              href={`/children?class=${klass.id}`}
+              aria-current={activeClass === klass.id ? 'page' : undefined}
+              className={chipClass(activeClass === klass.id)}
+            >
+              {classLabel(klass.stage, klass.name)}{' '}
+              <span className="text-xs opacity-70">{countOf(klass.id)}</span>
+            </Link>
+          ))}
+        </nav>
+      ) : null}
 
       {dbError ? (
         <Alert variant="destructive">
@@ -79,9 +125,29 @@ export default async function ChildrenPage() {
             </Button>
           </CardContent>
         </Card>
+      ) : shownChildren.length === 0 ? (
+        <Card className="border-dashed">
+          <CardContent className="flex flex-col items-start gap-4 p-6 sm:p-8">
+            <span className="flex size-11 items-center justify-center rounded-full bg-amber-50 text-amber-700">
+              <Sprout className="size-5" aria-hidden="true" />
+            </span>
+            <div>
+              <h2 className="font-medium text-slate-800">这个班级还没有成长档案</h2>
+              <p className="mt-1 max-w-lg text-sm leading-6 text-slate-500">
+                切换到「全部班级」查看其他幼儿，或为这个班级建立成长档案。
+              </p>
+            </div>
+            <Button asChild>
+              <Link href="/children/new">
+                <UserPlus className="size-4" />
+                建立成长档案
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
-          {children.map((child) => {
+          {shownChildren.map((child) => {
             const childObservations = observationsByChild.get(child.id) ?? [];
             const latest = childObservations[0];
             const latestConfirmed = childObservations.find(
@@ -111,7 +177,8 @@ export default async function ChildrenPage() {
                           {child.is_demo ? <DemoBadge /> : null}
                         </div>
                         <p className="mt-1 text-sm text-slate-500">
-                          {child.class_name} · {ageText(child.birth_date)}
+                          {classLabel(child.class_stage, child.class_name) ?? '未分班'} ·{' '}
+                          {ageText(child.birth_date)}
                         </p>
                       </div>
                       <ArrowUpRight className="size-4 shrink-0 text-slate-400 transition-colors group-hover:text-amber-700" aria-hidden="true" />
