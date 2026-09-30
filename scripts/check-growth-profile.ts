@@ -18,8 +18,20 @@ import type {
   Observation,
   ObservationDraft,
   ObservationStatus,
+  SchoolClass,
 } from '../src/lib/types';
 import { growthProfileSchema } from '../src/lib/validation';
+
+const TEST_CLASS: SchoolClass = {
+  id: 'class-1',
+  name: '向日葵班',
+  stage: 'middle',
+  school_year: '2026-2027',
+  is_active: true,
+  is_demo: true,
+  created_at: '2026-09-01T00:00:00.000Z',
+  updated_at: null,
+};
 
 const CONFIRMED_CONTENT: ObservationDraft = {
   domain: '科学',
@@ -46,6 +58,8 @@ function observation(
   return {
     id,
     child_id: 'child-1',
+    class_id: TEST_CLASS.id,
+    observed_class: TEST_CLASS,
     observed_at: '2026-09-25',
     context: '建构区',
     raw_text: status === 'confirmed' ? `已确认原文 ${id}` : `未确认原文 ${id}`,
@@ -75,7 +89,11 @@ const child: Child = {
   name: '测试幼儿',
   gender: '女',
   birth_date: '2022-01-01',
-  class_name: '向日葵班',
+  class_name: TEST_CLASS.name,
+  class_id: TEST_CLASS.id,
+  current_class: TEST_CLASS,
+  class_stage: TEST_CLASS.stage,
+  class_school_year: TEST_CLASS.school_year,
   avatar_emoji: '🌱',
   note: null,
   growth_profile: null,

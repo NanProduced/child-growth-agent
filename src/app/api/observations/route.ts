@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireTeacher } from "@/lib/auth";
-import { createObservation, listObservations } from "@/lib/queries";
+import { createObservation, getChild, getCurrentClassId, listObservations } from "@/lib/queries";
 import { OBSERVATION_STATUSES, type ObservationStatus } from "@/lib/types";
 import { createObservationSchema } from "@/lib/validation";
 
@@ -45,8 +45,22 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    const child = await getChild(parsed.data.child_id);
+    if (!child) {
+      return NextResponse.json({ message: "幼儿不存在" }, { status: 404 });
+    }
+    // 发生时班级快照：取自儿童当前班级；无归属时明确报错，不套用默认班级名
+    const classId = await getCurrentClassId(child.id);
+    if (!classId) {
+      return NextResponse.json(
+        { message: `「${child.name}」尚未分配班级，请先完成分班后再记录观察` },
+        { status: 400 }
+      );
+    }
+
     const observation = await createObservation({
       child_id: parsed.data.child_id,
+      class_id: classId,
       observed_at: parsed.data.observed_at,
       context: parsed.data.context?.trim() ? parsed.data.context.trim() : null,
       raw_text: parsed.data.raw_text.trim(),

@@ -105,12 +105,43 @@ export interface TeacherEditReview extends TeacherEditReviewOutput {
   reviewed_at: string;
 }
 
+export const CLASS_STAGES = ["small", "middle", "large"] as const;
+export type ClassStage = (typeof CLASS_STAGES)[number];
+
+/** 班级实体：停用用 is_active 表示，不做物理删除 */
+export interface SchoolClass {
+  id: string;
+  name: string;
+  stage: ClassStage;
+  school_year: string;
+  is_active: boolean;
+  is_demo: boolean;
+  created_at: string;
+  updated_at: string | null;
+}
+
+/** 班级归属历史：end_date 为空表示当前在班 */
+export interface ChildClassEnrollment {
+  id: string;
+  child_id: string;
+  class_id: string;
+  start_date: string;
+  end_date: string | null;
+  created_at: string;
+}
+
 export interface Child {
   id: string;
   name: string;
   gender: string;
   birth_date: string;
+  /** 兼容字段：当前班级名（无归属时为历史遗留文本） */
   class_name: string;
+  /** 当前班级 id：无未结束归属时为 null */
+  class_id: string | null;
+  current_class: SchoolClass | null;
+  class_stage: ClassStage | null;
+  class_school_year: string | null;
   avatar_emoji: string | null;
   note: string | null;
   growth_profile: GrowthProfile | null;
@@ -122,6 +153,9 @@ export interface Child {
 export interface Observation {
   id: string;
   child_id: string;
+  /** 发生时班级快照：转班后旧观察仍保留原班级语境 */
+  class_id: string | null;
+  observed_class: SchoolClass | null;
   observed_at: string;
   context: string | null;
   raw_text: string;
