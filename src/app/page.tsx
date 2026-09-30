@@ -6,20 +6,17 @@ import {
   ArrowUpRight,
   Baby,
   Building2,
-  ChevronRight,
   CircleAlert,
   ClipboardCheck,
-  Clock3,
   ListTodo,
   PenLine,
   Sprout,
-  Users,
 } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { AiBadge, StatusBadge } from '@/components/status-badges';
+import { StatusBadge } from '@/components/status-badges';
 import { classLabel, excerpt, formatDateCn } from '@/lib/format';
 import { listChildren, listClasses, listObservations } from '@/lib/queries';
 import type { Child, Observation, SchoolClass } from '@/lib/types';
@@ -39,16 +36,10 @@ type ClassOverview = {
 
 const stageOrder = { small: 0, middle: 1, large: 2 } as const;
 
-function classTone(stage: SchoolClass['stage']): string {
-  if (stage === 'small') return 'border-rose-200 bg-rose-50/70';
-  if (stage === 'large') return 'border-sky-200 bg-sky-50/70';
-  return 'border-amber-200 bg-amber-50/70';
-}
-
-function classIcon(stage: SchoolClass['stage']) {
-  if (stage === 'small') return '🌈';
-  if (stage === 'large') return '🌼';
-  return '🌻';
+function classAccent(stage: SchoolClass['stage']): string {
+  if (stage === 'small') return 'bg-rose-100 text-rose-600';
+  if (stage === 'large') return 'bg-sky-100 text-sky-600';
+  return 'bg-amber-100 text-amber-600';
 }
 
 function pendingRank(observation: Observation): number {
@@ -69,34 +60,34 @@ function getPrimaryAction(
     return {
       label: '去处理待确认',
       href: '/observations?status=ai_organized',
-      helper: '有一条观察已经整理好，等你核对后进入成长档案。',
+      helper: '有一条整理好的观察，等你核对。',
     };
   }
   if (pendingInput) {
     return {
       label: '补充一条观察',
       href: '/observations?status=needs_input',
-      helper: '有一条观察需要一点必要信息，补充后再继续整理。',
+      helper: '有一条观察需要补充一点信息。',
     };
   }
   if (classes.length === 0) {
     return {
       label: '建立第一个班级',
       href: '/classes',
-      helper: '先建立小班、中班或大班，之后再为班级建立成长档案。',
+      helper: '先建立一个班级。',
     };
   }
   if (children.length === 0) {
     return {
       label: '建立第一个成长档案',
       href: '/children/new',
-      helper: '为一个小朋友建立档案，再从一条真实观察开始。',
+      helper: '先建立一份成长档案。',
     };
   }
   return {
     label: '开始记录',
     href: '/observations/new',
-    helper: '记录看到的具体行为和语言，AI 会在必要时帮你补充整理。',
+    helper: '记下看到的具体行为和语言。',
   };
 }
 
@@ -105,53 +96,30 @@ function ClassOverviewCard({ overview }: { overview: ClassOverview }) {
   return (
     <Link
       href={`/classes/${klass.id}`}
-      className={`group block min-w-0 overflow-hidden rounded-2xl border transition-transform hover:-translate-y-0.5 hover:shadow-sm ${classTone(klass.stage)}`}
+      className="group flex min-w-0 items-center gap-3 border-b border-slate-200/80 py-4 transition-colors hover:bg-white/60 sm:gap-4 sm:px-2"
     >
-      <div className="flex items-start justify-between gap-3 p-4 pb-3 sm:p-5 sm:pb-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-xl" aria-hidden="true">
-              {classIcon(klass.stage)}
-            </span>
-            <h3 className="truncate text-base font-semibold text-slate-900">
-              {classLabel(klass.stage, klass.name)}
-            </h3>
-          </div>
-          <p className="mt-1 pl-7 text-xs text-slate-500">{klass.school_year}</p>
-        </div>
-        <ChevronRight className="mt-1 size-5 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5" />
-      </div>
-
-      <div className="grid grid-cols-3 gap-2 border-t border-white/70 bg-white/60 px-4 py-3 text-xs sm:px-5">
-        <div>
-          <div className="flex items-center gap-1 text-slate-500">
-            <Users className="size-3.5" aria-hidden="true" />
-            成长档案
-          </div>
-          <p className="mt-1 text-base font-semibold text-slate-800">{childCount}</p>
-        </div>
-        <div>
-          <div className="flex items-center gap-1 text-slate-500">
-            <ClipboardCheck className="size-3.5" aria-hidden="true" />
-            待处理
-          </div>
-          <p className="mt-1 text-base font-semibold text-amber-700">{pendingCount}</p>
-        </div>
-        <div>
-          <div className="flex items-center gap-1 text-slate-500">
-            <Clock3 className="size-3.5" aria-hidden="true" />
-            最近观察
-          </div>
-          <p className="mt-1 truncate text-xs font-medium text-slate-700">
-            {latestObservation ? formatDateCn(latestObservation.observed_at) : '暂无'}
-          </p>
-        </div>
-      </div>
-
-      <div className="flex items-center justify-between bg-white/40 px-4 py-2.5 text-xs font-medium text-slate-600 sm:px-5">
-        <span>查看班级</span>
-        <ArrowUpRight className="size-3.5" aria-hidden="true" />
-      </div>
+      <span className={`flex size-10 shrink-0 items-center justify-center rounded-xl ${classAccent(klass.stage)}`} aria-hidden="true">
+        <Sprout className="size-5" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-base font-semibold text-slate-900">{classLabel(klass.stage, klass.name)}</span>
+        <span className="mt-1 block text-xs text-slate-500">{klass.school_year}</span>
+      </span>
+      <span className="hidden shrink-0 items-center gap-5 text-sm text-slate-500 sm:flex">
+        <span><strong className="font-semibold text-slate-800">{childCount}</strong> 份成长档案</span>
+        {pendingCount > 0 ? (
+          <span className="text-amber-700"><strong className="font-semibold">{pendingCount}</strong> 条待处理</span>
+        ) : null}
+        {latestObservation ? <span>最近 {formatDateCn(latestObservation.observed_at)}</span> : null}
+      </span>
+      <span className="flex shrink-0 items-center gap-1 text-sm font-medium text-emerald-700">
+        <span className="sr-only">查看班级</span>
+        <ArrowUpRight className="size-4 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" aria-hidden="true" />
+      </span>
+      <span className="mt-1 flex shrink-0 flex-col items-end gap-1 text-right text-xs text-slate-500 sm:hidden">
+        <span>{childCount} 份档案</span>
+        {pendingCount > 0 ? <span className="text-amber-700">{pendingCount} 条待处理</span> : null}
+      </span>
     </Link>
   );
 }
@@ -198,13 +166,10 @@ export default async function DashboardPage() {
     <div className="space-y-8 pb-4 sm:space-y-10">
       <section className="relative isolate min-h-0 overflow-hidden rounded-[28px] border border-amber-200/80 bg-[#fff4d9] px-6 py-8 sm:min-h-[300px] sm:px-10 sm:py-10">
         <div className="relative z-10 max-w-xl">
-          <p className="text-sm font-medium text-emerald-800">芽芽观察 · 全园观察</p>
-          <h1 className="mt-3 max-w-lg text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
+          <h1 className="max-w-lg text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
             今天，先看见一件小事
           </h1>
-          <p className="mt-3 max-w-md text-sm leading-7 text-slate-600 sm:text-base">
-            从全园的观察动态开始，找到下一件值得记录或确认的事。
-          </p>
+          <p className="mt-3 max-w-md text-sm leading-7 text-slate-600 sm:text-base">从一条真实观察开始，慢慢看见成长。</p>
           <div className="mt-6 flex flex-wrap items-center gap-3">
             <Button asChild size="lg" className="shadow-sm">
               <Link href={primaryAction.href}>
@@ -257,26 +222,26 @@ export default async function DashboardPage() {
                 <div className="flex items-center gap-2">
                   <Building2 className="size-5 text-emerald-700" aria-hidden="true" />
                   <h2 id="kindergarten-overview-title" className="text-xl font-semibold text-slate-900">
-                    园所概览
+                    班级
                   </h2>
                 </div>
                 <p className="mt-1 text-sm text-slate-500">
                   {activeClasses.length > 0
-                    ? `当前有 ${activeClasses.length} 个班级、${children.length} 个成长档案`
-                    : '先建立班级，再从一条观察开始积累。'}
+                    ? `${activeClasses.length} 个班级 · ${children.length} 份成长档案`
+                    : '先建立一个班级。'}
                 </p>
               </div>
               <Link
                 href="/classes"
                 className="flex items-center gap-1 text-sm font-medium text-emerald-700 hover:text-emerald-800"
               >
-                管理班级
+                查看班级
                 <ArrowUpRight className="size-3.5" aria-hidden="true" />
               </Link>
             </div>
 
             {classOverview.length > 0 ? (
-              <div className="grid gap-4 md:grid-cols-3">
+              <div className="border-y border-slate-200/80">
                 {classOverview.map((overview) => (
                   <ClassOverviewCard key={overview.klass.id} overview={overview} />
                 ))}
@@ -303,15 +268,15 @@ export default async function DashboardPage() {
 
           <section
             aria-labelledby="observation-path-title"
-            className="relative overflow-hidden rounded-[28px] border border-emerald-100 bg-[#f3faf2] p-5 sm:p-7"
+            className="relative space-y-7 border-t border-slate-200/80 pt-7 sm:space-y-8 sm:pt-9"
           >
-            <div className="relative z-10 flex items-start justify-between gap-4">
+            <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 id="observation-path-title" className="flex items-center gap-2 text-xl font-semibold text-slate-900">
                   <Sprout className="size-5 text-emerald-600" aria-hidden="true" />
-                  观察小路
+                  观察记录
                 </h2>
-                <p className="mt-1 text-sm leading-6 text-slate-500">把需要看一眼的内容，和刚刚发生的片段放在一起。</p>
+                <p className="mt-1 text-sm leading-6 text-slate-500">从一件小事，回到真实发生的现场。</p>
               </div>
               <Image
                 src="/assets/illustrations/observation-notebook.png"
@@ -319,113 +284,111 @@ export default async function DashboardPage() {
                 width={160}
                 height={160}
                 sizes="160px"
-                className="pointer-events-none -mr-2 -mt-6 hidden w-28 object-contain sm:block"
+                className="pointer-events-none -mr-1 -mt-5 hidden w-24 object-contain sm:block"
               />
             </div>
 
-            <div className="relative z-10 mt-6">
+            <div className="space-y-8">
+              <section aria-labelledby="pending-title">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
                   <h3 className="flex items-center gap-2 text-base font-semibold text-slate-900">
                     <ListTodo className="size-4 text-rose-500" aria-hidden="true" />
-                    待处理观察
+                    需要你看一眼
                   </h3>
-                  <p className="mt-1 text-xs text-slate-500">先处理需要教师判断的内容</p>
                 </div>
                 <Link href="/observations" className="text-sm font-medium text-emerald-700 hover:text-emerald-800">
-                  查看全部
+                  去处理
                   <ArrowUpRight className="ml-1 inline size-3.5" aria-hidden="true" />
                 </Link>
               </div>
               {pending.length > 0 ? (
-                <div className="grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="max-w-4xl divide-y divide-rose-100/80 border-y border-rose-100/80 bg-rose-50/25">
                   {pending.map((observation) => {
                     const child = childrenById.get(observation.child_id);
                     return (
                       <Link
                         key={observation.id}
                         href={`/observations/${observation.id}/review`}
-                        className="group flex min-w-0 items-center gap-3 rounded-2xl border border-rose-100 bg-white/80 p-3.5 transition hover:-translate-y-0.5 hover:bg-white hover:shadow-sm"
+                        className="group flex min-w-0 items-center gap-3 px-3 py-3.5 transition-colors hover:bg-white/70 sm:px-4"
                       >
-                        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-xl" aria-hidden="true">
+                        <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-white text-lg" aria-hidden="true">
                           {child?.avatar_emoji ?? '🧒'}
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center gap-2 text-sm font-medium text-slate-800">
                             <span className="truncate">{child?.name ?? '未知幼儿'}</span>
-                            <ChevronRight className="size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5" />
                           </span>
-                          <span className="mt-1 block truncate text-xs text-slate-500">{excerpt(observation.raw_text, 48)}</span>
-                          <span className="mt-2 block">
+                          <span className="mt-1 block truncate text-sm text-slate-600">{excerpt(observation.raw_text, 56)}</span>
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2">
                             <StatusBadge status={observation.status} />
-                          </span>
+                          <ArrowUpRight className="size-4 text-slate-400 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" aria-hidden="true" />
                         </span>
                       </Link>
                     );
                   })}
                 </div>
               ) : (
-                <div className="flex items-center gap-3 rounded-2xl border border-dashed border-emerald-200 bg-white/55 px-4 py-3.5">
+                <div className="flex max-w-4xl items-center gap-3 border-y border-dashed border-emerald-200 px-3 py-3.5 sm:px-4">
                   <ClipboardCheck className="size-5 shrink-0 text-emerald-600" aria-hidden="true" />
-                  <p className="text-sm text-slate-600">暂时没有待处理观察，新的记录会在这里提醒你核对。</p>
+                  <p className="text-sm text-slate-600">暂时没有需要处理的观察。</p>
                 </div>
               )}
-            </div>
+              </section>
 
-            <div className="relative z-10 mt-7">
+              <section aria-labelledby="recent-title" className="border-t border-slate-200/80 pt-7">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
                   <h3 className="flex items-center gap-2 text-base font-semibold text-slate-900">
                     <Baby className="size-4 text-sky-600" aria-hidden="true" />
-                    最近留下的片段
+                    最近记录
                   </h3>
-                  <p className="mt-1 text-xs text-slate-500">从一件小事，回到真实发生的现场</p>
                 </div>
                 <Link href="/observations" className="text-sm font-medium text-emerald-700 hover:text-emerald-800">
-                  查看全部
+                  全部记录
                   <ArrowUpRight className="ml-1 inline size-3.5" aria-hidden="true" />
                 </Link>
               </div>
               {recent.length > 0 ? (
-                <div className="grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="relative max-w-4xl border-l border-emerald-200 pl-5 sm:pl-6">
                   {recent.map((observation) => {
                     const child = childrenById.get(observation.child_id);
                     return (
                       <Link
                         key={observation.id}
                         href={`/observations/${observation.id}/review`}
-                        className="group min-w-0 rounded-2xl border border-white/80 bg-white/75 p-4 transition hover:-translate-y-0.5 hover:bg-white hover:shadow-sm"
+                        className="group relative block min-w-0 rounded-xl px-3 py-3 transition-colors hover:bg-emerald-50/60 sm:px-4"
                       >
-                        <div className="flex items-start gap-3">
-                          <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sky-50 text-lg" aria-hidden="true">
+                        <span className="absolute -left-[30px] top-4 flex size-4 items-center justify-center rounded-full border-2 border-white bg-emerald-300" aria-hidden="true" />
+                        <div className="flex items-center gap-3">
+                          <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-sky-50 text-base" aria-hidden="true">
                             {child?.avatar_emoji ?? '🧒'}
                           </span>
                           <span className="min-w-0 flex-1">
-                            <span className="flex items-center justify-between gap-2">
-                              <span className="truncate text-sm font-medium text-slate-800">{child?.name ?? '未知幼儿'}</span>
-                              <ChevronRight className="size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5" />
+                            <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                              <strong className="font-medium text-slate-800">{child?.name ?? '未知幼儿'}</strong>
+                              <span className="text-xs text-slate-500">
+                                {formatDateCn(observation.observed_at)}
+                                {observation.context ? ` · ${observation.context}` : ''}
+                              </span>
                             </span>
-                            <span className="mt-1 block truncate text-xs text-slate-500">
-                              {formatDateCn(observation.observed_at)}
-                              {observation.context ? ` · ${observation.context}` : ''}
-                            </span>
+                            <span className="mt-1 block truncate text-sm text-slate-600">{excerpt(observation.raw_text, 78)}</span>
                           </span>
-                        </div>
-                        <p className="mt-3 line-clamp-2 text-sm leading-6 text-slate-600">{excerpt(observation.raw_text, 74)}</p>
-                        <span className="mt-3 flex flex-wrap items-center gap-2">
-                          {observation.ai_draft ? <AiBadge /> : null}
                           <StatusBadge status={observation.status} />
-                        </span>
+                          <ArrowUpRight className="size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" aria-hidden="true" />
+                        </div>
                       </Link>
                     );
                   })}
                 </div>
               ) : (
-                <div className="flex items-center gap-3 rounded-2xl border border-dashed border-sky-200 bg-white/55 px-4 py-3.5">
+                <div className="flex max-w-4xl items-center gap-3 border-y border-dashed border-sky-200 px-3 py-3.5 sm:px-4">
                   <Baby className="size-5 shrink-0 text-sky-600" aria-hidden="true" />
                   <p className="text-sm text-slate-600">还没有观察记录，从一次具体行为开始吧。</p>
                 </div>
               )}
+              </section>
             </div>
           </section>
 
