@@ -7,7 +7,8 @@ export type LlmResponseType =
   | 'follow_up_decision'
   | 'observation_draft'
   | 'teacher_edit_review'
-  | 'growth_profile';
+  | 'growth_profile'
+  | 'activity_support';
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -124,6 +125,47 @@ const STEPFUN_RESPONSE_FORMATS: Record<LlmResponseType, object> = {
           development_clues: { type: 'array', items: { type: 'string' } },
           next_support: { type: 'string' },
           next_focus: { type: 'string' },
+        },
+      },
+    },
+  },
+  activity_support: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'activity_support',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['suggestions'],
+        properties: {
+          suggestions: {
+            type: 'array',
+            minItems: 2,
+            maxItems: 3,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: [
+                'title',
+                'purpose',
+                'steps',
+                'materials',
+                'observe',
+                'adaptation',
+                'evidence',
+              ],
+              properties: {
+                title: { type: 'string' },
+                purpose: { type: 'string' },
+                steps: { type: 'array', minItems: 2, maxItems: 4, items: { type: 'string' } },
+                materials: { type: 'array', items: { type: 'string' } },
+                observe: { type: 'string' },
+                adaptation: { type: 'string' },
+                evidence: { type: 'array', minItems: 1, maxItems: 4, items: { type: 'string' } },
+              },
+            },
+          },
         },
       },
     },

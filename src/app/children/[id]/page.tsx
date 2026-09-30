@@ -10,15 +10,18 @@ import {
   Sprout,
 } from 'lucide-react';
 
+import { ActivitySupportSection } from '@/components/activity-support-section';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
 import { ageText, excerpt, formatDateCn, formatDateTimeCn } from '@/lib/format';
+import { hasCurrentActivitySupport } from '@/lib/activity-support';
 import { buildGrowthProfileFallback } from '@/lib/growth-profile';
 import { getChild, listObservations } from '@/lib/queries';
 import type { Child, GrowthProfileDraft, Observation } from '@/lib/types';
+import { activitySupportSchema } from '@/lib/validation';
 
 export const dynamic = 'force-dynamic';
 
@@ -192,6 +195,14 @@ export default async function ChildDetailPage({
   const fallbackProfile = buildGrowthProfileFallback(confirmedObservations);
   const profile = child.growth_profile ?? fallbackProfile;
   const isFallback = !child.growth_profile && Boolean(fallbackProfile);
+  const storedActivitySupport = activitySupportSchema.safeParse(
+    child.growth_profile?.activity_support,
+  );
+  const activitySupport =
+    storedActivitySupport.success &&
+    hasCurrentActivitySupport(storedActivitySupport.data, confirmedObservations)
+      ? storedActivitySupport.data
+      : null;
 
   return (
     <div className="space-y-8">
@@ -253,6 +264,12 @@ export default async function ChildDetailPage({
           </CardContent>
         </Card>
       )}
+
+      <ActivitySupportSection
+        childId={child.id}
+        confirmedObservationCount={confirmedObservations.length}
+        initialSupport={activitySupport}
+      />
 
       <section aria-labelledby="observation-timeline-title">
         <div className="mb-3 flex flex-wrap items-end justify-between gap-3">

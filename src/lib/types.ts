@@ -52,10 +52,31 @@ export interface GrowthProfileDraft {
   next_focus: string;
 }
 
+export interface ActivitySupportSuggestion {
+  title: string;
+  purpose: string;
+  steps: string[];
+  materials: string[];
+  observe: string;
+  adaptation: string;
+  evidence: string[];
+}
+
+export interface ActivitySupportDraft {
+  suggestions: ActivitySupportSuggestion[];
+}
+
+export interface ActivitySupport extends ActivitySupportDraft {
+  source_observation_ids: string[];
+  ai_model: string;
+  generated_at: string;
+}
+
 export interface GrowthProfile extends GrowthProfileDraft {
   source_observation_ids: string[];
   ai_model: string;
   updated_at: string;
+  activity_support?: ActivitySupport | null;
 }
 
 export type TeacherEditContent = Pick<
