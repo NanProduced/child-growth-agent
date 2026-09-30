@@ -5,6 +5,35 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SCHOOL_YEAR_RE = /^\d{4}-\d{4}$/;
 
+/** 发展性内容的最终守门词；raw_text 原文不经过此校验。 */
+export const DEVELOPMENT_FORBIDDEN_TERMS = [
+  "自闭症",
+  "多动症",
+  "注意力缺陷",
+  "抑郁",
+  "焦虑",
+  "智商",
+  "智力低下",
+  "诊断",
+  "评分",
+  "得分",
+  "分数",
+  "排名",
+  "领先",
+  "落后",
+  "等级",
+  "能力差",
+  "注意力不集中",
+  "发展落后",
+  "同龄比较",
+  "同龄人比较",
+] as const;
+
+export function findDevelopmentForbiddenTerm(value: unknown): string | undefined {
+  const text = JSON.stringify(value) ?? "";
+  return DEVELOPMENT_FORBIDDEN_TERMS.find((term) => text.includes(term));
+}
+
 /** 观察整理卡片（AI 草稿与教师确认提交体共用） */
 export const observationDraftSchema = z.object({
   domain: z.enum(FIVE_DOMAINS, { message: "发展领域须为：健康、语言、社会、科学、艺术" }),

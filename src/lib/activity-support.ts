@@ -64,6 +64,9 @@ export async function updateActivitySupport(
     {
       childName: child.name,
       childGender: child.gender,
+      childBirthDate: child.birth_date,
+      classStage: child.class_stage,
+      className: child.class_name,
       observations: confirmed,
       growthProfile: supportedGrowthProfile(child, confirmed),
       forwardHeaders: options.forwardHeaders,

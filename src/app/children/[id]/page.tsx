@@ -12,6 +12,7 @@ import {
 
 import { ActivitySupportSection } from '@/components/activity-support-section';
 import { TransferClassDialog } from '@/components/class-dialogs';
+import { GrowthProfileRetry } from '@/components/growth-profile-retry';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -215,6 +216,12 @@ export default async function ChildDetailPage({
   const fallbackProfile = buildGrowthProfileFallback(confirmedObservations);
   const profile = child.growth_profile ?? fallbackProfile;
   const isFallback = !child.growth_profile && Boolean(fallbackProfile);
+  const profileObservationIds = child.growth_profile?.source_observation_ids ?? [];
+  const profileIsCurrent = Boolean(
+    child.growth_profile &&
+      profileObservationIds.length === confirmedObservations.length &&
+      confirmedObservations.every((observation) => profileObservationIds.includes(observation.id)),
+  );
   const storedActivitySupport = activitySupportSchema.safeParse(
     child.growth_profile?.activity_support,
   );
@@ -328,6 +335,10 @@ export default async function ChildDetailPage({
           </CardContent>
         </Card>
       )}
+
+      {confirmedObservations.length > 0 && !profileIsCurrent ? (
+        <GrowthProfileRetry childId={child.id} hasStoredProfile={Boolean(child.growth_profile)} />
+      ) : null}
 
       <ActivitySupportSection
         childId={child.id}

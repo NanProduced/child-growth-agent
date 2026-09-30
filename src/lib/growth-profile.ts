@@ -67,6 +67,7 @@ export async function updateGrowthProfileAfterConfirmation(
     {
       childName: child.name,
       childGender: child.gender,
+      childBirthDate: child.birth_date,
       observations: confirmed,
       forwardHeaders: options.forwardHeaders,
     },

@@ -113,11 +113,14 @@ async function main(): Promise<void> {
   const messages = buildGrowthProfileMessages({
     childName: child.name,
     childGender: child.gender,
+    childBirthDate: child.birth_date,
     observations: mixedObservations,
   });
   const userMessage = messages[1].content;
   assert.ok(userMessage.includes('confirmed-1'));
   assert.ok(userMessage.includes('已确认原文 confirmed-1'));
+  assert.ok(userMessage.includes('"age_months":56'));
+  assert.ok(userMessage.includes('"stage":"middle"'));
   assert.ok(!userMessage.includes('draft-1'));
   assert.ok(!userMessage.includes('needs-input-1'));
   assert.ok(!userMessage.includes('ai-organized-1'));
@@ -127,7 +130,12 @@ async function main(): Promise<void> {
   // 2) 合法 profile 输出通过最终 Zod schema，且使用增长档案 response type。
   let responseType = '';
   const generated = await generateGrowthProfile(
-    { childName: child.name, childGender: child.gender, observations: mixedObservations },
+    {
+      childName: child.name,
+      childGender: child.gender,
+      childBirthDate: child.birth_date,
+      observations: mixedObservations,
+    },
     async (_request, options) => {
       responseType = options?.responseType ?? '';
       return reply(JSON.stringify(PROFILE));
@@ -141,7 +149,12 @@ async function main(): Promise<void> {
   let forbiddenCalls = 0;
   await assert.rejects(
     generateGrowthProfile(
-      { childName: child.name, childGender: child.gender, observations: [confirmed] },
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        observations: [confirmed],
+      },
       async () => {
         forbiddenCalls += 1;
         return reply(JSON.stringify({ ...PROFILE, summary: '不能进行诊断、评分或排名。' }));

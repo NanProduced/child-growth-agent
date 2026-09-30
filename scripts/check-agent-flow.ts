@@ -21,7 +21,11 @@ import {
 } from '../src/lib/teacher-edit-review';
 import type { LlmResult } from '../src/lib/llm';
 import type { TeacherEditReview } from '../src/lib/types';
-import { followUpDecisionSchema, teacherEditReviewSchema } from '../src/lib/validation';
+import {
+  findDevelopmentForbiddenTerm,
+  followUpDecisionSchema,
+  teacherEditReviewSchema,
+} from '../src/lib/validation';
 
 const PARAMS = {
   childName: '测试幼儿',
@@ -129,6 +133,10 @@ async function main(): Promise<void> {
     true,
   );
   assert.equal(teacherEditSubmissionAction(VALID_DRAFT, VALID_DRAFT, undefined), 'confirm');
+
+  // 最终确认内容也必须经过发展性内容守门；raw_text 不走此校验。
+  assert.equal(findDevelopmentForbiddenTerm({ ...VALID_DRAFT, objective_description: '需要评分。' }), '评分');
+  assert.equal(findDevelopmentForbiddenTerm({ ...VALID_DRAFT, objective_description: '幼儿把积木放在桥墩上。' }), undefined);
 
   const reviewReply = JSON.stringify({
     decision: 'accept',

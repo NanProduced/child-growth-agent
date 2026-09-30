@@ -19,7 +19,10 @@ import {
   teacherEditSubmissionAction,
 } from "@/lib/teacher-edit-review";
 import type { AgentContext } from "@/lib/types";
-import { confirmObservationSchema } from "@/lib/validation";
+import {
+  confirmObservationSchema,
+  findDevelopmentForbiddenTerm,
+} from "@/lib/validation";
 
 /**
  * 教师确认：未修改 AI 草稿时直接确认；修改 AI 内容时先进行 Agent 修改审核。
@@ -46,6 +49,14 @@ export async function POST(
     return NextResponse.json(
       { message: parsed.error.issues[0]?.message ?? "确认内容不完整" },
       { status: 400 }
+    );
+  }
+
+  const forbiddenTerm = findDevelopmentForbiddenTerm(parsed.data.content);
+  if (forbiddenTerm) {
+    return NextResponse.json(
+      { message: `确认内容包含不适合写入成长记录的表述「${forbiddenTerm}」，请改为具体行为和语言。` },
+      { status: 400 },
     );
   }
 

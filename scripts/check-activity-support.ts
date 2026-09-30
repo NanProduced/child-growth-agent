@@ -131,12 +131,17 @@ async function main(): Promise<void> {
   const messages = buildActivitySupportMessages({
     childName: child.name,
     childGender: child.gender,
+    childBirthDate: child.birth_date,
+    classStage: child.class_stage,
+    className: child.class_name,
     observations: mixedObservations,
     growthProfile: PROFILE,
   });
   const userMessage = messages[1].content;
   assert.ok(userMessage.includes('confirmed-1'));
   assert.ok(userMessage.includes('已确认原文 confirmed-1'));
+  assert.ok(userMessage.includes('"age_months":56'));
+  assert.ok(userMessage.includes('当前班级上下文：middle · 向日葵班'));
   assert.ok(userMessage.includes(PROFILE.summary));
   assert.ok(!userMessage.includes('draft-1'));
   assert.ok(!userMessage.includes('未确认原文 draft-1'));
@@ -147,7 +152,14 @@ async function main(): Promise<void> {
   let emptyCalls = 0;
   await assert.rejects(
     generateActivitySupport(
-      { childName: child.name, childGender: child.gender, observations: [draft] },
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [draft],
+      },
       async () => {
         emptyCalls += 1;
         return reply(JSON.stringify(VALID_SUPPORT));
@@ -161,7 +173,14 @@ async function main(): Promise<void> {
   // 3) 合法输出通过最终 Zod 校验，并使用 activity_support response type。
   let responseType = '';
   const generated = await generateActivitySupport(
-    { childName: child.name, childGender: child.gender, observations: mixedObservations },
+    {
+      childName: child.name,
+      childGender: child.gender,
+      childBirthDate: child.birth_date,
+      classStage: child.class_stage,
+      className: child.class_name,
+      observations: mixedObservations,
+    },
     async (_messages, options) => {
       responseType = options?.responseType ?? '';
       return reply(JSON.stringify(VALID_SUPPORT));
@@ -176,7 +195,14 @@ async function main(): Promise<void> {
   let forbiddenCalls = 0;
   await assert.rejects(
     generateActivitySupport(
-      { childName: child.name, childGender: child.gender, observations: [confirmed] },
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [confirmed],
+      },
       async () => {
         forbiddenCalls += 1;
         return reply(JSON.stringify({
@@ -195,7 +221,14 @@ async function main(): Promise<void> {
   let countCalls = 0;
   await assert.rejects(
     generateActivitySupport(
-      { childName: child.name, childGender: child.gender, observations: [confirmed] },
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [confirmed],
+      },
       async () => {
         countCalls += 1;
         return reply(JSON.stringify({
@@ -211,7 +244,14 @@ async function main(): Promise<void> {
   // 6) 每条建议都必须能标出输入中的观察领域。
   await assert.rejects(
     generateActivitySupport(
-      { childName: child.name, childGender: child.gender, observations: [confirmed] },
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [confirmed],
+      },
       async () =>
         reply(JSON.stringify({
           suggestions: VALID_SUPPORT.suggestions.map((suggestion) => ({
