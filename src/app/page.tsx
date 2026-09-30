@@ -17,11 +17,10 @@ import {
 } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { AiBadge, StatusBadge } from '@/components/status-badges';
-import { classLabel, excerpt, formatDateCn, schoolClassLabel } from '@/lib/format';
+import { classLabel, excerpt, formatDateCn } from '@/lib/format';
 import { listChildren, listClasses, listObservations } from '@/lib/queries';
 import type { Child, Observation, SchoolClass } from '@/lib/types';
 
@@ -199,7 +198,7 @@ export default async function DashboardPage() {
     <div className="space-y-8 pb-4 sm:space-y-10">
       <section className="relative isolate min-h-0 overflow-hidden rounded-[28px] border border-amber-200/80 bg-[#fff4d9] px-6 py-8 sm:min-h-[300px] sm:px-10 sm:py-10">
         <div className="relative z-10 max-w-xl">
-          <p className="text-sm font-medium text-emerald-800">芽芽观察 · 演示园所</p>
+          <p className="text-sm font-medium text-emerald-800">芽芽观察 · 全园观察</p>
           <h1 className="mt-3 max-w-lg text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
             今天，先看见一件小事
           </h1>
@@ -302,15 +301,36 @@ export default async function DashboardPage() {
             )}
           </section>
 
-          <section className="grid gap-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)]">
-            <section aria-labelledby="pending-title" className="min-w-0">
-              <div className="mb-3 flex items-end justify-between gap-3">
+          <section
+            aria-labelledby="observation-path-title"
+            className="relative overflow-hidden rounded-[28px] border border-emerald-100 bg-[#f3faf2] p-5 sm:p-7"
+          >
+            <div className="relative z-10 flex items-start justify-between gap-4">
+              <div>
+                <h2 id="observation-path-title" className="flex items-center gap-2 text-xl font-semibold text-slate-900">
+                  <Sprout className="size-5 text-emerald-600" aria-hidden="true" />
+                  观察小路
+                </h2>
+                <p className="mt-1 text-sm leading-6 text-slate-500">把需要看一眼的内容，和刚刚发生的片段放在一起。</p>
+              </div>
+              <Image
+                src="/assets/illustrations/observation-notebook.png"
+                alt=""
+                width={160}
+                height={160}
+                sizes="160px"
+                className="pointer-events-none -mr-2 -mt-6 hidden w-28 object-contain sm:block"
+              />
+            </div>
+
+            <div className="relative z-10 mt-6">
+              <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
-                  <h2 id="pending-title" className="flex items-center gap-2 text-lg font-semibold text-slate-900">
-                    <ListTodo className="size-5 text-rose-500" aria-hidden="true" />
+                  <h3 className="flex items-center gap-2 text-base font-semibold text-slate-900">
+                    <ListTodo className="size-4 text-rose-500" aria-hidden="true" />
                     待处理观察
-                  </h2>
-                  <p className="mt-1 text-sm text-slate-500">先处理需要教师判断的内容</p>
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-500">先处理需要教师判断的内容</p>
                 </div>
                 <Link href="/observations" className="text-sm font-medium text-emerald-700 hover:text-emerald-800">
                   查看全部
@@ -318,62 +338,48 @@ export default async function DashboardPage() {
                 </Link>
               </div>
               {pending.length > 0 ? (
-                <Card className="overflow-hidden border-rose-100 bg-rose-50/35">
-                  <CardContent className="divide-y divide-rose-100/80 p-0">
-                    {pending.map((observation) => {
-                      const child = childrenById.get(observation.child_id);
-                      return (
-                        <Link
-                          key={observation.id}
-                          href={`/observations/${observation.id}/review`}
-                          className="group flex items-center gap-3 p-4 transition-colors hover:bg-white/70 sm:gap-4"
-                        >
-                          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-white text-xl shadow-sm" aria-hidden="true">
-                            {child?.avatar_emoji ?? '🧒'}
+                <div className="grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {pending.map((observation) => {
+                    const child = childrenById.get(observation.child_id);
+                    return (
+                      <Link
+                        key={observation.id}
+                        href={`/observations/${observation.id}/review`}
+                        className="group flex min-w-0 items-center gap-3 rounded-2xl border border-rose-100 bg-white/80 p-3.5 transition hover:-translate-y-0.5 hover:bg-white hover:shadow-sm"
+                      >
+                        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-xl" aria-hidden="true">
+                          {child?.avatar_emoji ?? '🧒'}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-2 text-sm font-medium text-slate-800">
+                            <span className="truncate">{child?.name ?? '未知幼儿'}</span>
+                            <ChevronRight className="size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5" />
                           </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-slate-800">
-                              <span>{child?.name ?? '未知幼儿'}</span>
-                              {observation.observed_class ? (
-                                <span className="text-xs font-normal text-slate-500">
-                                  {schoolClassLabel(observation.observed_class)}
-                                </span>
-                              ) : null}
-                            </span>
-                            <span className="mt-1 block truncate text-sm text-slate-600">
-                              {excerpt(observation.raw_text, 82)}
-                            </span>
-                          </span>
-                          <span className="flex shrink-0 items-center gap-2">
+                          <span className="mt-1 block truncate text-xs text-slate-500">{excerpt(observation.raw_text, 48)}</span>
+                          <span className="mt-2 block">
                             <StatusBadge status={observation.status} />
-                            <ChevronRight className="size-4 text-slate-400 transition-transform group-hover:translate-x-0.5" />
                           </span>
-                        </Link>
-                      );
-                    })}
-                  </CardContent>
-                </Card>
+                        </span>
+                      </Link>
+                    );
+                  })}
+                </div>
               ) : (
-                <Card className="border-dashed">
-                  <CardContent className="flex items-start gap-3 p-6">
-                    <ClipboardCheck className="mt-0.5 size-5 text-emerald-600" aria-hidden="true" />
-                    <div>
-                      <h3 className="font-medium text-slate-800">暂时没有待处理观察</h3>
-                      <p className="mt-1 text-sm leading-6 text-slate-500">新的记录会在这里提醒你核对和确认。</p>
-                    </div>
-                  </CardContent>
-                </Card>
+                <div className="flex items-center gap-3 rounded-2xl border border-dashed border-emerald-200 bg-white/55 px-4 py-3.5">
+                  <ClipboardCheck className="size-5 shrink-0 text-emerald-600" aria-hidden="true" />
+                  <p className="text-sm text-slate-600">暂时没有待处理观察，新的记录会在这里提醒你核对。</p>
+                </div>
               )}
-            </section>
+            </div>
 
-            <section aria-labelledby="recent-title" className="min-w-0">
-              <div className="mb-3 flex items-end justify-between gap-3">
+            <div className="relative z-10 mt-7">
+              <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
-                  <h2 id="recent-title" className="flex items-center gap-2 text-lg font-semibold text-slate-900">
-                    <Sprout className="size-5 text-emerald-600" aria-hidden="true" />
-                    最近观察
-                  </h2>
-                  <p className="mt-1 text-sm text-slate-500">从全园动态回到真实发生的片段</p>
+                  <h3 className="flex items-center gap-2 text-base font-semibold text-slate-900">
+                    <Baby className="size-4 text-sky-600" aria-hidden="true" />
+                    最近留下的片段
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-500">从一件小事，回到真实发生的现场</p>
                 </div>
                 <Link href="/observations" className="text-sm font-medium text-emerald-700 hover:text-emerald-800">
                   查看全部
@@ -381,55 +387,46 @@ export default async function DashboardPage() {
                 </Link>
               </div>
               {recent.length > 0 ? (
-                <Card>
-                  <CardContent className="relative space-y-0 p-4 sm:p-5">
-                    <div className="absolute bottom-6 left-[29px] top-6 border-l border-emerald-200" aria-hidden="true" />
-                    {recent.map((observation) => {
-                      const child = childrenById.get(observation.child_id);
-                      return (
-                        <Link
-                          key={observation.id}
-                          href={`/observations/${observation.id}/review`}
-                          className="group relative flex gap-3 rounded-xl p-2 transition-colors hover:bg-emerald-50/50 sm:gap-4"
-                        >
-                          <span className="relative z-10 mt-1 flex size-6 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-sm" aria-hidden="true">
+                <div className="grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {recent.map((observation) => {
+                    const child = childrenById.get(observation.child_id);
+                    return (
+                      <Link
+                        key={observation.id}
+                        href={`/observations/${observation.id}/review`}
+                        className="group min-w-0 rounded-2xl border border-white/80 bg-white/75 p-4 transition hover:-translate-y-0.5 hover:bg-white hover:shadow-sm"
+                      >
+                        <div className="flex items-start gap-3">
+                          <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sky-50 text-lg" aria-hidden="true">
                             {child?.avatar_emoji ?? '🧒'}
                           </span>
-                          <span className="min-w-0 flex-1 pb-3">
-                            <span className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                              <span>{formatDateCn(observation.observed_at)}</span>
-                              {observation.observed_class ? <span>{schoolClassLabel(observation.observed_class)}</span> : null}
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center justify-between gap-2">
+                              <span className="truncate text-sm font-medium text-slate-800">{child?.name ?? '未知幼儿'}</span>
+                              <ChevronRight className="size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5" />
                             </span>
-                            <span className="mt-1 block text-sm font-medium text-slate-800">
-                              {child?.name ?? '未知幼儿'}
+                            <span className="mt-1 block truncate text-xs text-slate-500">
+                              {formatDateCn(observation.observed_at)}
                               {observation.context ? ` · ${observation.context}` : ''}
                             </span>
-                            <span className="mt-1 block line-clamp-2 text-sm leading-6 text-slate-600">
-                              {excerpt(observation.raw_text, 100)}
-                            </span>
-                            <span className="mt-2 flex flex-wrap items-center gap-2">
-                              {observation.ai_draft ? <AiBadge /> : null}
-                              <StatusBadge status={observation.status} />
-                            </span>
                           </span>
-                          <ChevronRight className="mt-1 size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5" />
-                        </Link>
-                      );
-                    })}
-                  </CardContent>
-                </Card>
+                        </div>
+                        <p className="mt-3 line-clamp-2 text-sm leading-6 text-slate-600">{excerpt(observation.raw_text, 74)}</p>
+                        <span className="mt-3 flex flex-wrap items-center gap-2">
+                          {observation.ai_draft ? <AiBadge /> : null}
+                          <StatusBadge status={observation.status} />
+                        </span>
+                      </Link>
+                    );
+                  })}
+                </div>
               ) : (
-                <Card className="border-dashed">
-                  <CardContent className="flex items-start gap-3 p-6">
-                    <Baby className="mt-0.5 size-5 text-emerald-600" aria-hidden="true" />
-                    <div>
-                      <h3 className="font-medium text-slate-800">还没有观察记录</h3>
-                      <p className="mt-1 text-sm leading-6 text-slate-500">从一次具体行为开始，全园的成长片段会在这里汇合。</p>
-                    </div>
-                  </CardContent>
-                </Card>
+                <div className="flex items-center gap-3 rounded-2xl border border-dashed border-sky-200 bg-white/55 px-4 py-3.5">
+                  <Baby className="size-5 shrink-0 text-sky-600" aria-hidden="true" />
+                  <p className="text-sm text-slate-600">还没有观察记录，从一次具体行为开始吧。</p>
+                </div>
               )}
-            </section>
+            </div>
           </section>
 
         </>
