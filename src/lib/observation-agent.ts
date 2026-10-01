@@ -87,6 +87,8 @@ export function shouldProceedToDraft(context: AgentContext | null): boolean {
 type ObservationAgentInput = {
   observation: Observation;
   child: Child;
+  /** 服务端当前日期；测试与评测可注入固定日期 */
+  currentDate?: string;
   forwardHeaders?: Record<string, string>;
   invoke?: typeof invokeLlm;
 };
@@ -94,6 +96,7 @@ type ObservationAgentInput = {
 export async function processObservationAgent({
   observation,
   child,
+  currentDate,
   forwardHeaders,
   invoke = invokeLlm,
 }: ObservationAgentInput): Promise<Observation> {
@@ -104,6 +107,8 @@ export async function processObservationAgent({
     observedAt: observation.observed_at,
     context: observation.context,
     rawText: observation.raw_text,
+    currentDate,
+    childNote: child.note,
     forwardHeaders,
   };
   const context = observation.agent_context;

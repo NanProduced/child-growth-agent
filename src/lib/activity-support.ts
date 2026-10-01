@@ -18,6 +18,8 @@ export type ActivitySupportUpdateOptions = {
   invoke?: typeof invokeLlm;
   save?: typeof updateChildActivitySupport;
   reloadObservations?: (childId: string) => Promise<Observation[]>;
+  /** 服务端当前日期；测试与评测可注入固定日期 */
+  currentDate?: string;
   forwardHeaders?: Record<string, string>;
 };
 
@@ -102,6 +104,8 @@ export async function updateActivitySupport(
       className: child.class_name,
       observations: confirmed,
       growthProfile: supportedGrowthProfile(child, confirmed),
+      currentDate: options.currentDate,
+      childNote: child.note,
       forwardHeaders: options.forwardHeaders,
     },
     options.invoke,

@@ -288,8 +288,15 @@ async function main(): Promise<void> {
   // 整理 Prompt 与校验口径一致：允许有观察依据的普通情绪描述，仍禁止诊断/障碍/评分/能力定性
   assert.ok(SYSTEM_PROMPT.includes('普通情绪'), '整理 Prompt 应说明普通情绪描述的边界');
   assert.ok(SYSTEM_PROMPT.includes('入园'), '整理 Prompt 应给出普通情绪的示例口径');
-  assert.ok(SYSTEM_PROMPT.includes('焦虑症'), '整理 Prompt 的禁止词应与校验一致（焦虑症）');
+  assert.ok(
+    SYSTEM_PROMPT.includes('诊断') && SYSTEM_PROMPT.includes('障碍判断'),
+    '整理 Prompt 应禁止诊断与障碍判断',
+  );
   assert.ok(!SYSTEM_PROMPT.includes('焦虑、智商'), '整理 Prompt 不应再把普通“焦虑”列为禁止词');
+  assert.ok(
+    !SYSTEM_PROMPT.includes('焦虑症'),
+    '整理 Prompt 不再重复具体诊断词，具体拦截由校验负责（避免两边口径漂移）',
+  );
 
   const reviewReply = JSON.stringify({
     decision: 'accept',

@@ -18,6 +18,8 @@ type ProfileUpdateOptions = {
   invoke?: typeof invokeLlm;
   save?: typeof updateChildGrowthProfileSummary;
   reloadObservations?: (childId: string) => Promise<Observation[]>;
+  /** 服务端当前日期；测试与评测可注入固定日期 */
+  currentDate?: string;
   forwardHeaders?: Record<string, string>;
 };
 
@@ -60,14 +62,20 @@ export function buildGrowthProfileFallback(
     .flatMap((observation) => observation.confirmed_content?.highlights ?? [])
     .filter(Boolean)
     .slice(0, 3);
+  const latestNote =
+    content?.objective_description || content?.highlight_quote || latest.raw_text;
+  // 保守回退不把最新表现直接复制成“变化”，也不暗示已有趋势
+  const recentChange =
+    confirmed.length === 1
+      ? `目前只有一条确认观察，还不能判断变化；这条记录是：${latestNote}`
+      : `已有多条确认观察，但还没有生成可比较的成长小结；最近一次记录是：${latestNote}`;
 
   return {
     summary:
       content?.objective_description ||
       `已经确认 ${confirmed.length} 条观察，最近一次记录保留了具体行为与语言证据。`,
-    recent_change:
-      content?.objective_description || content?.highlight_quote || latest.raw_text,
-    development_clues: clues.length > 0 ? clues : [latest.raw_text],
+    recent_change: recentChange,
+    development_clues: clues.length > 0 ? clues : [latestNote],
     next_support:
       content?.support_suggestions?.[0] ||
       "继续记录具体行为和语言，方便下一次回看。",
@@ -94,6 +102,8 @@ export async function updateGrowthProfileAfterConfirmation(
       childGender: child.gender,
       childBirthDate: child.birth_date,
       observations: confirmed,
+      currentDate: options.currentDate,
+      childNote: child.note,
       forwardHeaders: options.forwardHeaders,
     },
     options.invoke,
