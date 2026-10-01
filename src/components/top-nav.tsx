@@ -47,8 +47,8 @@ const NAV = [
 ];
 
 const SECONDARY_NAV = [
-  { href: "/activities", label: "活动计划", icon: BookOpenCheck },
-  { href: "/reports", label: "报告中心", icon: FileBarChart2 },
+  { href: "/activities", label: "活动支持", icon: BookOpenCheck },
+  { href: "/reports", label: "成长回顾", icon: FileBarChart2 },
 ];
 
 export function TopNav() {
