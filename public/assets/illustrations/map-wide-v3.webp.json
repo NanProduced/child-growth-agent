@@ -1,0 +1,8 @@
+{
+  "tool": "built-in image_gen",
+  "intent": "edit",
+  "reference": "map-wide-v2.webp",
+  "generatedSource": "exec-d16f1153-223c-4a0c-af86-7a1316460fca.png",
+  "prompt": "Edit the provided illustration only. Preserve the exact painterly kindergarten visual world, colors, camera, buildings, teacher and all children's positions/poses/identities, fences, pond, bridge, vegetation and paths. Remove ONLY the giant open book in the lower central circular garden, its protruding giant sprout, and the two book-supporting tree stumps. Replace their footprint with a calm continuous sunlit grassy garden clearing with the existing surrounding circular pink path intact; unobtrusive grass and a few small flowers at the perimeter. Keep this central area visually quiet for a separate HTML observation workspace; do NOT add a desk, sign, board, paper, book, button, text, characters or other focal object there. Everything outside that central book footprint must remain as close to the original as possible. Do not rearrange, zoom, crop, recolor, simplify, replace the scene or generate a different garden. Absolutely no UI or lettering anywhere. Output an ultra-wide landscape image retaining the source 8:3 composition and aspect ratio, including its extended left and right gardens.",
+  "visualRole": "decorative kindergarten scene; HTML owns all real content and controls"
+}

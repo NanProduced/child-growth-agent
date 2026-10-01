@@ -2,7 +2,7 @@ import { Badge } from "@/components/ui/badge";
 import { Sparkles } from "lucide-react";
 import type { ObservationStatus } from "@/lib/types";
 
-export function StatusBadge({ status }: { status: ObservationStatus }) {
+export function StatusBadge({ status, compact = false }: { status: ObservationStatus; compact?: boolean }) {
   if (status === "confirmed") {
     return (
       <Badge variant="secondary" className="bg-emerald-100 text-emerald-700">
@@ -13,7 +13,7 @@ export function StatusBadge({ status }: { status: ObservationStatus }) {
   if (status === "ai_organized") {
     return (
       <Badge variant="secondary" className="bg-amber-100 text-amber-700">
-        AI 已整理 · 待确认
+        {compact ? '待确认' : 'AI 已整理 · 待确认'}
       </Badge>
     );
   }

@@ -14,6 +14,7 @@ import {
   LogIn,
   LogOut,
   MoreHorizontal,
+  Sprout,
   Users,
 } from "lucide-react";
 
@@ -39,7 +40,7 @@ import {
 import { useTeacher } from "@/components/teacher-provider";
 
 const NAV = [
-  { href: "/", label: "工作台", icon: Home },
+  { href: "/", label: "首页", icon: Home },
   { href: "/classes", label: "班级", icon: Users },
   { href: "/children", label: "成长档案", icon: GraduationCap },
   { href: "/observations", label: "观察记录", icon: ClipboardList },
@@ -85,29 +86,29 @@ export function TopNav() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-amber-100/80 bg-white/90 backdrop-blur">
-      <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-1 px-4 sm:gap-2 lg:px-8">
-        <Link href="/" className="mr-2 flex shrink-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2">
-          <span className="flex size-8 items-center justify-center rounded-lg bg-amber-100 text-amber-600">
-            <GraduationCap className="size-5" />
+      <div className="mx-auto flex min-h-14 w-full max-w-7xl flex-wrap items-center gap-1 px-4 py-1 lg:h-14 lg:flex-nowrap lg:gap-2 lg:py-0 lg:px-8">
+        <Link href="/" aria-label="芽芽观察首页" className="mr-2 flex min-h-11 min-w-11 shrink-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2">
+          <span className="flex size-9 items-center justify-center text-emerald-600">
+            <Sprout className="size-8" strokeWidth={2.4} />
           </span>
-          <span className="hidden text-sm font-semibold tracking-tight sm:inline">芽芽观察</span>
+          <span className="text-lg font-bold tracking-tight text-[#15264d]">芽芽观察</span>
         </Link>
 
-        <nav className="min-w-0 flex flex-1 items-center gap-0 overflow-hidden sm:gap-1">
+        <nav className="order-last flex min-w-0 basis-full items-center gap-0 lg:order-none lg:flex-1 lg:basis-auto lg:gap-1" aria-label="产品导航">
           {NAV.map((item) => (
             <Link
               key={item.href}
               href={item.href}
               aria-label={item.label}
               aria-current={isActive(item.href) ? "page" : undefined}
-              className={`flex shrink-0 items-center gap-1.5 rounded-md px-1 py-1.5 text-sm transition-colors sm:px-2.5 ${
+              className={`flex min-h-11 min-w-11 flex-1 flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 text-sm transition-colors lg:flex-none lg:flex-row lg:gap-1.5 lg:px-2.5 ${
                 isActive(item.href)
                   ? "bg-emerald-50 font-medium text-emerald-800"
                   : "text-slate-600 hover:bg-slate-100"
               }`}
             >
               <item.icon className="size-4" />
-              <span className="hidden xs:inline sm:inline">{item.label}</span>
+              <span className="text-xs lg:text-sm">{item.label}</span>
             </Link>
           ))}
           <DropdownMenu>
@@ -116,10 +117,10 @@ export function TopNav() {
                 variant={moreActive ? "secondary" : "ghost"}
                 size="sm"
                 aria-label="更多功能"
-                className={`shrink-0 px-1.5 text-sm sm:px-2.5 ${moreActive ? "bg-emerald-50 text-emerald-800 hover:bg-emerald-100" : "text-slate-600"}`}
+                className={`min-h-11 min-w-11 flex-1 flex-col gap-1 px-1.5 text-xs lg:flex-none lg:flex-row lg:gap-1.5 lg:px-2.5 lg:text-sm ${moreActive ? "bg-emerald-50 text-emerald-800 hover:bg-emerald-100" : "text-slate-600"}`}
               >
                 <MoreHorizontal className="size-4" />
-                <span className="hidden sm:inline">更多</span>
+                <span>更多</span>
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-40">
@@ -137,7 +138,7 @@ export function TopNav() {
           </DropdownMenu>
         </nav>
 
-        <div className="shrink-0">
+        <div className="ml-auto shrink-0 lg:ml-0">
           {loading ? (
             <Loader2 className="size-4 animate-spin text-slate-400" />
           ) : isTeacher ? (
@@ -145,14 +146,15 @@ export function TopNav() {
               <Badge className="bg-emerald-100 text-emerald-700" variant="secondary">
                 教师模式
               </Badge>
-              <Button variant="ghost" size="sm" onClick={handleLogout}>
+              <Button variant="ghost" size="sm" className="min-h-11 min-w-11" aria-label="退出教师模式" onClick={handleLogout}>
                 <LogOut className="size-4" />
-                <span className="hidden sm:inline">退出</span>
+                <span className="hidden lg:inline">退出</span>
               </Button>
             </div>
           ) : (
             <Button
               size="sm"
+              className="min-h-11"
               variant={configured ? "outline" : "ghost"}
               disabled={!configured}
               title={configured ? undefined : "未配置教师口令（TEACHER_PASSCODE）"}
