@@ -74,8 +74,23 @@ export default async function ReportsPage({
   const confirmed = selectedObservations.filter(isConfirmed).sort(
     (a, b) => b.observed_at.localeCompare(a.observed_at),
   );
-  const pendingObservation =
-    selectedObservations.find((observation) => !isConfirmed(observation)) ?? null;
+  // 空状态入口只做视图选择：先待确认，再待补充，再草稿；都没有则去记录
+  const pendingTarget =
+    selectedObservations.find((observation) => observation.status === 'ai_organized') ??
+    selectedObservations.find((observation) => observation.status === 'needs_input') ??
+    selectedObservations.find((observation) => observation.status === 'draft') ??
+    null;
+  const pendingEntry: { label: string; href: string } = pendingTarget
+    ? {
+        label: pendingTarget.status === 'ai_organized' ? '先确认一条观察' : '继续整理观察',
+        href: `/observations/${pendingTarget.id}/review`,
+      }
+    : {
+        label: '记录一次观察',
+        href: selected
+          ? `/observations/new?child_id=${encodeURIComponent(selected.id)}`
+          : '/observations/new',
+      };
   const storedProfile = selected?.growth_profile ?? null;
   const profile = storedProfile ?? buildGrowthProfileFallback(confirmed);
   const isFallback = !storedProfile;
@@ -209,15 +224,9 @@ export default async function ReportsPage({
                   </p>
                 </div>
                 <Button asChild size="sm" className="min-h-11">
-                  <Link
-                    href={
-                      pendingObservation
-                        ? `/observations/${pendingObservation.id}/review`
-                        : `/observations/new?child_id=${encodeURIComponent(selected.id)}`
-                    }
-                  >
+                  <Link href={pendingEntry.href}>
                     <PenLine className="size-4" />
-                    {pendingObservation ? '先确认一条观察' : '记录一次观察'}
+                    {pendingEntry.label}
                   </Link>
                 </Button>
               </CardContent>

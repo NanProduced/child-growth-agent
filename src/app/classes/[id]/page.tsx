@@ -22,7 +22,12 @@ import {
   formatDateCn,
   schoolClassLabel,
 } from '@/lib/format';
-import { getClass, listChildren, listObservations } from '@/lib/queries';
+import {
+  getClass,
+  getClassChildren,
+  listChildren,
+  listObservations,
+} from '@/lib/queries';
 import {
   CLASS_STAGE_LABELS,
   type Child,
@@ -93,10 +98,13 @@ export default async function ClassDetailPage({
 
   if (!klass) notFound();
 
+  let children: Child[] = [];
+  // 全园档案只用于历史观察的作者显示；当前班级名单以 getClassChildren 为准
   let allChildren: Child[] = [];
   let allObservations: Observation[] = [];
   try {
-    [allChildren, allObservations] = await Promise.all([
+    [children, allChildren, allObservations] = await Promise.all([
+      getClassChildren(id),
       listChildren(),
       listObservations({ limit: 1000 }),
     ]);
@@ -104,7 +112,6 @@ export default async function ClassDetailPage({
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
 
-  const children = allChildren.filter((child) => child.class_id === id);
   const observations = allObservations
     .filter((observation) => observation.class_id === id)
     .sort(
@@ -369,20 +376,20 @@ export default async function ClassDetailPage({
               </div>
             )}
           </section>
-
-          <section aria-labelledby="class-manage-title" className="border-t border-slate-200/80 pt-5">
-            <h2 id="class-manage-title" className="text-sm font-medium text-slate-700">
-              班级管理
-            </h2>
-            <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
-              编辑名称、学段、学年，或停用班级。停用只影响新分班，历史记录不受影响。
-            </p>
-            <div className="mt-3">
-              <ClassFormDialog klass={klass} label="编辑班级" />
-            </div>
-          </section>
         </>
       )}
+
+      <section aria-labelledby="class-manage-title" className="border-t border-slate-200/80 pt-5">
+        <h2 id="class-manage-title" className="text-sm font-medium text-slate-700">
+          班级管理
+        </h2>
+        <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
+          编辑名称、学段、学年，或停用班级。停用只影响新分班，历史记录不受影响。
+        </p>
+        <div className="mt-3">
+          <ClassFormDialog klass={klass} label="编辑班级" />
+        </div>
+      </section>
     </div>
   );
 }
