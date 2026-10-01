@@ -17,7 +17,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { AiBadge, StatusBadge } from '@/components/status-badges';
+import { StatusBadge } from '@/components/status-badges';
 import {
   ageText,
   classLabel,
@@ -93,7 +93,7 @@ function GrowthProfileSections({
         </div>
         <Card className="border-emerald-200 bg-emerald-50/50">
           <CardContent className="space-y-3 p-5 sm:p-6">
-            <p className="max-w-3xl text-[15px] leading-7 text-slate-700">{profile.summary}</p>
+            <p className="max-w-3xl text-base leading-7 text-slate-700">{profile.summary}</p>
             <p className="text-xs leading-5 text-slate-500">
               {isFallback
                 ? '已有确认观察会先在这里呈现；下一次确认后，Agent 会继续更新这段小结。'
@@ -413,7 +413,6 @@ export default async function ChildDetailPage({
                         </Badge>
                       ) : null}
                       <span className="ml-auto flex items-center gap-2">
-                        {obs.ai_draft ? <AiBadge /> : null}
                         <StatusBadge status={obs.status} />
                       </span>
                     </div>

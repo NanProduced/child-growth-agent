@@ -275,7 +275,7 @@ export default function NewChildPage() {
           const done = index < step;
           const active = index === step;
           return (
-            <li key={label} className="flex items-center gap-2">
+            <li key={label} aria-current={active ? 'step' : undefined} className="flex items-center gap-2">
               <span
                 className={cn(
                   'flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-medium',

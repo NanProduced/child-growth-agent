@@ -315,7 +315,7 @@ export function ReviewClient({
                     : 'text-slate-400'
               }`}
             >
-              <span className="flex size-4 items-center justify-center rounded-full bg-white/80 text-[10px]" aria-hidden="true">
+              <span className="flex size-4 items-center justify-center rounded-full bg-white/80 text-xs" aria-hidden="true">
                 {index + 1}
               </span>
               {step}
