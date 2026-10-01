@@ -127,21 +127,22 @@ function GrowthProfileSections({
       </section>
 
       <section aria-labelledby="next-support-title">
-        <ProfileCard
-          title="下一步支持"
-          icon={<Lightbulb className="size-4 text-emerald-600" aria-hidden="true" />}
-          className="border-sky-200 bg-sky-50/40"
-        >
-          <div className="space-y-4 text-sm leading-7 text-slate-600">
-            <p>{profile.next_support}</p>
-            <div className="rounded-lg bg-white/80 p-4">
-              <h3 id="next-support-title" className="mb-1 flex items-center gap-2 font-medium text-slate-700">
-                下一次可以继续看看
-              </h3>
-              <p>{profile.next_focus}</p>
+        <div className="space-y-4 rounded-2xl border border-sky-200 bg-sky-50/50 p-5 sm:p-6">
+          <div className="flex items-center gap-2">
+            <Lightbulb className="size-4 text-emerald-600" aria-hidden="true" />
+            <h2 id="next-support-title" className="text-base font-semibold text-slate-900">下一步支持</h2>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl bg-white/80 p-4">
+              <p className="text-xs font-medium text-emerald-700">可以试试</p>
+              <p className="mt-2 text-sm leading-7 text-slate-600">{profile.next_support}</p>
+            </div>
+            <div className="rounded-xl bg-white/80 p-4">
+              <p className="text-xs font-medium text-sky-700">继续观察</p>
+              <p className="mt-2 text-sm leading-7 text-slate-600">{profile.next_focus}</p>
             </div>
           </div>
-        </ProfileCard>
+        </div>
       </section>
     </>
   );
@@ -281,6 +282,25 @@ export default async function ChildDetailPage({
               </Link>
             </Button>
           </div>
+        </div>
+      </section>
+
+      <section aria-label="观察概览" className="grid grid-cols-2 divide-x divide-y divide-slate-200/80 border-y border-slate-200/80 sm:grid-cols-3 sm:divide-y-0">
+        <div className="px-3 py-3 sm:px-4">
+          <p className="text-xs text-slate-500">已确认观察</p>
+          <p className="mt-1 text-lg font-semibold text-slate-900">{confirmedObservations.length} 条</p>
+        </div>
+        <div className="px-3 py-3 sm:px-4">
+          <p className="text-xs text-slate-500">最近记录</p>
+          <p className="mt-1 text-sm font-medium text-slate-800">
+            {observations[0] ? formatDateCn(observations[0].observed_at) : '还没有记录'}
+          </p>
+        </div>
+        <div className="col-span-2 px-3 py-3 sm:col-span-1 sm:px-4">
+          <p className="text-xs text-slate-500">当前班级</p>
+          <p className="mt-1 truncate text-sm font-medium text-slate-800">
+            {classLabel(child.class_stage, child.class_name) ?? '暂未分班'}
+          </p>
         </div>
       </section>
 
