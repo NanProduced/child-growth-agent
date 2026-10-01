@@ -1,4 +1,9 @@
-import { query, queryOne } from "@/storage/database/pg-client";
+import {
+  type TransactionClient,
+  query,
+  queryOne,
+  withTransaction,
+} from "@/storage/database/pg-client";
 import { ObservationStateConflictError, StaleEvidenceError } from "./evidence-snapshot";
 import type {
   ActivitySupport,
@@ -310,7 +315,7 @@ export async function createChild(input: {
 
 /**
  * 原子条件：保存时数据库中的“已确认观察 id 集合”必须仍等于模型生成时使用的快照。
- * 任何新的确认都会改变该集合，使迟到的旧结果无法写入。
+ * 作为短事务内锁后重读比较的补充防线，不作为唯一并发保障。
  */
 function confirmedEvidenceMatches(paramIndex: number): string {
   return `(
@@ -325,10 +330,53 @@ function confirmedEvidenceMatches(paramIndex: number): string {
   ) = $${paramIndex}::jsonb`;
 }
 
+/** 与 JSONB 逐字段比较等价：键顺序无关的稳定序列化 */
+function canonicalJson(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sameIdSet(left: string[], right: string[]): boolean {
+  return canonicalJson([...left].sort()) === canonicalJson([...right].sort());
+}
+
+/** 同一儿童锁是确认与档案保存的共同协调点；统一先锁 children 行 */
+async function lockChild(client: TransactionClient, childId: string): Promise<void> {
+  const locked = await client.query("SELECT id FROM children WHERE id = $1 FOR UPDATE", [childId]);
+  if (locked.rowCount === 0) throw new Error("幼儿档案不存在");
+}
+
+/** 取得儿童锁后重读已确认观察 id 集合 */
+async function readConfirmedEvidenceIds(
+  client: TransactionClient,
+  childId: string,
+): Promise<string[]> {
+  const result = await client.query<{ ids: string[] }>(
+    `SELECT coalesce(jsonb_agg(sub.id ORDER BY sub.id), '[]'::jsonb) AS ids
+       FROM (
+         SELECT o.id::text AS id
+           FROM observations o
+          WHERE o.child_id = $1
+            AND o.status = 'confirmed'
+            AND o.confirmed_content IS NOT NULL
+       ) sub`,
+    [childId],
+  );
+  return result.rows[0]?.ids ?? [];
+}
+
 /**
  * 成长小结更新：只合并小结字段，保留同一 JSONB 中已有的 activity_support；
- * 同时移除旧的 is_fallback 标记。写入前在 SQL 内做证据快照原子比较，
- * 条件不满足抛 StaleEvidenceError（可重试），不会覆盖较新的结果。
+ * 同时移除旧的 is_fallback 标记。模型调用在事务外；保存时先锁儿童行，
+ * 锁后重读证据集合并与生成快照比较，匹配才做 JSONB 定向更新。
  */
 export async function updateChildGrowthProfileSummary(
   id: string,
@@ -338,28 +386,29 @@ export async function updateChildGrowthProfileSummary(
   const fields: Record<string, unknown> = { ...growth_profile };
   delete fields.activity_support;
   const now = new Date().toISOString();
-  const row = await queryOne<{ data: Row }>(
-    `UPDATE children
-     SET growth_profile = (coalesce(growth_profile, '{}'::jsonb) - 'is_fallback') || $2::jsonb,
-         updated_at = $3
-     WHERE id = $1
-       AND ${confirmedEvidenceMatches(4)}
-     RETURNING to_jsonb(children.*) AS data`,
-    [
-      id,
-      JSON.stringify(fields),
-      now,
-      JSON.stringify([...expectedConfirmedIds].sort()),
-    ],
-  );
-  if (!row) throw new StaleEvidenceError();
-  return mapChild(row.data);
+  const expected = [...expectedConfirmedIds].sort();
+  return withTransaction(async (client) => {
+    await lockChild(client, id);
+    const currentIds = await readConfirmedEvidenceIds(client, id);
+    if (!sameIdSet(currentIds, expected)) throw new StaleEvidenceError();
+    const row = await client.query<{ data: Row }>(
+      `UPDATE children
+       SET growth_profile = (coalesce(growth_profile, '{}'::jsonb) - 'is_fallback') || $2::jsonb,
+           updated_at = $3
+       WHERE id = $1
+         AND ${confirmedEvidenceMatches(4)}
+       RETURNING to_jsonb(children.*) AS data`,
+      [id, JSON.stringify(fields), now, JSON.stringify(expected)],
+    );
+    if (row.rowCount === 0) throw new StaleEvidenceError();
+    return mapChild(row.rows[0].data);
+  });
 }
 
 /**
  * 活动支持更新：只写入 activity_support 键，不覆盖并发的成长小结字段；
  * 仅在档案为空时用保守 fallback 作为底座。
- * 同样在 SQL 内做证据快照原子比较，条件不满足抛 StaleEvidenceError。
+ * 与小结保存共享同一儿童锁事务与锁后重读比较。
  */
 export async function updateChildActivitySupport(
   id: string,
@@ -368,28 +417,34 @@ export async function updateChildActivitySupport(
   expectedConfirmedIds: string[],
 ): Promise<Child> {
   const now = new Date().toISOString();
-  const row = await queryOne<{ data: Row }>(
-    `UPDATE children
-     SET growth_profile = jsonb_set(
-           coalesce(growth_profile, $2::jsonb),
-           '{activity_support}',
-           $3::jsonb,
-           true
-         ),
-         updated_at = $4
-     WHERE id = $1
-       AND ${confirmedEvidenceMatches(5)}
-     RETURNING to_jsonb(children.*) AS data`,
-    [
-      id,
-      JSON.stringify(fallbackProfile ?? {}),
-      JSON.stringify(activitySupport),
-      now,
-      JSON.stringify([...expectedConfirmedIds].sort()),
-    ],
-  );
-  if (!row) throw new StaleEvidenceError();
-  return mapChild(row.data);
+  const expected = [...expectedConfirmedIds].sort();
+  return withTransaction(async (client) => {
+    await lockChild(client, id);
+    const currentIds = await readConfirmedEvidenceIds(client, id);
+    if (!sameIdSet(currentIds, expected)) throw new StaleEvidenceError();
+    const row = await client.query<{ data: Row }>(
+      `UPDATE children
+       SET growth_profile = jsonb_set(
+             coalesce(growth_profile, $2::jsonb),
+             '{activity_support}',
+             $3::jsonb,
+             true
+           ),
+           updated_at = $4
+       WHERE id = $1
+         AND ${confirmedEvidenceMatches(5)}
+       RETURNING to_jsonb(children.*) AS data`,
+      [
+        id,
+        JSON.stringify(fallbackProfile ?? {}),
+        JSON.stringify(activitySupport),
+        now,
+        JSON.stringify(expected),
+      ],
+    );
+    if (row.rowCount === 0) throw new StaleEvidenceError();
+    return mapChild(row.rows[0].data);
+  });
 }
 
 export async function countObservationsByChild(): Promise<Record<string, number>> {
@@ -462,25 +517,73 @@ export async function createObservation(input: {
 }
 
 /**
+ * 异步写入的期望快照：全部来自服务端读取，不信任客户端标记。
+ * 任一字段与当前行不一致即拒绝写入（status/agent_context / ai_draft）。
+ */
+export type ObservationWriteGuard = {
+  expectedStatus?: ObservationStatus;
+  expectedAgentContext?: AgentContext | null;
+  expectedAiDraft?: ObservationDraft | null;
+};
+
+function hasWriteGuard(guard: ObservationWriteGuard | undefined): boolean {
+  return Boolean(
+    guard &&
+      (guard.expectedStatus !== undefined ||
+        guard.expectedAgentContext !== undefined ||
+        guard.expectedAiDraft !== undefined),
+  );
+}
+
+function observationWriteConditions(
+  guard: ObservationWriteGuard | undefined,
+  params: unknown[],
+): string {
+  if (!guard) return "";
+  const conditions: string[] = [];
+  if (guard.expectedStatus !== undefined) {
+    params.push(guard.expectedStatus);
+    conditions.push(`status = $${params.length}`);
+  }
+  if (guard.expectedAgentContext !== undefined) {
+    params.push(
+      guard.expectedAgentContext === null ? null : JSON.stringify(guard.expectedAgentContext),
+    );
+    conditions.push(`agent_context IS NOT DISTINCT FROM $${params.length}::jsonb`);
+  }
+  if (guard.expectedAiDraft !== undefined) {
+    params.push(guard.expectedAiDraft === null ? null : JSON.stringify(guard.expectedAiDraft));
+    conditions.push(`ai_draft IS NOT DISTINCT FROM $${params.length}::jsonb`);
+  }
+  return conditions.length > 0 ? ` AND ${conditions.join(" AND ")}` : "";
+}
+
+/**
  * 写入 AI 整理草稿（原文 raw_text 永不改动）。
- * 更新语句自身保护 confirmed 状态：迟到的整理结果不能把已确认记录降级。
+ * 更新语句自身保护 confirmed 状态并比较原状态/上下文/原草稿：
+ * 迟到的整理结果不能覆盖较新的草稿，也不能把已确认记录降级。
  */
 export async function updateObservationAiDraft(
   id: string,
   ai_draft: ObservationDraft,
-  ai_model: string
+  ai_model: string,
+  guard?: ObservationWriteGuard,
 ): Promise<Observation> {
   const now = new Date().toISOString();
+  const params: unknown[] = [id, JSON.stringify(ai_draft), ai_model, now];
+  const guardSql = observationWriteConditions(guard, params);
   const row = await queryOne<{ data: Row }>(
     `UPDATE observations
      SET ai_draft = $2::jsonb, ai_model = $3, ai_organized_at = $4, status = 'ai_organized', updated_at = $4
-     WHERE id = $1 AND status <> 'confirmed'
+     WHERE id = $1 AND status <> 'confirmed'${guardSql}
      RETURNING to_jsonb(observations.*) AS data`,
-    [id, JSON.stringify(ai_draft), ai_model, now]
+    params,
   );
   if (!row) {
     throw new ObservationStateConflictError(
-      "该记录已由教师确认归档，迟到的 AI 整理结果不会覆盖确认稿",
+      hasWriteGuard(guard)
+        ? "记录已在其他操作中更新，请刷新页面后重新整理。"
+        : "该记录已由教师确认归档，迟到的 AI 整理结果不会覆盖确认稿",
     );
   }
   return mapObservation(row.data);
@@ -488,52 +591,82 @@ export async function updateObservationAiDraft(
 
 /**
  * 保存 Agent 工作流上下文；不修改 raw_text 与 confirmed_content。
- * 更新语句自身保护状态：confirmed 不被降级；传入 expectedStatus 时要求当前状态一致，
- * 防止迟到重试把已经结束的记录恢复为待追问。
+ * 更新语句保护 confirmed 状态，并比较原状态/上下文/原草稿快照：
+ * 迟到重试不能恢复已结束状态，也不能覆盖另一请求更新的轮次或回答。
  */
 export async function updateObservationAgentContext(
   id: string,
   agent_context: AgentContext,
   status: ObservationStatus,
-  expectedStatus?: ObservationStatus,
+  guard?: ObservationWriteGuard,
 ): Promise<Observation> {
   const now = new Date().toISOString();
   const params: unknown[] = [id, JSON.stringify(agent_context), status, now];
-  let guard = "status <> 'confirmed'";
-  if (expectedStatus) {
-    params.push(expectedStatus);
-    guard = `status = $${params.length}`;
-  }
+  const guardSql = observationWriteConditions(guard, params);
   const row = await queryOne<{ data: Row }>(
     `UPDATE observations
      SET agent_context = $2::jsonb, status = $3, updated_at = $4
-     WHERE id = $1 AND ${guard}
+     WHERE id = $1 AND status <> 'confirmed'${guardSql}
      RETURNING to_jsonb(observations.*) AS data`,
     params,
   );
   if (!row) {
     throw new ObservationStateConflictError(
-      expectedStatus
-        ? "记录已不在等待补充信息状态，迟到的补充不会被写入"
+      hasWriteGuard(guard)
+        ? "记录已在其他操作中更新，请刷新页面后继续。"
         : "该记录已由教师确认归档，迟到的补充信息不会改写已确认记录",
     );
   }
   return mapObservation(row.data);
 }
 
-/** 教师确认：内容进入正册，状态置为 confirmed */
+export type ConfirmObservationPremise = {
+  status: ObservationStatus;
+  agentContext: AgentContext | null;
+  aiDraft: ObservationDraft | null;
+};
+
+/**
+ * 教师确认：与其他档案保存共享同一儿童行锁。
+ * 事务内先锁 children 行，再核对观察当前状态与前提快照，最后写入 confirmed_content；
+ * 成功后的模型生成必须在事务提交之后执行（由调用方负责）。
+ */
 export async function confirmObservation(
   id: string,
-  confirmed_content: ObservationDraft
+  childId: string,
+  confirmed_content: ObservationDraft,
+  premise: ConfirmObservationPremise,
 ): Promise<Observation> {
   const now = new Date().toISOString();
-  const row = await queryOne<{ data: Row }>(
-    `UPDATE observations
-     SET confirmed_content = $2::jsonb, confirmed_at = $3, status = 'confirmed', updated_at = $3
-     WHERE id = $1
-     RETURNING to_jsonb(observations.*) AS data`,
-    [id, JSON.stringify(confirmed_content), now]
-  );
-  if (!row) throw new Error("确认归档失败：记录不存在");
-  return mapObservation(row.data);
+  return withTransaction(async (client) => {
+    await lockChild(client, childId);
+    const current = await client.query<{
+      status: string;
+      agent_context: unknown;
+      ai_draft: unknown;
+    }>(
+      `SELECT status, agent_context, ai_draft FROM observations WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    if (current.rowCount === 0) throw new Error("确认归档失败：记录不存在");
+    const row = current.rows[0];
+    if (
+      row.status !== premise.status ||
+      canonicalJson(row.agent_context ?? null) !== canonicalJson(premise.agentContext ?? null) ||
+      canonicalJson(row.ai_draft ?? null) !== canonicalJson(premise.aiDraft ?? null)
+    ) {
+      throw new ObservationStateConflictError(
+        "记录在核对后已被更新，请刷新最新记录后重新确认。",
+      );
+    }
+    const updated = await client.query<{ data: Row }>(
+      `UPDATE observations
+       SET confirmed_content = $2::jsonb, confirmed_at = $3, status = 'confirmed', updated_at = $3
+       WHERE id = $1
+       RETURNING to_jsonb(observations.*) AS data`,
+      [id, JSON.stringify(confirmed_content), now],
+    );
+    if (updated.rowCount === 0) throw new Error("确认归档失败：记录不存在");
+    return mapObservation(updated.rows[0].data);
+  });
 }

@@ -14,6 +14,7 @@ import { formatFollowUpRounds, followUpRounds } from '../src/lib/follow-up';
 import {
   appendFollowUpAction,
   nextFollowUpContext,
+  observationWriteGuard,
   shouldProceedToDraft,
 } from '../src/lib/observation-agent';
 import {
@@ -22,7 +23,7 @@ import {
   teacherEditSubmissionAction,
 } from '../src/lib/teacher-edit-review';
 import type { LlmResult } from '../src/lib/llm';
-import type { TeacherEditReview } from '../src/lib/types';
+import type { Observation, TeacherEditReview } from '../src/lib/types';
 import {
   findDevelopmentForbiddenTerm,
   followUpDecisionSchema,
@@ -207,6 +208,32 @@ async function main(): Promise<void> {
   assert.equal(stopRetry.follow_up?.stopped, true, 'stop 后重试不重新开启追问');
   assert.equal(shouldProceedToDraft(stopRetry), true);
 
+  // 5i) 迟到异步写入必须携带服务端状态/上下文/原草稿快照
+  const guardObservation = {
+    id: 'obs-1',
+    child_id: 'child-1',
+    class_id: 'class-1',
+    observed_class: null,
+    observed_at: PARAMS.observedAt,
+    context: PARAMS.context,
+    raw_text: PARAMS.rawText,
+    status: 'needs_input',
+    agent_context: paired,
+    ai_draft: null,
+    ai_model: null,
+    ai_organized_at: null,
+    confirmed_content: null,
+    confirmed_at: null,
+    is_demo: true,
+    created_at: '2026-09-01T00:00:00.000Z',
+    updated_at: null,
+  } satisfies Observation;
+  assert.deepEqual(observationWriteGuard(guardObservation), {
+    expectedStatus: 'needs_input',
+    expectedAgentContext: paired,
+    expectedAiDraft: null,
+  });
+
   // 6) 非法 Agent JSON 被 Zod 拦截，不静默修正。
   let invalidCalls = 0;
   await assert.rejects(
@@ -362,7 +389,7 @@ async function main(): Promise<void> {
     else process.env.TEACHER_PASSCODE = previousPasscode;
   }
 
-  console.log(JSON.stringify({ passed: 29, total: 29 }));
+  console.log(JSON.stringify({ passed: 30, total: 30 }));
 }
 
 void main();

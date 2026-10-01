@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -33,4 +33,34 @@ export async function queryOne<T = Record<string, unknown>>(
 ): Promise<T | null> {
   const rows = await query<T>(sql, params);
   return rows[0] ?? null;
+}
+
+/** 事务内使用的 client 最小接口；测试可注入替身 */
+export type TransactionClient = Pick<PoolClient, "query" | "release">;
+export type TransactionConnect = () => Promise<TransactionClient>;
+
+/**
+ * 短事务：BEGIN → 回调（必须使用传入的同一个 client）→ COMMIT；
+ * 出错回滚后抛出原错误，finally 释放 client。模型调用不得放在事务内。
+ */
+export async function withTransaction<T>(
+  fn: (client: TransactionClient) => Promise<T>,
+  connect: TransactionConnect = () => pool().connect(),
+): Promise<T> {
+  const client = await connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // 回滚失败不覆盖原始错误
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }

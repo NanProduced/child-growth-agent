@@ -56,13 +56,12 @@ export async function POST(
       parsed.data.action,
       parsed.data.content,
     );
-    // 原子保护：只有仍处于 needs_input 时才允许写入重试回答，已结束/已确认不得被恢复为待追问
-    const saved = await updateObservationAgentContext(
-      observation.id,
-      context,
-      "needs_input",
-      "needs_input",
-    );
+    // 原子保护：状态、上下文与原草稿都必须仍匹配服务端读取时的快照
+    const saved = await updateObservationAgentContext(observation.id, context, "needs_input", {
+      expectedStatus: "needs_input",
+      expectedAgentContext: observation.agent_context ?? null,
+      expectedAiDraft: observation.ai_draft ?? null,
+    });
     const updated = await processObservationAgent({
       observation: saved,
       child,

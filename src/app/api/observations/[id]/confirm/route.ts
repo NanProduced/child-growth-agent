@@ -2,6 +2,7 @@ import { HeaderUtils } from "coze-coding-dev-sdk";
 import { NextRequest, NextResponse } from "next/server";
 import { reviewTeacherEdit } from "@/lib/ai";
 import { requireTeacher } from "@/lib/auth";
+import { ObservationStateConflictError } from "@/lib/evidence-snapshot";
 import {
   confirmObservation,
   getObservation,
@@ -161,6 +162,11 @@ export async function POST(
           },
         },
         "ai_organized",
+        {
+          expectedStatus: "ai_organized",
+          expectedAgentContext: observation.agent_context ?? null,
+          expectedAiDraft: observation.ai_draft ?? null,
+        },
       );
       return NextResponse.json({
         observation: updated,
@@ -170,17 +176,30 @@ export async function POST(
     }
 
     if (submissionAction === "confirm") {
+      let premiseAgentContext: AgentContext | null = observation.agent_context ?? null;
       if (currentReview && !reviewMatches) {
-        await updateObservationAgentContext(
-          observation.id,
-          withoutTeacherEditReview(observation.agent_context ?? {}),
-          "ai_organized",
-        );
+        // 清除过期审核；后续确认以清除后的上下文为前提快照
+        const clearedContext = withoutTeacherEditReview(observation.agent_context ?? {});
+        await updateObservationAgentContext(observation.id, clearedContext, "ai_organized", {
+          expectedStatus: "ai_organized",
+          expectedAgentContext: observation.agent_context ?? null,
+          expectedAiDraft: observation.ai_draft ?? null,
+        });
+        premiseAgentContext = clearedContext;
       }
-      const confirmed = await confirmObservation(observation.id, {
-        ...submittedContent,
-        teacher_note: teacherNote,
-      });
+      const confirmed = await confirmObservation(
+        observation.id,
+        observation.child_id,
+        {
+          ...submittedContent,
+          teacher_note: teacherNote,
+        },
+        {
+          status: "ai_organized",
+          agentContext: premiseAgentContext,
+          aiDraft: observation.ai_draft,
+        },
+      );
       let profileUpdate: ProfileUpdateResult = {
         status: "failed",
         message: "观察已确认，但成长档案暂未更新，请稍后重试。",
@@ -214,11 +233,16 @@ export async function POST(
       });
     }
 
+    const originalContext = observation.agent_context ?? null;
     const reviewContext = observation.agent_context
       ? withoutTeacherEditReview(observation.agent_context)
       : {};
     if (currentReview) {
-      await updateObservationAgentContext(observation.id, reviewContext, "ai_organized");
+      await updateObservationAgentContext(observation.id, reviewContext, "ai_organized", {
+        expectedStatus: "ai_organized",
+        expectedAgentContext: originalContext,
+        expectedAiDraft: observation.ai_draft ?? null,
+      });
     }
 
     const { review } = await reviewTeacherEdit({
@@ -244,6 +268,11 @@ export async function POST(
         },
       },
       "ai_organized",
+      {
+        expectedStatus: "ai_organized",
+        expectedAgentContext: currentReview ? reviewContext : originalContext,
+        expectedAiDraft: observation.ai_draft ?? null,
+      },
     );
     return NextResponse.json({
       observation: updated,
@@ -251,6 +280,9 @@ export async function POST(
       agentReview: review,
     });
   } catch (e) {
+    if (e instanceof ObservationStateConflictError) {
+      return NextResponse.json({ message: e.message }, { status: 409 });
+    }
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "确认归档失败" },
       { status: 500 }

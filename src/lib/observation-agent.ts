@@ -2,6 +2,7 @@ import { judgeFollowUp, organizeObservation } from "./ai";
 import { followUpRounds } from "./follow-up";
 import { invokeLlm } from "./llm";
 import {
+  type ObservationWriteGuard,
   updateObservationAgentContext,
   updateObservationAiDraft,
 } from "./queries";
@@ -12,6 +13,18 @@ import type {
   FollowUpDecision,
   Observation,
 } from "./types";
+
+/**
+ * 模型调用前捕获服务端快照；模型返回后的 UPDATE 必须仍匹配该快照，
+ * 否则迟到的 ask/整理结果会覆盖较新的上下文。
+ */
+export function observationWriteGuard(observation: Observation): ObservationWriteGuard {
+  return {
+    expectedStatus: observation.status,
+    expectedAgentContext: observation.agent_context,
+    expectedAiDraft: observation.ai_draft,
+  };
+}
 
 export function appendFollowUpAction(
   context: AgentContext,
@@ -94,6 +107,8 @@ export async function processObservationAgent({
     forwardHeaders,
   };
   const context = observation.agent_context;
+  // 服务端快照：模型返回后的写入必须仍匹配它
+  const writeGuard = observationWriteGuard(observation);
 
   if (!shouldProceedToDraft(context)) {
     const judged = await judgeFollowUp({ ...baseParams, agentContext: context }, invoke);
@@ -102,6 +117,7 @@ export async function processObservationAgent({
         observation.id,
         nextFollowUpContext(context, judged.decision),
         "needs_input",
+        writeGuard,
       );
     }
   }
@@ -110,5 +126,5 @@ export async function processObservationAgent({
     { ...baseParams, agentContext: context },
     invoke,
   );
-  return updateObservationAiDraft(observation.id, draft, model);
+  return updateObservationAiDraft(observation.id, draft, model, writeGuard);
 }
