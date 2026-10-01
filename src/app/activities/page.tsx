@@ -3,7 +3,6 @@ import Link from 'next/link';
 import { ArrowUpRight, ClipboardCheck, Leaf, Sparkles, Sprout, UserPlus } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AiBadge } from '@/components/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -150,7 +149,6 @@ export default async function ActivitiesPage() {
                     <div className="space-y-2 border-t border-slate-100 pt-3">
                       <div className="flex items-center gap-2 text-xs text-slate-500">
                         <span>活动卡片摘要</span>
-                        <AiBadge />
                       </div>
                       <ul className="space-y-1.5">
                         {support.suggestions.map((suggestion) => (
@@ -204,7 +202,7 @@ export default async function ActivitiesPage() {
       {!dbError && children.length > 0 ? (
         <div className="flex items-start gap-2 text-xs leading-5 text-slate-400">
           <Sparkles className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
-          活动支持只读取教师确认后的观察与成长小结，建议可按现场情况灵活调整。
+          建议来自教师确认后的观察，可按现场情况灵活调整。
         </div>
       ) : null}
     </div>

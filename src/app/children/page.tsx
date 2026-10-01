@@ -190,7 +190,7 @@ export default async function ChildrenPage({
                           <div className="mt-1 flex flex-wrap items-center gap-1.5 text-slate-700">
                             <span>{formatDateCn(latest.observed_at)}</span>
                             {latest.context ? <span className="text-xs text-slate-500">· {latest.context}</span> : null}
-                            <StatusBadge status={latest.status} />
+                            <StatusBadge status={latest.status} compact />
                           </div>
                         ) : (
                           <p className="mt-1 text-slate-500">还没有记录</p>
@@ -225,7 +225,7 @@ export default async function ChildrenPage({
 
       <div className="flex items-center gap-2 text-xs leading-5 text-slate-400">
         <ClipboardList className="size-3.5" aria-hidden="true" />
-        观察原文仅在本应用内使用；作品演示遵循不出现真实姓名与单位的要求。
+        原始观察会被保留；确认后的内容才会进入成长小结与支持建议。
       </div>
     </div>
   );

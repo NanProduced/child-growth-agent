@@ -6,7 +6,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { AiBadge, StatusBadge } from '@/components/status-badges';
+import { StatusBadge } from '@/components/status-badges';
 import { classLabel, excerpt, formatDateCn, schoolClassLabel } from '@/lib/format';
 import { listChildren, listClasses, listObservations } from '@/lib/queries';
 import type { Child, Observation, ObservationStatus, SchoolClass } from '@/lib/types';
@@ -198,8 +198,7 @@ export default async function ObservationsPage({
                     </span>
                   ) : null}
                   <span className="ml-auto flex items-center gap-2">
-                    {observation.ai_draft ? <AiBadge /> : null}
-                    <StatusBadge status={observation.status} />
+                    <StatusBadge status={observation.status} compact />
                   </span>
                 </div>
                 <p className="mt-2 line-clamp-2 text-sm leading-6 text-slate-600">
