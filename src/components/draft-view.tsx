@@ -6,7 +6,7 @@ import type { ObservationDraft } from '@/lib/types';
 /** 只读展示一张观察分析卡片（AI 草稿与教师确认稿共用结构） */
 export function DraftView({ draft }: { draft: ObservationDraft }) {
   return (
-    <div className="space-y-4 text-sm leading-6">
+    <div className="space-y-4 break-words text-sm leading-6">
       <div className="flex flex-wrap items-center gap-2">
         <Badge className="bg-violet-100 text-violet-700">{draft.domain}</Badge>
         <Badge variant="outline">{draft.sub_domain}</Badge>
