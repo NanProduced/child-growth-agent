@@ -120,10 +120,12 @@ export async function updateActivitySupport(
     ? null
     : buildFallbackProfile(confirmed, generatedAt);
 
+  // 保存层原子条件：写入时数据库中的已确认观察集合必须仍等于本次生成使用的快照
   const saved = await (options.save ?? updateChildActivitySupport)(
     child.id,
     activitySupport,
     fallbackProfile,
+    expectedIds,
   );
   return {
     activitySupport,

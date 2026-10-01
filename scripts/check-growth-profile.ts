@@ -7,6 +7,7 @@ import {
   generateGrowthProfile,
 } from '../src/lib/ai';
 import {
+  StaleEvidenceError,
   buildGrowthProfileFallback,
   updateGrowthProfileAfterConfirmation,
   updateGrowthProfileSafely,
@@ -270,6 +271,31 @@ async function main(): Promise<void> {
   assert.equal(staleSaveCalls, 0);
   passed += 1;
 
+  // 5d) 保存层收到原子条件：期望的已确认观察 id 快照
+  let atomicExpectedIds: string[] = [];
+  await updateGrowthProfileAfterConfirmation(child, [confirmed], {
+    invoke: async () => reply(JSON.stringify(PROFILE)),
+    reloadObservations: async () => [confirmed],
+    save: async (_childId, profile, expectedIds) => {
+      atomicExpectedIds = expectedIds;
+      return { ...child, growth_profile: profile };
+    },
+  });
+  assert.deepEqual(atomicExpectedIds, ['confirmed-1']);
+  passed += 1;
+
+  // 5e) 复查通过后、写入前发生新的确认：保存层原子条件失败 → 可重试状态，不覆盖新结果
+  const atomicFail = await updateGrowthProfileSafely(child, [confirmed], {
+    invoke: async () => reply(JSON.stringify(PROFILE)),
+    reloadObservations: async () => [confirmed],
+    save: async () => {
+      throw new StaleEvidenceError('生成期间已有新的已确认观察，请重新生成。');
+    },
+  });
+  assert.equal(atomicFail.status, 'failed');
+  assert.ok(atomicFail.message?.includes('重新生成'));
+  passed += 1;
+
   // 6) 没有保存 profile 时，页面 fallback 只读取 confirmed 观察。
   const fallback = buildGrowthProfileFallback(mixedObservations);
   assert.ok(fallback);
@@ -306,7 +332,7 @@ async function main(): Promise<void> {
   }
   passed += 1;
 
-  console.log(JSON.stringify({ passed, total: 11 }));
+  console.log(JSON.stringify({ passed, total: 13 }));
 }
 
 void main();

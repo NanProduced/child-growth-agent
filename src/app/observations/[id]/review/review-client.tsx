@@ -42,7 +42,11 @@ import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
 import { formatDateCn, formatDateTimeCn, schoolClassLabel } from '@/lib/format';
 import { followUpRounds } from '@/lib/follow-up';
-import { sameTeacherEditContent } from '@/lib/teacher-edit-review';
+import {
+  sameClarificationSnapshot,
+  sameTeacherEditContent,
+  sameTeacherEditNote,
+} from '@/lib/teacher-edit-review';
 import {
   FIVE_DOMAINS,
   type AgentContext,
@@ -304,7 +308,9 @@ export function ReviewClient({
   const reviewMatchesCurrent = Boolean(
     currentContent &&
       teacherEditReview &&
-      sameTeacherEditContent(teacherEditReview.content_snapshot, currentContent),
+      sameTeacherEditContent(teacherEditReview.content_snapshot, currentContent) &&
+      sameClarificationSnapshot(teacherEditReview, clarifications) &&
+      sameTeacherEditNote(teacherEditReview, teacherNote),
   );
 
   return (

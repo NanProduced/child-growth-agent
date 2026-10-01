@@ -1,7 +1,10 @@
 import { generateGrowthProfile } from "./ai";
+import { StaleEvidenceError } from "./evidence-snapshot";
 import { invokeLlm } from "./llm";
 import { listObservations, updateChildGrowthProfileSummary } from "./queries";
 import type { Child, GrowthProfile, GrowthProfileDraft, Observation } from "./types";
+
+export { StaleEvidenceError } from "./evidence-snapshot";
 
 export type ProfileUpdateStatus = "updated" | "failed";
 
@@ -9,14 +12,6 @@ export interface ProfileUpdateResult {
   status: ProfileUpdateStatus;
   growthProfile?: GrowthProfile;
   message?: string;
-}
-
-/** 生成期间证据集合发生变化：旧结果不能覆盖更新的档案，返回可重试状态 */
-export class StaleEvidenceError extends Error {
-  constructor(message = "生成期间已有新的已确认观察，请重新生成。") {
-    super(message);
-    this.name = "StaleEvidenceError";
-  }
 }
 
 type ProfileUpdateOptions = {
@@ -112,9 +107,11 @@ export async function updateGrowthProfileAfterConfirmation(
     updated_at: new Date().toISOString(),
   };
 
+  // 保存层原子条件：写入时数据库中的已确认观察集合必须仍等于本次生成使用的快照
   const saved = await (options.save ?? updateChildGrowthProfileSummary)(
     child.id,
     growthProfile,
+    expectedIds,
   );
   return saved.growth_profile ?? growthProfile;
 }

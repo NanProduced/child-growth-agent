@@ -8,14 +8,18 @@ import type { LlmMessage, LlmOptions, LlmResult } from '../src/lib/llm';
 
 /**
  * 保存一致性检查（离线）：
- * 1) 语句级检查：实际 UPDATE 语句必须在 SQL 处保护 confirmed 状态、只合并自身 JSONB 键；
+ * 1) 语句级检查：实际 UPDATE 语句必须在 SQL 处保护 confirmed 状态、只合并自身 JSONB 键，
+ *    并在保存层比较“已确认观察 id 快照”（条件不满足抛 StaleEvidenceError）；
  * 2) 时序模拟：迟到的整理/追问写入遇到保护时，错误必须向上抛出，不能被吞掉。
- * 说明：这里没有连接托管数据库，SQL 原子性只做了语句与模拟时序验证。
+ * 说明：这里没有连接托管数据库。原子条件的实际并发行为（NOT_RUN）未在实库验证，
+ * 只核对了语句结构、条件参数与 lib 层模拟时序。
  */
 
 function functionBody(rawSource: string, name: string): string {
   const source = rawSource.replace(/\r\n/g, '\n');
-  const start = source.indexOf(`export async function ${name}(`);
+  const exported = source.indexOf(`export async function ${name}(`);
+  const plain = source.indexOf(`function ${name}(`);
+  const start = exported >= 0 ? exported : plain;
   assert.ok(start >= 0, `未找到 ${name}`);
   const end = source.indexOf('\n}\n', start);
   assert.ok(end > start, `未找到 ${name} 函数结尾`);
@@ -35,20 +39,44 @@ function checkStatements(): number {
 
   const contextBody = functionBody(source, 'updateObservationAgentContext');
   assert.ok(
-    contextBody.includes("AND status <> 'confirmed'"),
-    '追问上下文写入必须在 SQL 处保护 confirmed 状态',
+    contextBody.includes("AND ${guard}"),
+    '追问上下文写入必须带状态保护条件',
   );
+  assert.ok(
+    contextBody.includes("status <> 'confirmed'"),
+    '追问上下文写入必须保护 confirmed 状态',
+  );
+  assert.ok(
+    contextBody.includes('status = $'),
+    'expectedStatus 分支必须要求当前状态一致，防止迟到重试恢复待追问',
+  );
+  passed += 1;
+
+  // 原子条件：已确认观察 id 集合比较
+  const evidenceBody = functionBody(source, 'confirmedEvidenceMatches');
+  assert.ok(evidenceBody.includes("o.status = 'confirmed'"), '原子条件必须比较已确认观察');
+  assert.ok(evidenceBody.includes('jsonb_agg'), '原子条件必须按 id 集合比较而非时间戳');
+  assert.ok(evidenceBody.includes('o.child_id = $1'), '原子条件必须限定同一幼儿');
+  assert.ok(evidenceBody.includes('= $'), '原子条件必须与传入的期望快照参数比较');
   passed += 1;
 
   const activityBody = functionBody(source, 'updateChildActivitySupport');
   assert.ok(activityBody.includes("'{activity_support}'"), '活动支持只更新自身键');
   assert.ok(activityBody.includes('jsonb_set('), '活动支持使用 JSONB 定向合并');
   assert.ok(activityBody.includes('coalesce(growth_profile'), '仅在档案为空时使用 fallback 底座');
+  assert.ok(
+    activityBody.includes('${confirmedEvidenceMatches(5)}'),
+    '活动保存必须在 SQL 内做证据快照原子比较',
+  );
   passed += 1;
 
   const summaryBody = functionBody(source, 'updateChildGrowthProfileSummary');
   assert.ok(summaryBody.includes("- 'is_fallback'"), 'AI 小结写入应清除回退标记');
   assert.ok(summaryBody.includes('|| $2::jsonb'), '小结使用 JSONB 合并而非整体替换');
+  assert.ok(
+    summaryBody.includes('${confirmedEvidenceMatches(4)}'),
+    '小结保存在 SQL 内做证据快照原子比较',
+  );
   const summarySql = summaryBody.slice(
     summaryBody.indexOf('`'),
     summaryBody.lastIndexOf('`') + 1,

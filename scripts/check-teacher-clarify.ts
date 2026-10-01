@@ -4,7 +4,9 @@ import { buildTeacherEditReviewMessages, reviewTeacherEdit } from '../src/lib/ai
 import {
   clarificationSnapshot,
   normalizeTeacherEditContent,
+  normalizeTeacherNote,
   sameClarificationSnapshot,
+  sameTeacherEditNote,
   teacherEditSubmissionAction,
 } from '../src/lib/teacher-edit-review';
 import type { LlmResult } from '../src/lib/llm';
@@ -53,6 +55,7 @@ function reviewWith(overrides: Partial<TeacherEditReview>): TeacherEditReview {
     question: '',
     content_snapshot: normalizeTeacherEditContent(EDITED),
     clarification_snapshot: [],
+    note_snapshot: '',
     reviewed_at: '2026-09-30T00:00:00.000Z',
     ...overrides,
   };
@@ -228,7 +231,106 @@ async function main(): Promise<void> {
   assert.equal(JSON.stringify({ raw: RAW, draft: DRAFT }), snapshot);
   passed += 1;
 
-  console.log(JSON.stringify({ passed, total: 10 }));
+  // 11) 审核绑定教师备注：备注变化或撤回后旧 accept 失效
+  const acceptedWithNote = reviewWith({ note_snapshot: normalizeTeacherNote('孩子独立完成') });
+  assert.equal(
+    teacherEditSubmissionAction(
+      DRAFT,
+      normalizeTeacherEditContent(EDITED),
+      acceptedWithNote,
+      [],
+      '孩子独立完成',
+    ),
+    'confirm',
+  );
+  assert.equal(
+    teacherEditSubmissionAction(
+      DRAFT,
+      normalizeTeacherEditContent(EDITED),
+      acceptedWithNote,
+      [],
+      '其实教师帮助完成',
+    ),
+    'review',
+    '把备注改成相反事实后必须重新审核',
+  );
+  assert.equal(
+    teacherEditSubmissionAction(DRAFT, normalizeTeacherEditContent(EDITED), acceptedWithNote, [], ''),
+    'review',
+    '撤回原审核使用的备注后旧审核失效',
+  );
+  assert.equal(
+    teacherEditSubmissionAction(
+      DRAFT,
+      normalizeTeacherEditContent(EDITED),
+      acceptedWithNote,
+      [],
+      '  孩子独立完成  ',
+    ),
+    'confirm',
+    '备注按服务端规则规范化后比较',
+  );
+  assert.equal(sameTeacherEditNote({ ...acceptedWithNote, note_snapshot: undefined }, '孩子独立完成'), false);
+  passed += 1;
+
+  // 12) 旧审核缺少 note_snapshot：修改内容必须重新审核一次，无崩溃、无永久阻塞
+  const legacyNoteReview = reviewWith({});
+  delete (legacyNoteReview as Partial<TeacherEditReview>).note_snapshot;
+  assert.equal(
+    teacherEditSubmissionAction(DRAFT, normalizeTeacherEditContent(EDITED), legacyNoteReview, [], ''),
+    'review',
+  );
+  // 原样 AI 内容仅添加普通备注：保持直接确认，不增加审核
+  assert.equal(
+    teacherEditSubmissionAction(DRAFT, normalizeTeacherEditContent(DRAFT), legacyNoteReview, [], '记录属实'),
+    'confirm',
+  );
+  assert.equal(
+    teacherEditSubmissionAction(DRAFT, normalizeTeacherEditContent(DRAFT), acceptedWithNote, [], '补充说明'),
+    'confirm',
+  );
+  passed += 1;
+
+  // 13) 内容、备注、澄清均未变化：仍可最终确认
+  assert.equal(
+    teacherEditSubmissionAction(
+      DRAFT,
+      normalizeTeacherEditContent(EDITED),
+      acceptedWithNote,
+      [CLARIFICATION],
+      '孩子独立完成',
+    ),
+    'review',
+    '澄清快照未绑定时必须重审',
+  );
+  const fullReview = reviewWith({
+    note_snapshot: normalizeTeacherNote('孩子独立完成'),
+    clarification_snapshot: clarificationSnapshot([CLARIFICATION]),
+  });
+  assert.equal(
+    teacherEditSubmissionAction(
+      DRAFT,
+      normalizeTeacherEditContent(EDITED),
+      fullReview,
+      [CLARIFICATION],
+      '孩子独立完成',
+    ),
+    'confirm',
+  );
+  assert.equal(
+    teacherEditSubmissionAction(
+      DRAFT,
+      normalizeTeacherEditContent(EDITED),
+      fullReview,
+      [CLARIFICATION],
+      '孩子独立完成',
+    ),
+    'confirm',
+    '重复提交同一审核请求不会绕过确认规则，也不会被误判为失效',
+  );
+  passed += 1;
+
+  console.log(JSON.stringify({ passed, total: 13 }));
 }
 
 void main();

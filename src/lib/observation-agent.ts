@@ -22,19 +22,19 @@ export function appendFollowUpAction(
   const followUp = context.follow_up;
   if (!followUp) throw new Error("当前没有待补充问题");
   const answer = { action, content: content.trim(), created_at: createdAt };
-  let attached = false;
-  const rounds = followUpRounds(followUp).map((round) => {
-    if (!attached && round.round === followUp.round && round.answer === null) {
-      attached = true;
-      return { ...round, answer };
-    }
-    return round;
-  });
+  // 同一当前轮次的重试替换为该轮有效回答；只有新轮次才追加
+  const rounds = followUpRounds(followUp).map((round) =>
+    round.round === followUp.round ? { ...round, answer } : round,
+  );
+  const answers =
+    followUp.answers.length >= followUp.round
+      ? [...followUp.answers.slice(0, -1), answer]
+      : [...followUp.answers, answer];
   return {
     ...context,
     follow_up: {
       ...followUp,
-      answers: [...followUp.answers, answer],
+      answers,
       rounds,
       stopped: followUp.stopped || action === "stop",
     },

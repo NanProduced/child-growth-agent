@@ -127,6 +127,8 @@ export interface TeacherEditReview extends TeacherEditReviewOutput {
   content_snapshot: TeacherEditContent;
   /** 审核时使用的澄清问答快照；旧记录没有此字段，按空列表处理 */
   clarification_snapshot?: string[];
+  /** 审核时使用的教师备注（服务端规范化）；旧记录没有此字段，需重审一次 */
+  note_snapshot?: string;
   reviewed_at: string;
 }
 

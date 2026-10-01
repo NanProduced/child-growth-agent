@@ -1,4 +1,5 @@
 import { query, queryOne } from "@/storage/database/pg-client";
+import { ObservationStateConflictError, StaleEvidenceError } from "./evidence-snapshot";
 import type {
   ActivitySupport,
   AgentContext,
@@ -308,12 +309,31 @@ export async function createChild(input: {
 }
 
 /**
+ * 原子条件：保存时数据库中的“已确认观察 id 集合”必须仍等于模型生成时使用的快照。
+ * 任何新的确认都会改变该集合，使迟到的旧结果无法写入。
+ */
+function confirmedEvidenceMatches(paramIndex: number): string {
+  return `(
+    SELECT coalesce(jsonb_agg(sub.id ORDER BY sub.id), '[]'::jsonb)
+      FROM (
+        SELECT o.id::text AS id
+          FROM observations o
+         WHERE o.child_id = $1
+           AND o.status = 'confirmed'
+           AND o.confirmed_content IS NOT NULL
+      ) sub
+  ) = $${paramIndex}::jsonb`;
+}
+
+/**
  * 成长小结更新：只合并小结字段，保留同一 JSONB 中已有的 activity_support；
- * 同时移除旧的 is_fallback 标记，避免回退小结被当成模型生成。
+ * 同时移除旧的 is_fallback 标记。写入前在 SQL 内做证据快照原子比较，
+ * 条件不满足抛 StaleEvidenceError（可重试），不会覆盖较新的结果。
  */
 export async function updateChildGrowthProfileSummary(
   id: string,
   growth_profile: GrowthProfile,
+  expectedConfirmedIds: string[],
 ): Promise<Child> {
   const fields: Record<string, unknown> = { ...growth_profile };
   delete fields.activity_support;
@@ -323,21 +343,29 @@ export async function updateChildGrowthProfileSummary(
      SET growth_profile = (coalesce(growth_profile, '{}'::jsonb) - 'is_fallback') || $2::jsonb,
          updated_at = $3
      WHERE id = $1
+       AND ${confirmedEvidenceMatches(4)}
      RETURNING to_jsonb(children.*) AS data`,
-    [id, JSON.stringify(fields), now],
+    [
+      id,
+      JSON.stringify(fields),
+      now,
+      JSON.stringify([...expectedConfirmedIds].sort()),
+    ],
   );
-  if (!row) throw new Error("保存成长档案失败：幼儿档案不存在");
+  if (!row) throw new StaleEvidenceError();
   return mapChild(row.data);
 }
 
 /**
  * 活动支持更新：只写入 activity_support 键，不覆盖并发的成长小结字段；
  * 仅在档案为空时用保守 fallback 作为底座。
+ * 同样在 SQL 内做证据快照原子比较，条件不满足抛 StaleEvidenceError。
  */
 export async function updateChildActivitySupport(
   id: string,
   activitySupport: ActivitySupport,
   fallbackProfile: GrowthProfile | null,
+  expectedConfirmedIds: string[],
 ): Promise<Child> {
   const now = new Date().toISOString();
   const row = await queryOne<{ data: Row }>(
@@ -350,10 +378,17 @@ export async function updateChildActivitySupport(
          ),
          updated_at = $4
      WHERE id = $1
+       AND ${confirmedEvidenceMatches(5)}
      RETURNING to_jsonb(children.*) AS data`,
-    [id, JSON.stringify(fallbackProfile ?? {}), JSON.stringify(activitySupport), now],
+    [
+      id,
+      JSON.stringify(fallbackProfile ?? {}),
+      JSON.stringify(activitySupport),
+      now,
+      JSON.stringify([...expectedConfirmedIds].sort()),
+    ],
   );
-  if (!row) throw new Error("保存活动支持失败：幼儿档案不存在");
+  if (!row) throw new StaleEvidenceError();
   return mapChild(row.data);
 }
 
@@ -443,28 +478,46 @@ export async function updateObservationAiDraft(
      RETURNING to_jsonb(observations.*) AS data`,
     [id, JSON.stringify(ai_draft), ai_model, now]
   );
-  if (!row) throw new Error("该记录已由教师确认归档，迟到的 AI 整理结果不会覆盖确认稿");
+  if (!row) {
+    throw new ObservationStateConflictError(
+      "该记录已由教师确认归档，迟到的 AI 整理结果不会覆盖确认稿",
+    );
+  }
   return mapObservation(row.data);
 }
 
 /**
  * 保存 Agent 工作流上下文；不修改 raw_text 与 confirmed_content。
- * 更新语句自身保护 confirmed 状态：迟到的追问写入不能把已确认记录降级。
+ * 更新语句自身保护状态：confirmed 不被降级；传入 expectedStatus 时要求当前状态一致，
+ * 防止迟到重试把已经结束的记录恢复为待追问。
  */
 export async function updateObservationAgentContext(
   id: string,
   agent_context: AgentContext,
   status: ObservationStatus,
+  expectedStatus?: ObservationStatus,
 ): Promise<Observation> {
   const now = new Date().toISOString();
+  const params: unknown[] = [id, JSON.stringify(agent_context), status, now];
+  let guard = "status <> 'confirmed'";
+  if (expectedStatus) {
+    params.push(expectedStatus);
+    guard = `status = $${params.length}`;
+  }
   const row = await queryOne<{ data: Row }>(
     `UPDATE observations
      SET agent_context = $2::jsonb, status = $3, updated_at = $4
-     WHERE id = $1 AND status <> 'confirmed'
+     WHERE id = $1 AND ${guard}
      RETURNING to_jsonb(observations.*) AS data`,
-    [id, JSON.stringify(agent_context), status, now],
+    params,
   );
-  if (!row) throw new Error("该记录已由教师确认归档，迟到的补充信息不会改写已确认记录");
+  if (!row) {
+    throw new ObservationStateConflictError(
+      expectedStatus
+        ? "记录已不在等待补充信息状态，迟到的补充不会被写入"
+        : "该记录已由教师确认归档，迟到的补充信息不会改写已确认记录",
+    );
+  }
   return mapObservation(row.data);
 }
 

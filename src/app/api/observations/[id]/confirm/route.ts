@@ -16,8 +16,10 @@ import {
 import {
   clarificationSnapshot,
   normalizeTeacherEditContent,
+  normalizeTeacherNote,
   sameClarificationSnapshot,
   sameTeacherEditContent,
+  sameTeacherEditNote,
   teacherEditSubmissionAction,
 } from "@/lib/teacher-edit-review";
 import type { AgentContext, TeacherEditClarification } from "@/lib/types";
@@ -101,17 +103,20 @@ export async function POST(
     const clarifications: TeacherEditClarification[] =
       observation.agent_context?.teacher_edit_clarifications ?? [];
     const currentReview = observation.agent_context?.teacher_edit_review;
+    const teacherNote = parsed.data.teacher_note?.trim() || undefined;
+    const normalizedNote = normalizeTeacherNote(teacherNote);
     const reviewMatches = Boolean(
       currentReview &&
         sameTeacherEditContent(currentReview.content_snapshot, submittedContent) &&
-        sameClarificationSnapshot(currentReview, clarifications),
+        sameClarificationSnapshot(currentReview, clarifications) &&
+        sameTeacherEditNote(currentReview, normalizedNote),
     );
-    const teacherNote = parsed.data.teacher_note?.trim() || undefined;
     const submissionAction = teacherEditSubmissionAction(
       observation.ai_draft,
       normalizedContent,
       currentReview,
       clarifications,
+      normalizedNote,
     );
 
     // 教师回答 clarify 问题：独立保存问答，并带着澄清依据重新审核
@@ -151,6 +156,7 @@ export async function POST(
             ...review,
             content_snapshot: normalizedContent,
             clarification_snapshot: clarificationSnapshot(nextClarifications),
+            note_snapshot: normalizedNote,
             reviewed_at: new Date().toISOString(),
           },
         },
@@ -233,6 +239,7 @@ export async function POST(
           ...review,
           content_snapshot: normalizedContent,
           clarification_snapshot: clarificationSnapshot(clarifications),
+          note_snapshot: normalizedNote,
           reviewed_at: reviewedAt,
         },
       },

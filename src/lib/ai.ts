@@ -1,3 +1,4 @@
+import { FIVE_DOMAINS } from "./types";
 import { formatFollowUpRounds } from "./follow-up";
 import { COZE_ORGANIZE_MODEL, getLlmProvider, invokeLlm } from "./llm";
 import type { LlmMessage, LlmResult, LlmResponseType } from "./llm";
@@ -39,7 +40,7 @@ export const SYSTEM_PROMPT = `你是幼儿园教师的观察记录整理助手�
 
 硬性要求：
 1. 只使用教师原文和教师明确补充的信息，不得虚构、夸大或补充没有证据的细节；补充信息是独立来源，不能混入或改写原文，也不能伪装成原文已有内容。
-2. 只做发展性描述；禁止医疗与心理诊断词汇（如：自闭症、多动症、注意力缺陷、抑郁、焦虑、智商、智力低下等），禁止打分数、评等级或做任何优劣评价。
+2. 允许描述有观察依据的普通情绪表现（例如：入园时有些焦虑，得到安抚后情绪平稳），但不得推断原文和教师补充中没有记录的情绪。禁止医疗与心理诊断词汇与障碍判断（如：自闭症、多动症、注意力缺陷、焦虑症、抑郁症、智商、智力低下等），禁止打分数、评等级或做任何优劣评价。
 3. domain 必须严格等于以下五个精确值之一：健康、语言、社会、科学、艺术。禁止使用任何其他领域名称或旧标签（包括但不限于：社会与情感、认知与探究、身体动作、美感、情感与社会性）；不确定时选择最贴近的一个，不得自造词。
 4. sub_domain 用简短的领域子方向词（如：同伴交往、大肌肉动作、表达与交流、科学观察、艺术表现等）。
 5. objective_description：一两句客观说明这次观察反映的发展点。
@@ -483,33 +484,46 @@ function observationEvidenceTexts(observation: Observation): string[] {
   ].filter((value): value is string => Boolean(value && value.trim()));
 }
 
-function evidenceBody(evidence: string): string {
-  const withoutDomain = evidence.replace(/^(健康|语言|社会|科学|艺术)\s*[:：]\s*/, "");
-  return normalizeQuoteForEvidence(withoutDomain);
-}
-
 const stripWhitespace = (value: string) => value.replace(/\s+/g, "");
 
+const EVIDENCE_DOMAIN_PREFIX = new RegExp(`^(${FIVE_DOMAINS.join("|")})\\s*[:：]\\s*`);
+
+type EvidenceMatch = {
+  matched: Observation[];
+  error?: string;
+};
+
 /**
- * 返回该引用匹配到的已确认观察；只声明“引用存在、来源合法”，不代表教育效果已被证明。
- * 引用本身必须是已确认文本中的连续片段，或包含一条至少 6 字的已确认亮点/金句。
+ * 核对单条引用：必须以合法领域开头；去掉前缀与成对引号后，
+ * 引用正文必须是该领域已确认观察文本中的真实连续片段（仅容忍空白差异）。
+ * 不做反向包含、模糊匹配或自动截断；只声明“引用存在、来源合法”，不代表教育效果已被证明。
  */
-function matchEvidenceObservations(
-  evidence: string,
-  confirmed: Observation[],
-): Observation[] {
-  const body = stripWhitespace(evidenceBody(evidence));
-  if (!body) return [];
-  return confirmed.filter((observation) => {
-    if (observationEvidenceTexts(observation).some((text) => stripWhitespace(text).includes(body))) {
-      return true;
-    }
-    const fragments = [
-      observation.confirmed_content?.highlight_quote,
-      ...(observation.confirmed_content?.highlights ?? []),
-    ].filter((value): value is string => Boolean(value && value.trim().length >= 6));
-    return fragments.some((fragment) => body.includes(stripWhitespace(fragment)));
+function matchEvidence(evidence: string, confirmed: Observation[]): EvidenceMatch {
+  const prefix = evidence.match(EVIDENCE_DOMAIN_PREFIX);
+  if (!prefix) {
+    return {
+      matched: [],
+      error: "引用必须以观察领域（健康、语言、社会、科学、艺术）加冒号开头",
+    };
+  }
+  const domain = prefix[1];
+  const body = normalizeQuoteForEvidence(evidence.slice(prefix[0].length));
+  if (!body) return { matched: [], error: "引用正文为空" };
+
+  const normalizedBody = stripWhitespace(body);
+  const matched = confirmed.filter((observation) => {
+    if (observation.confirmed_content?.domain !== domain) return false;
+    return observationEvidenceTexts(observation).some((text) =>
+      stripWhitespace(text).includes(normalizedBody),
+    );
   });
+  if (matched.length === 0) {
+    return {
+      matched: [],
+      error: `引用正文未在「${domain}」已确认观察中找到真实连续片段：${body.slice(0, 60)}`,
+    };
+  }
+  return { matched };
 }
 
 function validateActivitySupportOutput(
@@ -522,12 +536,12 @@ function validateActivitySupportOutput(
 
   const confirmed = confirmedObservations(observations);
   if (confirmed.length === 0) return "已确认观察缺少可追溯的证据来源";
-  for (const [index, suggestion] of output.suggestions.entries()) {
-    const matched = suggestion.evidence.some(
-      (item) => matchEvidenceObservations(item, confirmed).length > 0,
-    );
-    if (!matched) {
-      return `第 ${index + 1} 条建议的引用无法在已确认观察中找到对应片段（只写领域名称不算证据），请引用具体行为或语言`;
+  for (const [suggestionIndex, suggestion] of output.suggestions.entries()) {
+    for (const [evidenceIndex, item] of suggestion.evidence.entries()) {
+      const result = matchEvidence(item, confirmed);
+      if (result.error) {
+        return `第 ${suggestionIndex + 1} 条建议的第 ${evidenceIndex + 1} 条引用未通过核对：${result.error}`;
+      }
     }
   }
   return undefined;
@@ -582,7 +596,7 @@ export async function generateActivitySupport(
       source_observation_ids: [
         ...new Set(
           suggestion.evidence.flatMap((item) =>
-            matchEvidenceObservations(item, confirmed).map((observation) => observation.id),
+            matchEvidence(item, confirmed).matched.map((observation) => observation.id),
           ),
         ),
       ],
