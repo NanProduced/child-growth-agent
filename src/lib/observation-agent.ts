@@ -1,4 +1,5 @@
 import { judgeFollowUp, organizeObservation } from "./ai";
+import { followUpRounds } from "./follow-up";
 import { invokeLlm } from "./llm";
 import {
   updateObservationAgentContext,
@@ -18,16 +19,24 @@ export function appendFollowUpAction(
   content: string,
   createdAt = new Date().toISOString(),
 ): AgentContext {
-  if (!context.follow_up) throw new Error("当前没有待补充问题");
+  const followUp = context.follow_up;
+  if (!followUp) throw new Error("当前没有待补充问题");
+  const answer = { action, content: content.trim(), created_at: createdAt };
+  let attached = false;
+  const rounds = followUpRounds(followUp).map((round) => {
+    if (!attached && round.round === followUp.round && round.answer === null) {
+      attached = true;
+      return { ...round, answer };
+    }
+    return round;
+  });
   return {
     ...context,
     follow_up: {
-      ...context.follow_up,
-      answers: [
-        ...context.follow_up.answers,
-        { action, content: content.trim(), created_at: createdAt },
-      ],
-      stopped: context.follow_up.stopped || action === "stop",
+      ...followUp,
+      answers: [...followUp.answers, answer],
+      rounds,
+      stopped: followUp.stopped || action === "stop",
     },
   };
 }
@@ -37,13 +46,18 @@ export function nextFollowUpContext(
   decision: FollowUpDecision,
 ): AgentContext {
   const previous = context?.follow_up;
+  const round = (previous?.round ?? 0) + 1;
   return {
     ...(context ?? {}),
     follow_up: {
-      round: (previous?.round ?? 0) + 1,
+      round,
       question: decision.question,
       reason: decision.reason,
       answers: previous?.answers ?? [],
+      rounds: [
+        ...(previous ? followUpRounds(previous) : []),
+        { round, question: decision.question, reason: decision.reason, answer: null },
+      ],
       stopped: false,
     },
   };

@@ -1,6 +1,6 @@
 import { generateGrowthProfile } from "./ai";
 import { invokeLlm } from "./llm";
-import { updateChildGrowthProfile } from "./queries";
+import { listObservations, updateChildGrowthProfileSummary } from "./queries";
 import type { Child, GrowthProfile, GrowthProfileDraft, Observation } from "./types";
 
 export type ProfileUpdateStatus = "updated" | "failed";
@@ -11,9 +11,18 @@ export interface ProfileUpdateResult {
   message?: string;
 }
 
+/** 生成期间证据集合发生变化：旧结果不能覆盖更新的档案，返回可重试状态 */
+export class StaleEvidenceError extends Error {
+  constructor(message = "生成期间已有新的已确认观察，请重新生成。") {
+    super(message);
+    this.name = "StaleEvidenceError";
+  }
+}
+
 type ProfileUpdateOptions = {
   invoke?: typeof invokeLlm;
-  save?: typeof updateChildGrowthProfile;
+  save?: typeof updateChildGrowthProfileSummary;
+  reloadObservations?: (childId: string) => Promise<Observation[]>;
   forwardHeaders?: Record<string, string>;
 };
 
@@ -21,6 +30,26 @@ function confirmedObservations(observations: Observation[]): Observation[] {
   return observations.filter(
     (observation) => observation.status === "confirmed" && observation.confirmed_content,
   );
+}
+
+export function confirmedObservationIds(observations: Observation[]): string[] {
+  return confirmedObservations(observations)
+    .map((observation) => observation.id)
+    .sort();
+}
+
+/** 慢请求完成时核对证据快照；集合变化则拒绝写入旧结果 */
+export async function assertEvidenceUnchanged(
+  childId: string,
+  expectedIds: string[],
+  reloadObservations?: (childId: string) => Promise<Observation[]>,
+): Promise<void> {
+  const reload =
+    reloadObservations ?? ((id: string) => listObservations({ childId: id, status: "confirmed" }));
+  const currentIds = confirmedObservationIds(await reload(childId));
+  if (JSON.stringify(currentIds) !== JSON.stringify(expectedIds)) {
+    throw new StaleEvidenceError();
+  }
 }
 
 /** 没有已保存 profile 时，只从已有 confirmed 记录拼出可读的保守回退内容。 */
@@ -62,6 +91,7 @@ export async function updateGrowthProfileAfterConfirmation(
   if (confirmed.length === 0) {
     throw new Error("成长档案更新需要至少一条已确认观察");
   }
+  const expectedIds = confirmedObservationIds(confirmed);
 
   const generated = await generateGrowthProfile(
     {
@@ -73,6 +103,8 @@ export async function updateGrowthProfileAfterConfirmation(
     },
     options.invoke,
   );
+  await assertEvidenceUnchanged(child.id, expectedIds, options.reloadObservations);
+
   const growthProfile: GrowthProfile = {
     ...generated.profile,
     source_observation_ids: confirmed.map((observation) => observation.id),
@@ -80,8 +112,11 @@ export async function updateGrowthProfileAfterConfirmation(
     updated_at: new Date().toISOString(),
   };
 
-  await (options.save ?? updateChildGrowthProfile)(child.id, growthProfile);
-  return growthProfile;
+  const saved = await (options.save ?? updateChildGrowthProfileSummary)(
+    child.id,
+    growthProfile,
+  );
+  return saved.growth_profile ?? growthProfile;
 }
 
 export async function updateGrowthProfileSafely(
@@ -94,7 +129,13 @@ export async function updateGrowthProfileSafely(
       status: "updated",
       growthProfile: await updateGrowthProfileAfterConfirmation(child, observations, options),
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof StaleEvidenceError) {
+      return {
+        status: "failed",
+        message: "生成期间已有新的已确认观察，成长小结暂未更新，请重新生成。",
+      };
+    }
     return {
       status: "failed",
       message: "观察已确认，但成长档案暂未更新，请稍后重试。",

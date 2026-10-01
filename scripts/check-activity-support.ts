@@ -8,8 +8,10 @@ import {
   hasCurrentActivitySupport,
   updateActivitySupport,
 } from '../src/lib/activity-support';
+import { StaleEvidenceError } from '../src/lib/growth-profile';
 import type { LlmResult } from '../src/lib/llm';
 import type {
+  ActivitySupport,
   Child,
   GrowthProfile,
   Observation,
@@ -241,7 +243,7 @@ async function main(): Promise<void> {
   assert.equal(countCalls, 2);
   passed += 1;
 
-  // 6) 每条建议都必须能标出输入中的观察领域。
+  // 6) 领域名本身不算证据：带正确领域名但编造的引用必须被拒绝
   await assert.rejects(
     generateActivitySupport(
       {
@@ -256,30 +258,49 @@ async function main(): Promise<void> {
         reply(JSON.stringify({
           suggestions: VALID_SUPPORT.suggestions.map((suggestion) => ({
             ...suggestion,
-            evidence: ['没有对应领域的泛化描述'],
+            evidence: ['科学：幼儿在活动中表现出科学探究能力。'],
           })),
         })),
     ),
-    (error: Error) => error.message.includes('观察领域证据'),
+    (error: Error) => error.message.includes('无法在已确认观察中找到对应片段'),
   );
   passed += 1;
 
-  // 7) 保存时只追加 activity_support，来源只记录 confirmed，不触碰原始观察内容。
+  // 6b) 真实引用通过核对，并记录匹配到的已确认观察来源
+  const cited = await generateActivitySupport(
+    {
+      childName: child.name,
+      childGender: child.gender,
+      childBirthDate: child.birth_date,
+      classStage: child.class_stage,
+      className: child.class_name,
+      observations: [confirmed],
+    },
+    async () => reply(JSON.stringify(VALID_SUPPORT)),
+  );
+  assert.deepEqual(cited.activitySupport.suggestions[0].source_observation_ids, ['confirmed-1']);
+  assert.deepEqual(cited.activitySupport.suggestions[1].source_observation_ids, ['confirmed-1']);
+  passed += 1;
+
+  // 7) 保存只写 activity_support：已有小结时传 null fallback，来源只记录 confirmed，不触碰原始观察内容。
   const rawSnapshot = JSON.stringify({
     raw_text: confirmed.raw_text,
     ai_draft: confirmed.ai_draft,
     confirmed_content: confirmed.confirmed_content,
   });
-  let savedProfile: GrowthProfile = PROFILE;
+  const captured7: { support?: ActivitySupport; fallback?: GrowthProfile | null } = {};
   const updated = await updateActivitySupport(child, mixedObservations, {
     invoke: async () => reply(JSON.stringify(VALID_SUPPORT)),
-    save: async (_childId, profile) => {
-      savedProfile = profile;
-      return { ...child, growth_profile: profile };
+    reloadObservations: async () => mixedObservations,
+    save: async (_childId, activitySupport, fallbackProfile) => {
+      captured7.support = activitySupport;
+      captured7.fallback = fallbackProfile;
+      return { ...child, growth_profile: { ...PROFILE, activity_support: activitySupport } };
     },
   });
   assert.deepEqual(updated.activitySupport.source_observation_ids, ['confirmed-1']);
-  assert.deepEqual(savedProfile.activity_support?.source_observation_ids, ['confirmed-1']);
+  assert.deepEqual(captured7.support?.source_observation_ids, ['confirmed-1']);
+  assert.equal(captured7.fallback, null, '已有小结时不得重建或替换小结内容');
   assert.equal(hasCurrentActivitySupport(updated.activitySupport, mixedObservations), true);
   assert.equal(
     JSON.stringify({
@@ -291,17 +312,71 @@ async function main(): Promise<void> {
   );
   passed += 1;
 
-  // 8) 旧档案为空时也沿用 fallback 字段写入同一个 growth_profile JSONB，不新增表。
+  // 8) 旧档案为空时用保守 fallback 底座，不把活动模型伪标为成长小结生成模型。
   const childWithoutProfile = { ...child, growth_profile: null };
+  const captured8: { fallback?: GrowthProfile | null } = {};
   const fallbackSaved = await updateActivitySupport(childWithoutProfile, [confirmed], {
     invoke: async () => reply(JSON.stringify(VALID_SUPPORT)),
-    save: async (_childId, profile) => ({ ...childWithoutProfile, growth_profile: profile }),
+    reloadObservations: async () => [confirmed],
+    save: async (_childId, activitySupport, fallback) => {
+      captured8.fallback = fallback;
+      return {
+        ...childWithoutProfile,
+        growth_profile: fallback ? { ...fallback, activity_support: activitySupport } : null,
+      };
+    },
   });
-  assert.equal(fallbackSaved.growthProfile?.summary, CONFIRMED_CONTENT.objective_description);
+  const fallbackProfile = captured8.fallback;
+  assert.ok(fallbackProfile, '没有已存小结时应提供保守 fallback 底座');
+  assert.equal(fallbackProfile.is_fallback, true);
+  assert.equal(fallbackProfile.ai_model, '', '不得把活动模型标为成长小结生成模型');
+  assert.equal(fallbackProfile.summary, CONFIRMED_CONTENT.objective_description);
   assert.deepEqual(fallbackSaved.growthProfile?.activity_support?.source_observation_ids, ['confirmed-1']);
   passed += 1;
 
-  console.log(JSON.stringify({ passed, total: 8 }));
+  // 9) 较新的小结不会被活动保存携带或替换：保存入参只含 activity_support 与 null fallback
+  const newerProfile: GrowthProfile = {
+    ...PROFILE,
+    summary: '更新的成长小结文本',
+    source_observation_ids: ['confirmed-1'],
+    updated_at: '2026-09-30T00:00:00.000Z',
+  };
+  const childWithNewerProfile = { ...child, growth_profile: newerProfile };
+  const captured9: { fallback?: GrowthProfile | null } = {};
+  const newerSaved = await updateActivitySupport(childWithNewerProfile, [confirmed], {
+    invoke: async () => reply(JSON.stringify(VALID_SUPPORT)),
+    reloadObservations: async () => [confirmed],
+    save: async (_childId, activitySupport, fallback) => {
+      captured9.fallback = fallback;
+      return {
+        ...childWithNewerProfile,
+        growth_profile: { ...newerProfile, activity_support: activitySupport },
+      };
+    },
+  });
+  assert.equal(captured9.fallback, null);
+  assert.equal(newerSaved.growthProfile?.summary, '更新的成长小结文本');
+  assert.equal(newerSaved.growthProfile?.updated_at, newerProfile.updated_at);
+  passed += 1;
+
+  // 10) 生成期间新增已确认观察：拒绝保存并返回可重试错误
+  const lateConfirmed = observation('confirmed-2', 'confirmed', CONFIRMED_CONTENT);
+  let staleSaveCalls = 0;
+  await assert.rejects(
+    updateActivitySupport(child, [confirmed], {
+      invoke: async () => reply(JSON.stringify(VALID_SUPPORT)),
+      reloadObservations: async () => [confirmed, lateConfirmed],
+      save: async () => {
+        staleSaveCalls += 1;
+        return child;
+      },
+    }),
+    (error: Error) => error instanceof StaleEvidenceError,
+  );
+  assert.equal(staleSaveCalls, 0);
+  passed += 1;
+
+  console.log(JSON.stringify({ passed, total: 11 }));
 }
 
 void main();

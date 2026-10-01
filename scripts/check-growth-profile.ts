@@ -174,6 +174,7 @@ async function main(): Promise<void> {
   let savedSourceIds: string[] = [];
   const saved = await updateGrowthProfileAfterConfirmation(child, mixedObservations, {
     invoke: async () => reply(JSON.stringify(PROFILE)),
+    reloadObservations: async () => mixedObservations,
     save: async (_childId, profile) => {
       savedSourceIds = profile.source_observation_ids;
       return { ...child, growth_profile: profile };
@@ -194,12 +195,79 @@ async function main(): Promise<void> {
   // 5) profile 保存失败只返回 failed，已经确认的观察仍保持 confirmed。
   const failedUpdate = await updateGrowthProfileSafely(child, [confirmed], {
     invoke: async () => reply(JSON.stringify(PROFILE)),
+    reloadObservations: async () => [confirmed],
     save: async () => {
       throw new Error('offline save failure');
     },
   });
   assert.equal(failedUpdate.status, 'failed');
   assert.equal(confirmed.status, 'confirmed');
+  passed += 1;
+
+  // 5b) 小结更新不携带 activity_support 字段，已有活动支持不会被清掉
+  const existingSupport = {
+    suggestions: [
+      {
+        title: '桥墩换一换',
+        purpose: '支持幼儿继续观察支撑位置。',
+        steps: ['准备长短不同的积木。', '邀请幼儿换一种支撑方式再试一次。'],
+        materials: ['长短不同的积木'],
+        observe: '继续观察幼儿是否会比较不同支撑方式。',
+        adaptation: '如果桥面容易倒，先减少材料数量。',
+        evidence: ['科学：把两块积木并排放在下面当桥墩。'],
+      },
+      {
+        title: '说说为什么',
+        purpose: '支持幼儿把调整和结果联系起来。',
+        steps: ['请幼儿指出这次调整的地方。', '邀请幼儿再试一次。'],
+        materials: [],
+        observe: '继续观察幼儿是否能用语言说明调整前后的不同。',
+        adaptation: '如果幼儿不想表达，教师用复述代替追问。',
+        evidence: ['科学：这次桥不会塌了。'],
+      },
+    ],
+    source_observation_ids: ['confirmed-1'],
+    ai_model: 'offline-activity-model',
+    generated_at: '2026-09-26T00:00:00.000Z',
+  };
+  const storedProfile = {
+    ...PROFILE,
+    source_observation_ids: ['confirmed-1'],
+    ai_model: 'offline-profile-model',
+    updated_at: '2026-09-25T11:00:00.000Z',
+    activity_support: existingSupport,
+  };
+  const childWithSupport = { ...child, growth_profile: storedProfile };
+  let savedFields: Record<string, unknown> = {};
+  const withSupport = await updateGrowthProfileAfterConfirmation(childWithSupport, [confirmed], {
+    invoke: async () => reply(JSON.stringify(PROFILE)),
+    reloadObservations: async () => [confirmed],
+    save: async (_childId, profile) => {
+      savedFields = { ...profile };
+      return {
+        ...childWithSupport,
+        growth_profile: { ...profile, activity_support: existingSupport },
+      };
+    },
+  });
+  assert.equal('activity_support' in savedFields, false, '小结保存不得携带 activity_support');
+  assert.deepEqual(withSupport.activity_support?.source_observation_ids, ['confirmed-1']);
+  passed += 1;
+
+  // 5c) 生成期间新增已确认观察：拒绝写入旧小结并返回可重试状态
+  const lateConfirmed = observation('confirmed-2', 'confirmed', CONFIRMED_CONTENT);
+  let staleSaveCalls = 0;
+  const staleUpdate = await updateGrowthProfileSafely(child, [confirmed], {
+    invoke: async () => reply(JSON.stringify(PROFILE)),
+    reloadObservations: async () => [confirmed, lateConfirmed],
+    save: async () => {
+      staleSaveCalls += 1;
+      return child;
+    },
+  });
+  assert.equal(staleUpdate.status, 'failed');
+  assert.ok(staleUpdate.message?.includes('新的已确认观察'));
+  assert.equal(staleSaveCalls, 0);
   passed += 1;
 
   // 6) 没有保存 profile 时，页面 fallback 只读取 confirmed 观察。
@@ -238,7 +306,7 @@ async function main(): Promise<void> {
   }
   passed += 1;
 
-  console.log(JSON.stringify({ passed, total: 9 }));
+  console.log(JSON.stringify({ passed, total: 11 }));
 }
 
 void main();

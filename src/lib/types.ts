@@ -9,17 +9,36 @@ export interface AgentFollowUpAnswer {
   created_at: string;
 }
 
+/** 单轮追问：问题、必要性说明与教师回答/跳过行为成对保存 */
+export interface AgentFollowUpRound {
+  round: number;
+  /** 该轮问题；旧上下文无法确定时为空字符串，只按历史补充呈现，不补造问题 */
+  question: string;
+  reason: string;
+  answer: AgentFollowUpAnswer | null;
+}
+
 export interface AgentFollowUp {
   round: number;
   question: string;
   reason: string;
   answers: AgentFollowUpAnswer[];
+  /** 新记录逐轮保存问答配对；旧记录没有此字段 */
+  rounds?: AgentFollowUpRound[];
   stopped: boolean;
+}
+
+/** 教师对修改审核 clarify 问题的补充回答，独立于观察追问轮次 */
+export interface TeacherEditClarification {
+  question: string;
+  answer: string;
+  created_at: string;
 }
 
 export interface AgentContext {
   follow_up?: AgentFollowUp;
   teacher_edit_review?: TeacherEditReview;
+  teacher_edit_clarifications?: TeacherEditClarification[];
 }
 
 export interface FollowUpDecision {
@@ -60,6 +79,8 @@ export interface ActivitySupportSuggestion {
   observe: string;
   adaptation: string;
   evidence: string[];
+  /** 新生成建议经引用核对后记录匹配到的已确认观察 id；旧建议没有此字段 */
+  source_observation_ids?: string[];
 }
 
 export interface ActivitySupportDraft {
@@ -77,6 +98,8 @@ export interface GrowthProfile extends GrowthProfileDraft {
   ai_model: string;
   updated_at: string;
   activity_support?: ActivitySupport | null;
+  /** 保守回退小结（非模型生成）为 true；旧记录没有此字段 */
+  is_fallback?: boolean;
 }
 
 export type TeacherEditContent = Pick<
@@ -102,6 +125,8 @@ export interface TeacherEditReviewOutput {
 
 export interface TeacherEditReview extends TeacherEditReviewOutput {
   content_snapshot: TeacherEditContent;
+  /** 审核时使用的澄清问答快照；旧记录没有此字段，按空列表处理 */
+  clarification_snapshot?: string[];
   reviewed_at: string;
 }
 

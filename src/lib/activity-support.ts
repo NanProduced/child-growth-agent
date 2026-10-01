@@ -1,6 +1,10 @@
 import { generateActivitySupport } from "./ai";
-import { buildGrowthProfileFallback } from "./growth-profile";
-import { updateChildGrowthProfile } from "./queries";
+import {
+  assertEvidenceUnchanged,
+  buildGrowthProfileFallback,
+  confirmedObservationIds,
+} from "./growth-profile";
+import { updateChildActivitySupport } from "./queries";
 import { activitySupportSchema } from "./validation";
 import type {
   ActivitySupport,
@@ -12,7 +16,8 @@ import { invokeLlm } from "./llm";
 
 export type ActivitySupportUpdateOptions = {
   invoke?: typeof invokeLlm;
-  save?: typeof updateChildGrowthProfile;
+  save?: typeof updateChildActivitySupport;
+  reloadObservations?: (childId: string) => Promise<Observation[]>;
   forwardHeaders?: Record<string, string>;
 };
 
@@ -40,6 +45,7 @@ export function hasCurrentActivitySupport(
   );
 }
 
+/** 只把仍有确认来源的小结喂给活动模型；保存时不改写小结本身 */
 function supportedGrowthProfile(
   child: Child,
   observations: Observation[],
@@ -48,6 +54,32 @@ function supportedGrowthProfile(
   if (!profile || profile.source_observation_ids.length === 0) return null;
   const confirmedIds = new Set(confirmedObservations(observations).map((observation) => observation.id));
   return profile.source_observation_ids.every((id) => confirmedIds.has(id)) ? profile : null;
+}
+
+/** 已存小结必须完整可读；残缺 JSONB 视为没有小结，走保守 fallback */
+function storedGrowthProfile(child: Child): GrowthProfile | null {
+  const profile = child.growth_profile;
+  if (!profile || typeof profile.summary !== "string" || !profile.summary.trim()) return null;
+  return profile;
+}
+
+/**
+ * 没有已存小结时的保守回退：内容来自已确认观察，不标记为模型生成，
+ * 也不把活动支持的模型名伪造成成长小结生成模型。
+ */
+function buildFallbackProfile(
+  observations: Observation[],
+  updatedAt: string,
+): GrowthProfile | null {
+  const draft = buildGrowthProfileFallback(observations);
+  if (!draft) return null;
+  return {
+    ...draft,
+    source_observation_ids: observations.map((observation) => observation.id),
+    ai_model: "",
+    updated_at: updatedAt,
+    is_fallback: true,
+  };
 }
 
 export async function updateActivitySupport(
@@ -59,6 +91,7 @@ export async function updateActivitySupport(
   if (confirmed.length === 0) {
     throw new Error("活动支持建议需要至少一条已确认观察");
   }
+  const expectedIds = confirmedObservationIds(confirmed);
 
   const generated = await generateActivitySupport(
     {
@@ -73,6 +106,8 @@ export async function updateActivitySupport(
     },
     options.invoke,
   );
+  await assertEvidenceUnchanged(child.id, expectedIds, options.reloadObservations);
+
   const generatedAt = new Date().toISOString();
   const activitySupport: ActivitySupport = {
     ...generated.activitySupport,
@@ -81,22 +116,15 @@ export async function updateActivitySupport(
     generated_at: generatedAt,
   };
 
-  const baseProfile = child.growth_profile ?? buildGrowthProfileFallback(confirmed);
-  if (!baseProfile) throw new Error("活动支持建议缺少可保存的已确认成长依据");
+  const fallbackProfile = storedGrowthProfile(child)
+    ? null
+    : buildFallbackProfile(confirmed, generatedAt);
 
-  const nextProfile: GrowthProfile = {
-    ...baseProfile,
-    source_observation_ids:
-      supportedGrowthProfile(child, confirmed)?.source_observation_ids ??
-      confirmed.map((observation) => observation.id),
-    ai_model: child.growth_profile?.ai_model ?? generated.model,
-    updated_at: generatedAt,
-    activity_support: activitySupport,
-  };
-
-  const saved = await (options.save ?? updateChildGrowthProfile)(child.id, {
-    ...nextProfile,
-  });
+  const saved = await (options.save ?? updateChildActivitySupport)(
+    child.id,
+    activitySupport,
+    fallbackProfile,
+  );
   return {
     activitySupport,
     growthProfile: saved.growth_profile,

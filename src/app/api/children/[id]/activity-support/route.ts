@@ -6,6 +6,7 @@ import {
   updateActivitySupport,
 } from "@/lib/activity-support";
 import { requireTeacher } from "@/lib/auth";
+import { StaleEvidenceError } from "@/lib/growth-profile";
 import { getChild, listObservations } from "@/lib/queries";
 
 export async function POST(
@@ -36,6 +37,9 @@ export async function POST(
     });
     return NextResponse.json(result);
   } catch (error) {
+    if (error instanceof StaleEvidenceError) {
+      return NextResponse.json({ message: error.message }, { status: 409 });
+    }
     return NextResponse.json(
       { message: error instanceof Error ? error.message : "生成活动支持失败，请稍后重试" },
       { status: 500 },

@@ -14,6 +14,8 @@ type ActivitySupportSectionProps = {
   childId: string;
   confirmedObservationCount: number;
   initialSupport: ActivitySupport | null;
+  /** 已保存建议的来源观察已过期：提示需要更新，不冒充最新依据 */
+  hasStaleSupport?: boolean;
 };
 
 function ActivitySupportCard({ support }: { support: ActivitySupport['suggestions'][number] }) {
@@ -107,6 +109,7 @@ export function ActivitySupportSection({
   childId,
   confirmedObservationCount,
   initialSupport,
+  hasStaleSupport = false,
 }: ActivitySupportSectionProps) {
   const { loading: authLoading, configured, isTeacher } = useTeacher();
   const [support, setSupport] = useState<ActivitySupport | null>(initialSupport);
@@ -219,15 +222,19 @@ export function ActivitySupportSection({
           <CardContent className="flex flex-col items-start gap-3 p-5 sm:p-6">
             <Sparkles className="size-5 text-emerald-600" aria-hidden="true" />
             <div>
-              <h3 className="font-medium text-slate-800">还没有活动支持建议</h3>
+              <h3 className="font-medium text-slate-800">
+                {hasStaleSupport ? '活动支持建议需要更新' : '还没有活动支持建议'}
+              </h3>
               <p className="mt-1 text-sm leading-6 text-slate-600">
-                {authLoading
-                  ? '正在确认教师身份…'
-                  : teacherReady
-                    ? '点击“生成活动支持”，从已确认观察中整理 2～3 个可试试的活动。'
-                    : configured
-                      ? '进入教师模式后，可以从已确认观察生成活动支持。'
-                      : '当前未配置教师口令，暂时不能生成活动支持。'}
+                {hasStaleSupport
+                  ? '已确认观察有更新，上一次建议基于较早的观察；可以重新生成，旧建议不会冒充最新依据。'
+                  : authLoading
+                    ? '正在确认教师身份…'
+                    : teacherReady
+                      ? '点击“生成活动支持”，从已确认观察中整理 2～3 个可试试的活动。'
+                      : configured
+                        ? '进入教师模式后，可以从已确认观察生成活动支持。'
+                        : '当前未配置教师口令，暂时不能生成活动支持。'}
               </p>
             </div>
           </CardContent>

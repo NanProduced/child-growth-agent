@@ -93,7 +93,7 @@ export default async function ReportsPage({
       };
   const storedProfile = selected?.growth_profile ?? null;
   const profile = storedProfile ?? buildGrowthProfileFallback(confirmed);
-  const isFallback = !storedProfile;
+  const isFallback = !storedProfile || storedProfile.is_fallback === true;
   const profileUpdatedAt = storedProfile?.updated_at ?? null;
   const storedSupport = activitySupportSchema.safeParse(
     selected?.growth_profile?.activity_support,

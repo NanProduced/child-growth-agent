@@ -14,14 +14,17 @@ import {
   type ProfileUpdateResult,
 } from "@/lib/growth-profile";
 import {
+  clarificationSnapshot,
   normalizeTeacherEditContent,
+  sameClarificationSnapshot,
   sameTeacherEditContent,
   teacherEditSubmissionAction,
 } from "@/lib/teacher-edit-review";
-import type { AgentContext } from "@/lib/types";
+import type { AgentContext, TeacherEditClarification } from "@/lib/types";
 import {
   confirmObservationSchema,
   findDevelopmentForbiddenTerm,
+  isQuoteInRawText,
 } from "@/lib/validation";
 
 /**
@@ -86,17 +89,79 @@ export async function POST(
     }
 
     const submittedContent = parsed.data.content;
+    if (!isQuoteInRawText(observation.raw_text, submittedContent.highlight_quote)) {
+      return NextResponse.json(
+        { message: "原文金句必须逐字来自观察原文的连续片段，不能改写或引用教师补充信息。" },
+        { status: 400 },
+      );
+    }
+
     const normalizedContent = normalizeTeacherEditContent(submittedContent);
+    const clarification = parsed.data.clarification?.trim() || undefined;
+    const clarifications: TeacherEditClarification[] =
+      observation.agent_context?.teacher_edit_clarifications ?? [];
     const currentReview = observation.agent_context?.teacher_edit_review;
     const reviewMatches = Boolean(
-      currentReview && sameTeacherEditContent(currentReview.content_snapshot, submittedContent),
+      currentReview &&
+        sameTeacherEditContent(currentReview.content_snapshot, submittedContent) &&
+        sameClarificationSnapshot(currentReview, clarifications),
     );
     const teacherNote = parsed.data.teacher_note?.trim() || undefined;
     const submissionAction = teacherEditSubmissionAction(
       observation.ai_draft,
       normalizedContent,
       currentReview,
+      clarifications,
     );
+
+    // 教师回答 clarify 问题：独立保存问答，并带着澄清依据重新审核
+    if (clarification) {
+      if (!currentReview || currentReview.decision !== "clarify" || !reviewMatches) {
+        return NextResponse.json(
+          { message: "当前没有等待澄清的修改审核，请先提交修改或重新生成审核。" },
+          { status: 409 },
+        );
+      }
+      const nextClarifications: TeacherEditClarification[] = [
+        ...clarifications,
+        {
+          question: currentReview.question,
+          answer: clarification,
+          created_at: new Date().toISOString(),
+        },
+      ];
+      const reviewContext = withoutTeacherEditReview({
+        ...(observation.agent_context ?? {}),
+        teacher_edit_clarifications: nextClarifications,
+      });
+      const { review } = await reviewTeacherEdit({
+        rawText: observation.raw_text,
+        originalDraft: observation.ai_draft,
+        content: normalizedContent,
+        teacherNote,
+        agentContext: reviewContext,
+        clarifications: nextClarifications,
+        forwardHeaders: HeaderUtils.extractForwardHeaders(request.headers),
+      });
+      const updated = await updateObservationAgentContext(
+        observation.id,
+        {
+          ...reviewContext,
+          teacher_edit_review: {
+            ...review,
+            content_snapshot: normalizedContent,
+            clarification_snapshot: clarificationSnapshot(nextClarifications),
+            reviewed_at: new Date().toISOString(),
+          },
+        },
+        "ai_organized",
+      );
+      return NextResponse.json({
+        observation: updated,
+        requiresAgentConfirmation: true,
+        agentReview: review,
+      });
+    }
 
     if (submissionAction === "confirm") {
       if (currentReview && !reviewMatches) {
@@ -156,6 +221,7 @@ export async function POST(
       content: normalizedContent,
       teacherNote,
       agentContext: reviewContext,
+      clarifications,
       forwardHeaders: HeaderUtils.extractForwardHeaders(request.headers),
     });
     const reviewedAt = new Date().toISOString();
@@ -166,6 +232,7 @@ export async function POST(
         teacher_edit_review: {
           ...review,
           content_snapshot: normalizedContent,
+          clarification_snapshot: clarificationSnapshot(clarifications),
           reviewed_at: reviewedAt,
         },
       },

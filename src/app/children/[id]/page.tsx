@@ -216,7 +216,9 @@ export default async function ChildDetailPage({
   );
   const fallbackProfile = buildGrowthProfileFallback(confirmedObservations);
   const profile = child.growth_profile ?? fallbackProfile;
-  const isFallback = !child.growth_profile && Boolean(fallbackProfile);
+  const isFallback =
+    child.growth_profile?.is_fallback === true ||
+    (!child.growth_profile && Boolean(fallbackProfile));
   const profileObservationIds = child.growth_profile?.source_observation_ids ?? [];
   const profileIsCurrent = Boolean(
     child.growth_profile &&
@@ -231,6 +233,9 @@ export default async function ChildDetailPage({
     hasCurrentActivitySupport(storedActivitySupport.data, confirmedObservations)
       ? storedActivitySupport.data
       : null;
+  const hasStaleActivitySupport = Boolean(
+    storedActivitySupport.success && storedActivitySupport.data && !activitySupport,
+  );
 
   return (
     <div className="space-y-8">
@@ -363,6 +368,7 @@ export default async function ChildDetailPage({
         childId={child.id}
         confirmedObservationCount={confirmedObservations.length}
         initialSupport={activitySupport}
+        hasStaleSupport={hasStaleActivitySupport}
       />
 
       <section aria-labelledby="observation-timeline-title">

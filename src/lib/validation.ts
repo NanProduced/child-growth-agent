@@ -5,33 +5,91 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SCHOOL_YEAR_RE = /^\d{4}-\d{4}$/;
 
-/** 发展性内容的最终守门词；raw_text 原文不经过此校验。 */
+/**
+ * 发展性内容的最终守门词；raw_text 原文不经过此校验。
+ * 只列明确的诊断、评分、排名与能力定性词：普通情绪描述（如“入园焦虑”）不在其中。
+ */
 export const DEVELOPMENT_FORBIDDEN_TERMS = [
   "自闭症",
   "多动症",
   "注意力缺陷",
-  "抑郁",
-  "焦虑",
+  "焦虑症",
+  "抑郁症",
+  "焦虑障碍",
+  "抑郁障碍",
+  "情绪障碍",
   "智商",
   "智力低下",
+  "智力障碍",
   "诊断",
+  "确诊",
   "评分",
   "得分",
   "分数",
+  "打分",
   "排名",
+  "评级",
+  "等级",
   "领先",
   "落后",
-  "等级",
   "能力差",
   "注意力不集中",
   "发展落后",
+  "发育落后",
   "同龄比较",
   "同龄人比较",
 ] as const;
 
+/** 诊断性语境：普通情绪词单独出现不拦，形成“诊断为…/患有…症”等结论时拦截 */
+const DIAGNOSTIC_CONTEXT_RULES: { label: string; pattern: RegExp }[] = [
+  {
+    label: "诊断性结论",
+    pattern: /(诊断|确诊|患有|疑似|属于)[^。；\n]{0,16}(焦虑|抑郁|障碍|症|缺陷|疾病|异常)/,
+  },
+  {
+    label: "能力定性",
+    pattern: /(能力|发展|发育)[^。；\n]{0,6}(不足|迟缓|异常|缺陷|低下)/,
+  },
+];
+
 export function findDevelopmentForbiddenTerm(value: unknown): string | undefined {
   const text = JSON.stringify(value) ?? "";
-  return DEVELOPMENT_FORBIDDEN_TERMS.find((term) => text.includes(term));
+  const term = DEVELOPMENT_FORBIDDEN_TERMS.find((item) => text.includes(item));
+  if (term) return term;
+  return DIAGNOSTIC_CONTEXT_RULES.find((rule) => rule.pattern.test(text))?.label;
+}
+
+/** 引文格式处理：只去首尾空白与一层成对引号，不改写其他字符 */
+export function normalizeQuoteForEvidence(value: string): string {
+  let quote = value.trim();
+  const pairs: Array<[string, string]> = [
+    ["「", "」"],
+    ["『", "』"],
+    ["“", "”"],
+    ["‘", "’"],
+    ['"', '"'],
+    ["'", "'"],
+    ["《", "》"],
+  ];
+  for (const [open, close] of pairs) {
+    if (quote.startsWith(open) && quote.endsWith(close) && quote.length > open.length + close.length) {
+      quote = quote.slice(open.length, quote.length - close.length).trim();
+      break;
+    }
+  }
+  return quote;
+}
+
+/**
+ * 引文必须真实出现在 raw_text 中。只容忍两种明确差异：一层成对引号与空白差异；
+ * 其余字符必须逐字连续一致，不做模糊匹配，也不改写引文。
+ */
+export function isQuoteInRawText(rawText: string, quote: string): boolean {
+  const normalized = normalizeQuoteForEvidence(quote);
+  if (!normalized) return false;
+  if (rawText.includes(normalized)) return true;
+  const stripWhitespace = (value: string) => value.replace(/\s+/g, "");
+  return stripWhitespace(rawText).includes(stripWhitespace(normalized));
 }
 
 /** 观察整理卡片（AI 草稿与教师确认提交体共用） */
@@ -149,6 +207,8 @@ const activitySupportSuggestionSchema = z
     observe: z.string().min(1, "观察提示不能为空").max(500),
     adaptation: z.string().min(1, "调整方式不能为空").max(500),
     evidence: z.array(z.string().min(1).max(300)).min(1).max(4),
+    /** 服务端引用核对后写入的已确认观察 id；旧建议没有此字段 */
+    source_observation_ids: z.array(z.string().min(1)).min(1).optional(),
   })
   .strict();
 
@@ -169,6 +229,8 @@ export const activitySupportSchema = activitySupportDraftSchema
 export const confirmObservationSchema = z.object({
   content: observationDraftSchema,
   teacher_note: z.string().max(500).optional(),
+  /** 教师对审核 clarify 问题的补充回答；只在存在待澄清审核时使用 */
+  clarification: z.string().max(2000).optional(),
 });
 
 export type ConfirmObservationInput = z.infer<typeof confirmObservationSchema>;

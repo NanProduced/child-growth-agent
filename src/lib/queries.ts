@@ -1,5 +1,6 @@
 import { query, queryOne } from "@/storage/database/pg-client";
 import type {
+  ActivitySupport,
   AgentContext,
   Child,
   ChildClassEnrollment,
@@ -306,19 +307,53 @@ export async function createChild(input: {
   return (await getChild(created)) ?? mapChild(row.data);
 }
 
-export async function updateChildGrowthProfile(
+/**
+ * 成长小结更新：只合并小结字段，保留同一 JSONB 中已有的 activity_support；
+ * 同时移除旧的 is_fallback 标记，避免回退小结被当成模型生成。
+ */
+export async function updateChildGrowthProfileSummary(
   id: string,
   growth_profile: GrowthProfile,
+): Promise<Child> {
+  const fields: Record<string, unknown> = { ...growth_profile };
+  delete fields.activity_support;
+  const now = new Date().toISOString();
+  const row = await queryOne<{ data: Row }>(
+    `UPDATE children
+     SET growth_profile = (coalesce(growth_profile, '{}'::jsonb) - 'is_fallback') || $2::jsonb,
+         updated_at = $3
+     WHERE id = $1
+     RETURNING to_jsonb(children.*) AS data`,
+    [id, JSON.stringify(fields), now],
+  );
+  if (!row) throw new Error("保存成长档案失败：幼儿档案不存在");
+  return mapChild(row.data);
+}
+
+/**
+ * 活动支持更新：只写入 activity_support 键，不覆盖并发的成长小结字段；
+ * 仅在档案为空时用保守 fallback 作为底座。
+ */
+export async function updateChildActivitySupport(
+  id: string,
+  activitySupport: ActivitySupport,
+  fallbackProfile: GrowthProfile | null,
 ): Promise<Child> {
   const now = new Date().toISOString();
   const row = await queryOne<{ data: Row }>(
     `UPDATE children
-     SET growth_profile = $2::jsonb, updated_at = $3
+     SET growth_profile = jsonb_set(
+           coalesce(growth_profile, $2::jsonb),
+           '{activity_support}',
+           $3::jsonb,
+           true
+         ),
+         updated_at = $4
      WHERE id = $1
      RETURNING to_jsonb(children.*) AS data`,
-    [id, JSON.stringify(growth_profile), now],
+    [id, JSON.stringify(fallbackProfile ?? {}), JSON.stringify(activitySupport), now],
   );
-  if (!row) throw new Error("保存成长档案失败：幼儿档案不存在");
+  if (!row) throw new Error("保存活动支持失败：幼儿档案不存在");
   return mapChild(row.data);
 }
 
@@ -391,7 +426,10 @@ export async function createObservation(input: {
   return created;
 }
 
-/** 写入 AI 整理草稿（原文 raw_text 永不改动） */
+/**
+ * 写入 AI 整理草稿（原文 raw_text 永不改动）。
+ * 更新语句自身保护 confirmed 状态：迟到的整理结果不能把已确认记录降级。
+ */
 export async function updateObservationAiDraft(
   id: string,
   ai_draft: ObservationDraft,
@@ -401,15 +439,18 @@ export async function updateObservationAiDraft(
   const row = await queryOne<{ data: Row }>(
     `UPDATE observations
      SET ai_draft = $2::jsonb, ai_model = $3, ai_organized_at = $4, status = 'ai_organized', updated_at = $4
-     WHERE id = $1
+     WHERE id = $1 AND status <> 'confirmed'
      RETURNING to_jsonb(observations.*) AS data`,
     [id, JSON.stringify(ai_draft), ai_model, now]
   );
-  if (!row) throw new Error("保存 AI 整理结果失败：记录不存在");
+  if (!row) throw new Error("该记录已由教师确认归档，迟到的 AI 整理结果不会覆盖确认稿");
   return mapObservation(row.data);
 }
 
-/** 保存 Agent 工作流上下文；不修改 raw_text 与 confirmed_content。 */
+/**
+ * 保存 Agent 工作流上下文；不修改 raw_text 与 confirmed_content。
+ * 更新语句自身保护 confirmed 状态：迟到的追问写入不能把已确认记录降级。
+ */
 export async function updateObservationAgentContext(
   id: string,
   agent_context: AgentContext,
@@ -419,11 +460,11 @@ export async function updateObservationAgentContext(
   const row = await queryOne<{ data: Row }>(
     `UPDATE observations
      SET agent_context = $2::jsonb, status = $3, updated_at = $4
-     WHERE id = $1
+     WHERE id = $1 AND status <> 'confirmed'
      RETURNING to_jsonb(observations.*) AS data`,
     [id, JSON.stringify(agent_context), status, now],
   );
-  if (!row) throw new Error("保存补充信息失败：记录不存在");
+  if (!row) throw new Error("该记录已由教师确认归档，迟到的补充信息不会改写已确认记录");
   return mapObservation(row.data);
 }
 
