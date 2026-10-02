@@ -1,0 +1,36 @@
+---
+version: 1
+slug: "src-app-page-tsx"
+primary_target: "src/app/page.tsx"
+related_targets: ["src/components/homepage-map.tsx","src/components/homepage-map.module.css","src/components/top-nav.tsx"]
+---
+
+# 首页 / — 绘本式全园成长地图（参考还原）
+Mode: Operate. Scope: homepage visual rebuild; reuse all current queries, data, links and auth.
+
+## Direction contract
+THESIS: Teachers are inside a coherent illustrated kindergarten, moving from school to stage to real class without leaving the scene.
+OWN-WORLD: Navy hand-brushed display lettering, warm cream, bright leaf-green capsule action, coral/gold/blue activity gardens, large painterly children, grass clearings, independent warm-paper school toolbar and a front-facing paper workspace. Data and controls remain HTML.
+STORY: Start at all-school; expand one garden stage; independently select a real active class; review its pending observation or choose a child and record.
+FIRST VIEWPORT: Full-width scene directly below nav. Headline floats on upper-left clouds, independent school toolbar at the upper right, teacher/children in center, independent front-facing paper action workspace at lower center. Small-stage entry on left, middle upper right, large lower right. Stage class nodes expand IN the corresponding region; selection details remain beside that region and never cover the central action. Overflow class counts scroll inside bounded panels. The compact recent-observation band joins the scene bottom. At 390px, independent portrait art combines headline/building/teacher with action, followed by school summary, illustrated natural-flow stage accordions, pending, recent.
+FORM: User-approved plan and four pinned docs/design/homepage-map-*.png references. Code-led implementation measured against those references; no additional concept or comp approval needed.
+SIGNATURE: Once-only staged arrival, scene-region lift/path highlight, local node/panel entrance and one leaf emphasis. Reduced motion removes animation/transition/displacement while retaining selection and focus.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+
+## Constraints
+- No DB writes in checks, no schema/API/LLM/state/auth changes, no new dependencies, no push/deploy.
+- Real enabled classes and current school years, current children plus occurrence-class observation snapshots. All statuses/counts/actions from existing view model. No fixed sample counts.
+- Homepage copy exclusions and Review provenance requirements remain as specified by user. Do not invent teacher accounts, names or notifications.
+- Reference paintings are only visual guidance. Newly generated art contains no UI text, buttons, badges or data. Font is self-hosted and licensed; illustration prompts kept with assets.
+
+## Shipped v2 rules
+
+- **Identity boundary:** the homepage owns this continuous storybook world. Non-homepage “轻量成长观察册” rules and unresolved incumbent tokens remain intact. The route-local navy / warm paper / leaf-green palette is normative under `home-*` in DESIGN.md; it does not replace the global OKLCH theme.
+- **Type:** self-hosted MaShanZheng via `next/font/local` and `--font-garden-display`; `public/assets/fonts/yaya-display-subset.ttf` is 20,204 bytes with `OFL-MaShanZheng.txt`. Brush display letters belong to homepage titles / stage names / school summary; operational copy and controls keep the inherited Chinese sans stack.
+- **Materials:** independent `map-desktop-v3.webp`, unchanged `map-mobile-v2.webp`, and `map-wide-v3.webp` preserve a continuous illustrated world. Transparent stage portraits and grass clearings supply authored material; the wooden-sign image is no longer rendered, and controls do not imitate painted paper or perspective surfaces; every displayed word, count, status and control remains DOM. These assets do not rasterize the reference UI.
+- **Desktop exploration:** at 1024px and above, the scene canvas is `min(50vw, 960px)` high and at most 1920px wide. A stage opens its real enabled class nodes in that region; selecting a node replaces the local list with compact class detail. Class-list panel limits follow available space: `calc(.62 * scene-height - 100px)` on the left, `calc(.45 * scene-height - 90px)` on the right; selected detail retains `.44 * scene-height`. Right-side cards compact/reposition to avoid overlap. Bounded panels use local vertical scrolling; list/back/Escape restore focus to the stage trigger, detail receives focus, and the central action stays separate and reachable.
+- **Responsive expression:** below 1024px, independent portrait art and the action lead into school summary, illustrated vertical stage accordions, class content, pending and recent observations in natural flow. At 640–1023px, class nodes and recent items may use two columns. Above 1920px, the independent 8:3 wide scene replaces the desktop background. The nav changes rows at 1024px; no horizontal map interaction is required at 390px.
+- **Action and state:** selected-class confirmation takes priority, followed by the existing whole-school action ladder. Multi-child recording expands a native details/summary + labelled select; single-child recording links directly. Stage triggers retain “查看班级／收起班级” labels with concise accessible names; desktop stage paper uses a 1px edge and 3px bottom edge, without shadow. Show complete “待确认” text; compact statuses are workflow labels, never development scores. Homepage copy exclusions and Review source / draft-only / immutable raw / trace boundaries remain unchanged.
+- **Readability and access:** one radial warm-paper fade supports the whole heading; the subtitle has no rectangular caption surface. The short selected-class helper keeps balanced wrapping within the group width; “最近观察” remains nowrap at 4em. Primary and underlined secondary actions retain the mobile paper dock, but desktop places them vertically inside one front-facing paper workspace (`bottom: 7%; width: 28.5%; max-width: 460px; padding: 20px`; natural height, 64px existing notebook decoration, title `clamp(24px, 2vw, 30px)`, helper 14px, button `56px / 20px / 12px radius`, no button border/shadow). The independent upper-right school toolbar (`top: 2%; right: 2.5%; width: clamp(320px, 28%, 380px); min-height: 76px`, natural height) includes the visible “查看全园班级” link; mobile school facts remain two complete lines. Core targets stay at least 44px; focus stays 3px with 4px offset.
+- **Motion:** scene/action fade in once, stage entries stagger once, local nodes/details enter once, and the leaf emphasizes once. Hover lift and region-path opacity/color respond only to state; reduced motion removes animation, transitions and hover displacement while preserving static layout, selection and focus.
+- **Finish evidence:** `map_two_regions_layout` reviewer returned disposition **ship**, with both structural root causes **resolved**. Reviewed `desktop.jpg` and `mobile.jpg` live at `C:/Users/nanpr/.codex/visualizations/2026/09/30/01a0f25f-2b7e-7682-9582-a12be64bed74/homepage-two-regions/`. Documentation synchronizes only the two DOM regions and v3 desktop/wide background references; mobile art, fonts, palette, data/auth and other pages remain unchanged. Existing layout-scan evidence is retained without a new scan.

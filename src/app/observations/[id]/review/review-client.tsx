@@ -16,7 +16,7 @@ import {
 import { toast } from 'sonner';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
+import { AiBadge, StatusBadge } from '@/components/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { DraftView } from '@/components/draft-view';
 import { Button } from '@/components/ui/button';
@@ -41,7 +41,12 @@ import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
 import { formatDateCn, formatDateTimeCn, schoolClassLabel } from '@/lib/format';
-import { sameTeacherEditContent } from '@/lib/teacher-edit-review';
+import { followUpRounds } from '@/lib/follow-up';
+import {
+  sameClarificationSnapshot,
+  sameTeacherEditContent,
+  sameTeacherEditNote,
+} from '@/lib/teacher-edit-review';
 import {
   FIVE_DOMAINS,
   type AgentContext,
@@ -116,6 +121,7 @@ export function ReviewClient({
     observation.confirmed_content?.teacher_note ?? ''
   );
   const [followUpContent, setFollowUpContent] = useState('');
+  const [clarifyContent, setClarifyContent] = useState('');
   const [busy, setBusy] = useState<null | 'organize' | 'follow-up' | 'confirm'>(null);
 
   const teacherReady = configured && isTeacher;
@@ -246,6 +252,44 @@ export function ReviewClient({
     }
   }
 
+  async function handleClarify() {
+    if (!form || !clarifyContent.trim()) return;
+    setBusy('confirm');
+    try {
+      const res = await fetch(`/api/observations/${observation.id}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: formToContent(form),
+          teacher_note: teacherNote.trim() || undefined,
+          clarification: clarifyContent.trim(),
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        observation?: Observation;
+        message?: string;
+        agentReview?: TeacherEditReviewOutput;
+      };
+      if (!res.ok || !data.observation) {
+        throw new Error(data.message ?? '提交澄清失败，请稍后重试');
+      }
+      setAgentContext(data.observation.agent_context);
+      setTeacherEditReview(data.observation.agent_context?.teacher_edit_review ?? null);
+      setStatus(data.observation.status);
+      setClarifyContent('');
+      toast.success(
+        data.agentReview?.decision === 'accept'
+          ? '已结合补充依据完成审核，请进行最终归档。'
+          : 'Agent 还需要进一步澄清，请继续补充。',
+      );
+    } catch (e) {
+      // 提交失败保留输入，教师可以直接重试
+      toast.error(e instanceof Error ? e.message : '提交澄清失败，请稍后重试');
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const updateForm = (patch: Partial<DraftForm>) =>
     setForm((prev) => (prev ? { ...prev, ...patch } : prev));
 
@@ -253,6 +297,10 @@ export function ReviewClient({
   const observedClassText = schoolClassLabel(observation.observed_class);
   const workflowSteps = ['已保存', '补充信息（按需）', 'AI 整理', '教师确认'];
   const followUp = agentContext?.follow_up;
+  const answeredRounds = followUp
+    ? followUpRounds(followUp).filter((round) => round.answer !== null)
+    : [];
+  const clarifications = agentContext?.teacher_edit_clarifications ?? [];
   const currentContent = form ? formToContent(form) : null;
   const contentChanged = Boolean(
     currentContent && observation.ai_draft && !sameTeacherEditContent(observation.ai_draft, currentContent),
@@ -260,7 +308,9 @@ export function ReviewClient({
   const reviewMatchesCurrent = Boolean(
     currentContent &&
       teacherEditReview &&
-      sameTeacherEditContent(teacherEditReview.content_snapshot, currentContent),
+      sameTeacherEditContent(teacherEditReview.content_snapshot, currentContent) &&
+      sameClarificationSnapshot(teacherEditReview, clarifications) &&
+      sameTeacherEditNote(teacherEditReview, teacherNote),
   );
 
   return (
@@ -279,7 +329,6 @@ export function ReviewClient({
             <CardTitle className="text-base">
               {child.name} · {formatDateCn(observation.observed_at)}
             </CardTitle>
-            {observation.is_demo ? <DemoBadge /> : null}
             <span className="ml-auto flex items-center gap-2">
               <StatusBadge status={status} />
             </span>
@@ -316,7 +365,7 @@ export function ReviewClient({
                     : 'text-slate-400'
               }`}
             >
-              <span className="flex size-4 items-center justify-center rounded-full bg-white/80 text-[10px]" aria-hidden="true">
+              <span className="flex size-4 items-center justify-center rounded-full bg-white/80 text-xs" aria-hidden="true">
                 {index + 1}
               </span>
               {step}
@@ -356,6 +405,30 @@ export function ReviewClient({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {answeredRounds.length > 0 ? (
+              <div className="rounded-lg bg-white/70 px-3 py-3">
+                <p className="text-xs font-medium text-slate-500">此前补充</p>
+                <ul className="mt-2 space-y-2 text-sm leading-6">
+                  {answeredRounds.map((round) => (
+                    <li key={round.round}>
+                      <p className="text-slate-600">
+                        {round.question
+                          ? `第 ${round.round} 轮：${round.question}`
+                          : '历史补充（原追问问题未保存）'}
+                      </p>
+                      <p className="text-slate-800">
+                        教师回应：
+                        {round.answer?.action === 'answer'
+                          ? round.answer.content
+                          : round.answer?.action === 'skip'
+                            ? '跳过，直接整理'
+                            : '不再追问'}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             <div className="rounded-lg bg-white px-3 py-3">
               <p className="font-medium leading-6 text-slate-800">{followUp.question}</p>
               <p className="mt-1 text-sm leading-6 text-slate-600">为什么需要：{followUp.reason}</p>
@@ -642,6 +715,19 @@ export function ReviewClient({
                 <AlertDescription>{teacherEditReview.question}</AlertDescription>
               </Alert>
             ) : null}
+            {clarifications.length > 0 ? (
+              <div className="rounded-lg bg-white/70 px-3 py-2">
+                <div className="text-xs font-medium text-slate-500">已补充的依据</div>
+                <ul className="mt-1 space-y-2 text-sm leading-6">
+                  {clarifications.map((item, index) => (
+                    <li key={`${item.created_at}-${index}`}>
+                      <span className="text-slate-500">问题：{item.question}</span>
+                      <span className="mt-0.5 block text-slate-700">教师补充：{item.answer}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </CardContent>
           {teacherReady ? (
             <CardFooter className="justify-end border-t bg-white/60">
@@ -651,13 +737,37 @@ export function ReviewClient({
                   确认归档
                 </Button>
               ) : (
-                <Button
-                  variant="outline"
-                  onClick={() => document.getElementById('objective-description')?.focus()}
-                  disabled={busy !== null}
-                >
-                  返回修改
-                </Button>
+                <div className="w-full space-y-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="clarify-answer">补充依据（回答上面的问题）</Label>
+                    <Textarea
+                      id="clarify-answer"
+                      rows={3}
+                      value={clarifyContent}
+                      onChange={(e) => setClarifyContent(e.target.value)}
+                      placeholder="写下与这处修改相关的具体事实、原话或当时的支持方式"
+                      maxLength={2000}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+                    <Button
+                      variant="outline"
+                      className="w-full sm:w-auto"
+                      onClick={() => document.getElementById('objective-description')?.focus()}
+                      disabled={busy !== null}
+                    >
+                      返回修改
+                    </Button>
+                    <Button
+                      className="w-full sm:w-auto"
+                      onClick={() => void handleClarify()}
+                      disabled={busy !== null || !clarifyContent.trim()}
+                    >
+                      {busy === 'confirm' ? <Loader2 className="size-4 animate-spin" /> : null}
+                      提交澄清并重新审核
+                    </Button>
+                  </div>
+                </div>
               )}
             </CardFooter>
           ) : null}

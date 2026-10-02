@@ -1,6 +1,8 @@
 import { judgeFollowUp, organizeObservation } from "./ai";
+import { followUpRounds } from "./follow-up";
 import { invokeLlm } from "./llm";
 import {
+  type ObservationWriteGuard,
   updateObservationAgentContext,
   updateObservationAiDraft,
 } from "./queries";
@@ -12,22 +14,42 @@ import type {
   Observation,
 } from "./types";
 
+/**
+ * 模型调用前捕获服务端快照；模型返回后的 UPDATE 必须仍匹配该快照，
+ * 否则迟到的 ask/整理结果会覆盖较新的上下文。
+ */
+export function observationWriteGuard(observation: Observation): ObservationWriteGuard {
+  return {
+    expectedStatus: observation.status,
+    expectedAgentContext: observation.agent_context,
+    expectedAiDraft: observation.ai_draft,
+  };
+}
+
 export function appendFollowUpAction(
   context: AgentContext,
   action: FollowUpAction,
   content: string,
   createdAt = new Date().toISOString(),
 ): AgentContext {
-  if (!context.follow_up) throw new Error("当前没有待补充问题");
+  const followUp = context.follow_up;
+  if (!followUp) throw new Error("当前没有待补充问题");
+  const answer = { action, content: content.trim(), created_at: createdAt };
+  // 同一当前轮次的重试替换为该轮有效回答；只有新轮次才追加
+  const rounds = followUpRounds(followUp).map((round) =>
+    round.round === followUp.round ? { ...round, answer } : round,
+  );
+  const answers =
+    followUp.answers.length >= followUp.round
+      ? [...followUp.answers.slice(0, -1), answer]
+      : [...followUp.answers, answer];
   return {
     ...context,
     follow_up: {
-      ...context.follow_up,
-      answers: [
-        ...context.follow_up.answers,
-        { action, content: content.trim(), created_at: createdAt },
-      ],
-      stopped: context.follow_up.stopped || action === "stop",
+      ...followUp,
+      answers,
+      rounds,
+      stopped: followUp.stopped || action === "stop",
     },
   };
 }
@@ -37,13 +59,18 @@ export function nextFollowUpContext(
   decision: FollowUpDecision,
 ): AgentContext {
   const previous = context?.follow_up;
+  const round = (previous?.round ?? 0) + 1;
   return {
     ...(context ?? {}),
     follow_up: {
-      round: (previous?.round ?? 0) + 1,
+      round,
       question: decision.question,
       reason: decision.reason,
       answers: previous?.answers ?? [],
+      rounds: [
+        ...(previous ? followUpRounds(previous) : []),
+        { round, question: decision.question, reason: decision.reason, answer: null },
+      ],
       stopped: false,
     },
   };
@@ -60,6 +87,8 @@ export function shouldProceedToDraft(context: AgentContext | null): boolean {
 type ObservationAgentInput = {
   observation: Observation;
   child: Child;
+  /** 服务端当前日期；测试与评测可注入固定日期 */
+  currentDate?: string;
   forwardHeaders?: Record<string, string>;
   invoke?: typeof invokeLlm;
 };
@@ -67,6 +96,7 @@ type ObservationAgentInput = {
 export async function processObservationAgent({
   observation,
   child,
+  currentDate,
   forwardHeaders,
   invoke = invokeLlm,
 }: ObservationAgentInput): Promise<Observation> {
@@ -77,9 +107,13 @@ export async function processObservationAgent({
     observedAt: observation.observed_at,
     context: observation.context,
     rawText: observation.raw_text,
+    currentDate,
+    childNote: child.note,
     forwardHeaders,
   };
   const context = observation.agent_context;
+  // 服务端快照：模型返回后的写入必须仍匹配它
+  const writeGuard = observationWriteGuard(observation);
 
   if (!shouldProceedToDraft(context)) {
     const judged = await judgeFollowUp({ ...baseParams, agentContext: context }, invoke);
@@ -88,6 +122,7 @@ export async function processObservationAgent({
         observation.id,
         nextFollowUpContext(context, judged.decision),
         "needs_input",
+        writeGuard,
       );
     }
   }
@@ -96,5 +131,5 @@ export async function processObservationAgent({
     { ...baseParams, agentContext: context },
     invoke,
   );
-  return updateObservationAiDraft(observation.id, draft, model);
+  return updateObservationAiDraft(observation.id, draft, model, writeGuard);
 }

@@ -8,8 +8,10 @@ import {
   hasCurrentActivitySupport,
   updateActivitySupport,
 } from '../src/lib/activity-support';
+import { StaleEvidenceError } from '../src/lib/growth-profile';
 import type { LlmResult } from '../src/lib/llm';
 import type {
+  ActivitySupport,
   Child,
   GrowthProfile,
   Observation,
@@ -17,7 +19,10 @@ import type {
   ObservationStatus,
   SchoolClass,
 } from '../src/lib/types';
-import { activitySupportDraftSchema } from '../src/lib/validation';
+import {
+  activitySupportDraftSchema,
+  activitySupportSchema,
+} from '../src/lib/validation';
 
 const TEST_CLASS: SchoolClass = {
   id: 'class-1',
@@ -131,12 +136,17 @@ async function main(): Promise<void> {
   const messages = buildActivitySupportMessages({
     childName: child.name,
     childGender: child.gender,
+    childBirthDate: child.birth_date,
+    classStage: child.class_stage,
+    className: child.class_name,
     observations: mixedObservations,
     growthProfile: PROFILE,
   });
   const userMessage = messages[1].content;
   assert.ok(userMessage.includes('confirmed-1'));
   assert.ok(userMessage.includes('已确认原文 confirmed-1'));
+  assert.ok(userMessage.includes('"age_months":56'));
+  assert.ok(userMessage.includes('当前班级上下文：middle · 向日葵班'));
   assert.ok(userMessage.includes(PROFILE.summary));
   assert.ok(!userMessage.includes('draft-1'));
   assert.ok(!userMessage.includes('未确认原文 draft-1'));
@@ -147,7 +157,14 @@ async function main(): Promise<void> {
   let emptyCalls = 0;
   await assert.rejects(
     generateActivitySupport(
-      { childName: child.name, childGender: child.gender, observations: [draft] },
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [draft],
+      },
       async () => {
         emptyCalls += 1;
         return reply(JSON.stringify(VALID_SUPPORT));
@@ -161,7 +178,14 @@ async function main(): Promise<void> {
   // 3) 合法输出通过最终 Zod 校验，并使用 activity_support response type。
   let responseType = '';
   const generated = await generateActivitySupport(
-    { childName: child.name, childGender: child.gender, observations: mixedObservations },
+    {
+      childName: child.name,
+      childGender: child.gender,
+      childBirthDate: child.birth_date,
+      classStage: child.class_stage,
+      className: child.class_name,
+      observations: mixedObservations,
+    },
     async (_messages, options) => {
       responseType = options?.responseType ?? '';
       return reply(JSON.stringify(VALID_SUPPORT));
@@ -176,7 +200,14 @@ async function main(): Promise<void> {
   let forbiddenCalls = 0;
   await assert.rejects(
     generateActivitySupport(
-      { childName: child.name, childGender: child.gender, observations: [confirmed] },
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [confirmed],
+      },
       async () => {
         forbiddenCalls += 1;
         return reply(JSON.stringify({
@@ -195,7 +226,14 @@ async function main(): Promise<void> {
   let countCalls = 0;
   await assert.rejects(
     generateActivitySupport(
-      { childName: child.name, childGender: child.gender, observations: [confirmed] },
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [confirmed],
+      },
       async () => {
         countCalls += 1;
         return reply(JSON.stringify({
@@ -208,38 +246,214 @@ async function main(): Promise<void> {
   assert.equal(countCalls, 2);
   passed += 1;
 
-  // 6) 每条建议都必须能标出输入中的观察领域。
+  // 6) 领域名本身不算证据：带正确领域名但编造的引用必须被拒绝
   await assert.rejects(
     generateActivitySupport(
-      { childName: child.name, childGender: child.gender, observations: [confirmed] },
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [confirmed],
+      },
       async () =>
         reply(JSON.stringify({
           suggestions: VALID_SUPPORT.suggestions.map((suggestion) => ({
             ...suggestion,
-            evidence: ['没有对应领域的泛化描述'],
+            evidence: ['科学：幼儿在活动中表现出科学探究能力。'],
           })),
         })),
     ),
-    (error: Error) => error.message.includes('观察领域证据'),
+    (error: Error) => error.message.includes('未通过核对'),
   );
   passed += 1;
 
-  // 7) 保存时只追加 activity_support，来源只记录 confirmed，不触碰原始观察内容。
+  // 6b) 真实引用通过核对，并记录匹配到的已确认观察来源
+  const cited = await generateActivitySupport(
+    {
+      childName: child.name,
+      childGender: child.gender,
+      childBirthDate: child.birth_date,
+      classStage: child.class_stage,
+      className: child.class_name,
+      observations: [confirmed],
+    },
+    async () => reply(JSON.stringify(VALID_SUPPORT)),
+  );
+  assert.deepEqual(cited.activitySupport.suggestions[0].source_observation_ids, ['confirmed-1']);
+  assert.deepEqual(cited.activitySupport.suggestions[1].source_observation_ids, ['confirmed-1']);
+  passed += 1;
+
+  // 6c) 一条真实 + 一条虚构：整张建议必须被拒绝（不能只要求 some 命中）
+  await assert.rejects(
+    generateActivitySupport(
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [confirmed],
+      },
+      async () =>
+        reply(JSON.stringify({
+          suggestions: VALID_SUPPORT.suggestions.map((suggestion, index) => ({
+            ...suggestion,
+            evidence:
+              index === 0
+                ? ['科学：把两块积木并排放在下面当桥墩。', '科学：幼儿主动搭建了一扇可以开关的门。']
+                : ['科学：幼儿主动搭建了一扇可以开关的门。'],
+          })),
+        })),
+    ),
+    (error: Error) => error.message.includes('第 1 条建议的第 2 条引用未通过核对'),
+  );
+  passed += 1;
+
+  // 6d) 真实片段前后追加未记录事实：不能因“包含真实片段”而通过
+  await assert.rejects(
+    generateActivitySupport(
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [confirmed],
+      },
+      async () =>
+        reply(JSON.stringify({
+          suggestions: VALID_SUPPORT.suggestions.map((suggestion) => ({
+            ...suggestion,
+            evidence: ['科学：把两块积木并排放在下面当桥墩，还搭了一扇门。'],
+          })),
+        })),
+    ),
+    (error: Error) => error.message.includes('未通过核对'),
+  );
+  passed += 1;
+
+  // 6e) 领域与来源不一致：艺术前缀引用科学观察原文 → 拒绝
+  await assert.rejects(
+    generateActivitySupport(
+      {
+        childName: child.name,
+        childGender: child.gender,
+        childBirthDate: child.birth_date,
+        classStage: child.class_stage,
+        className: child.class_name,
+        observations: [confirmed],
+      },
+      async () =>
+        reply(JSON.stringify({
+          suggestions: VALID_SUPPORT.suggestions.map((suggestion) => ({
+            ...suggestion,
+            evidence: ['艺术：把两块积木并排放在下面当桥墩。'],
+          })),
+        })),
+    ),
+    (error: Error) => error.message.includes('未通过核对'),
+  );
+  passed += 1;
+
+  // 6f) 合法引号与空白差异仍通过核对
+  const formatted = await generateActivitySupport(
+    {
+      childName: child.name,
+      childGender: child.gender,
+      childBirthDate: child.birth_date,
+      classStage: child.class_stage,
+      className: child.class_name,
+      observations: [confirmed],
+    },
+    async () =>
+      reply(JSON.stringify({
+        suggestions: VALID_SUPPORT.suggestions.map((suggestion) => ({
+          ...suggestion,
+          evidence: ['科学：「把两块积木并排放在下面当桥墩。」', '科学：这次桥不会塌了'],
+        })),
+      })),
+  );
+  assert.deepEqual(formatted.activitySupport.suggestions[0].source_observation_ids, ['confirmed-1']);
+  passed += 1;
+
+  // 6g) 模型自行填写的来源不可信：服务端按实际匹配重算
+  const citedWithFake = await generateActivitySupport(
+    {
+      childName: child.name,
+      childGender: child.gender,
+      childBirthDate: child.birth_date,
+      classStage: child.class_stage,
+      className: child.class_name,
+      observations: [confirmed],
+    },
+    async () =>
+      reply(JSON.stringify({
+        suggestions: VALID_SUPPORT.suggestions.map((suggestion) => ({
+          ...suggestion,
+          source_observation_ids: ['fake-observation-id'],
+        })),
+      })),
+  );
+  assert.deepEqual(citedWithFake.activitySupport.suggestions[0].source_observation_ids, ['confirmed-1']);
+  passed += 1;
+
+  // 6h) 旧建议没有来源字段仍可读取，但不会被标成已核对
+  const legacyStoredSupport = {
+    ...VALID_SUPPORT,
+    source_observation_ids: ['confirmed-1'],
+    ai_model: 'offline-model',
+    generated_at: '2026-09-25T00:00:00.000Z',
+  };
+  assert.equal(activitySupportSchema.safeParse(legacyStoredSupport).success, true);
+  assert.equal('source_observation_ids' in legacyStoredSupport.suggestions[0], false);
+  assert.equal(hasCurrentActivitySupport(legacyStoredSupport, mixedObservations), true);
+  passed += 1;
+
+  // 6i) 引用核对最终失败不写库
+  let failedEvidenceSaveCalls = 0;
+  await assert.rejects(
+    updateActivitySupport(child, [confirmed], {
+      invoke: async () =>
+        reply(
+          JSON.stringify({
+            suggestions: VALID_SUPPORT.suggestions.map((suggestion) => ({
+              ...suggestion,
+              evidence: ['科学：幼儿主动搭建了一扇可以开关的门。'],
+            })),
+          }),
+        ),
+      reloadObservations: async () => [confirmed],
+      save: async () => {
+        failedEvidenceSaveCalls += 1;
+        return child;
+      },
+    }),
+    (error: Error) => error.message.includes('未通过核对'),
+  );
+  assert.equal(failedEvidenceSaveCalls, 0);
+  passed += 1;
+
+  // 7) 保存只写 activity_support：已有小结时传 null fallback，来源只记录 confirmed，不触碰原始观察内容。
   const rawSnapshot = JSON.stringify({
     raw_text: confirmed.raw_text,
     ai_draft: confirmed.ai_draft,
     confirmed_content: confirmed.confirmed_content,
   });
-  let savedProfile: GrowthProfile = PROFILE;
+  const captured7: { support?: ActivitySupport; fallback?: GrowthProfile | null } = {};
   const updated = await updateActivitySupport(child, mixedObservations, {
     invoke: async () => reply(JSON.stringify(VALID_SUPPORT)),
-    save: async (_childId, profile) => {
-      savedProfile = profile;
-      return { ...child, growth_profile: profile };
+    reloadObservations: async () => mixedObservations,
+    save: async (_childId, activitySupport, fallbackProfile) => {
+      captured7.support = activitySupport;
+      captured7.fallback = fallbackProfile;
+      return { ...child, growth_profile: { ...PROFILE, activity_support: activitySupport } };
     },
   });
   assert.deepEqual(updated.activitySupport.source_observation_ids, ['confirmed-1']);
-  assert.deepEqual(savedProfile.activity_support?.source_observation_ids, ['confirmed-1']);
+  assert.deepEqual(captured7.support?.source_observation_ids, ['confirmed-1']);
+  assert.equal(captured7.fallback, null, '已有小结时不得重建或替换小结内容');
   assert.equal(hasCurrentActivitySupport(updated.activitySupport, mixedObservations), true);
   assert.equal(
     JSON.stringify({
@@ -251,17 +465,99 @@ async function main(): Promise<void> {
   );
   passed += 1;
 
-  // 8) 旧档案为空时也沿用 fallback 字段写入同一个 growth_profile JSONB，不新增表。
+  // 8) 旧档案为空时用保守 fallback 底座，不把活动模型伪标为成长小结生成模型。
   const childWithoutProfile = { ...child, growth_profile: null };
+  const captured8: { fallback?: GrowthProfile | null } = {};
   const fallbackSaved = await updateActivitySupport(childWithoutProfile, [confirmed], {
     invoke: async () => reply(JSON.stringify(VALID_SUPPORT)),
-    save: async (_childId, profile) => ({ ...childWithoutProfile, growth_profile: profile }),
+    reloadObservations: async () => [confirmed],
+    save: async (_childId, activitySupport, fallback) => {
+      captured8.fallback = fallback;
+      return {
+        ...childWithoutProfile,
+        growth_profile: fallback ? { ...fallback, activity_support: activitySupport } : null,
+      };
+    },
   });
-  assert.equal(fallbackSaved.growthProfile?.summary, CONFIRMED_CONTENT.objective_description);
+  const fallbackProfile = captured8.fallback;
+  assert.ok(fallbackProfile, '没有已存小结时应提供保守 fallback 底座');
+  assert.equal(fallbackProfile.is_fallback, true);
+  assert.equal(fallbackProfile.ai_model, '', '不得把活动模型标为成长小结生成模型');
+  assert.equal(fallbackProfile.summary, CONFIRMED_CONTENT.objective_description);
   assert.deepEqual(fallbackSaved.growthProfile?.activity_support?.source_observation_ids, ['confirmed-1']);
   passed += 1;
 
-  console.log(JSON.stringify({ passed, total: 8 }));
+  // 9) 较新的小结不会被活动保存携带或替换：保存入参只含 activity_support 与 null fallback
+  const newerProfile: GrowthProfile = {
+    ...PROFILE,
+    summary: '更新的成长小结文本',
+    source_observation_ids: ['confirmed-1'],
+    updated_at: '2026-09-30T00:00:00.000Z',
+  };
+  const childWithNewerProfile = { ...child, growth_profile: newerProfile };
+  const captured9: { fallback?: GrowthProfile | null } = {};
+  const newerSaved = await updateActivitySupport(childWithNewerProfile, [confirmed], {
+    invoke: async () => reply(JSON.stringify(VALID_SUPPORT)),
+    reloadObservations: async () => [confirmed],
+    save: async (_childId, activitySupport, fallback) => {
+      captured9.fallback = fallback;
+      return {
+        ...childWithNewerProfile,
+        growth_profile: { ...newerProfile, activity_support: activitySupport },
+      };
+    },
+  });
+  assert.equal(captured9.fallback, null);
+  assert.equal(newerSaved.growthProfile?.summary, '更新的成长小结文本');
+  assert.equal(newerSaved.growthProfile?.updated_at, newerProfile.updated_at);
+  passed += 1;
+
+  // 11) 保存层原子条件：保存入参必须携带期望的已确认观察 id 快照
+  const captured11: { expected?: string[] } = {};
+  await updateActivitySupport(child, [confirmed], {
+    invoke: async () => reply(JSON.stringify(VALID_SUPPORT)),
+    reloadObservations: async () => [confirmed],
+    save: async (_childId, activitySupport, _fallback, expectedIds) => {
+      captured11.expected = expectedIds;
+      return { ...child, growth_profile: { ...PROFILE, activity_support: activitySupport } };
+    },
+  });
+  assert.deepEqual(captured11.expected, ['confirmed-1']);
+
+  // 12) 复查通过后、写入前发生新的确认：保存层条件失败 → 可重试错误，不当作成功
+  let atomicSaveCalls = 0;
+  await assert.rejects(
+    updateActivitySupport(child, [confirmed], {
+      invoke: async () => reply(JSON.stringify(VALID_SUPPORT)),
+      reloadObservations: async () => [confirmed],
+      save: async () => {
+        atomicSaveCalls += 1;
+        throw new StaleEvidenceError('生成期间已有新的已确认观察，请重新生成。');
+      },
+    }),
+    (error: Error) => error instanceof StaleEvidenceError,
+  );
+  assert.equal(atomicSaveCalls, 1);
+  passed += 1;
+
+  // 10) 生成期间新增已确认观察：拒绝保存并返回可重试错误
+  const lateConfirmed = observation('confirmed-2', 'confirmed', CONFIRMED_CONTENT);
+  let staleSaveCalls = 0;
+  await assert.rejects(
+    updateActivitySupport(child, [confirmed], {
+      invoke: async () => reply(JSON.stringify(VALID_SUPPORT)),
+      reloadObservations: async () => [confirmed, lateConfirmed],
+      save: async () => {
+        staleSaveCalls += 1;
+        return child;
+      },
+    }),
+    (error: Error) => error instanceof StaleEvidenceError,
+  );
+  assert.equal(staleSaveCalls, 0);
+  passed += 1;
+
+  console.log(JSON.stringify({ passed, total: 19 }));
 }
 
 void main();

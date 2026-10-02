@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { ArrowUpRight, School } from 'lucide-react';
+import { ArrowUpRight, Flower2, Leaf, School, Sprout } from 'lucide-react';
 
 import { ClassFormDialog } from '@/components/class-dialogs';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { formatDateCn } from '@/lib/format';
 import { listChildren, listClasses, listObservations } from '@/lib/queries';
-import { CLASS_STAGE_LABELS, type Child, type Observation, type SchoolClass } from '@/lib/types';
+import { CLASS_STAGES, CLASS_STAGE_LABELS, type Child, type ClassStage, type Observation, type SchoolClass } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,6 +22,12 @@ interface ClassStats {
   pending: number;
   latest: string | null;
 }
+
+const stageMeta: Record<ClassStage, { icon: typeof Sprout; tone: string; description: string }> = {
+  small: { icon: Sprout, tone: 'bg-rose-50 text-rose-600', description: '在游戏与陪伴中慢慢成长' },
+  middle: { icon: Flower2, tone: 'bg-amber-50 text-amber-700', description: '在探索与合作中表达发现' },
+  large: { icon: Leaf, tone: 'bg-sky-50 text-sky-700', description: '看见新的尝试，留下自己的发现' },
+};
 
 export default async function ClassesPage() {
   let classes: SchoolClass[] = [];
@@ -55,13 +61,24 @@ export default async function ClassesPage() {
     if (!item.latest || observation.observed_at > item.latest) item.latest = observation.observed_at;
   }
 
+  const classGroups = CLASS_STAGES.map((stage) => ({
+    stage,
+    classes: classes
+      .filter((klass) => klass.stage === stage)
+      .sort((a, b) => Number(b.is_active) - Number(a.is_active) || a.name.localeCompare(b.name, 'zh-CN')),
+  })).filter((group) => group.classes.length > 0);
+
   return (
-    <div className="space-y-7">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <div className="space-y-8 pb-4 sm:space-y-10">
+      <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">班级</h1>
+          <div className="flex items-center gap-2 text-sm font-medium text-emerald-700">
+            <School className="size-4" aria-hidden="true" />
+            班级与学段
+          </div>
+          <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">班级</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-            按小班 / 中班 / 大班组织幼儿与观察。班级是组织上下文，不是评分单位。
+            先找到班级，再回到这个班级里的成长档案与观察记录。
           </p>
         </div>
         <ClassFormDialog label="新建班级" variant="default" size="default" />
@@ -88,64 +105,59 @@ export default async function ClassesPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {classes.map((klass) => {
-            const item = stats.get(klass.id) ?? {
-              children: 0,
-              confirmed: 0,
-              pending: 0,
-              latest: null,
-            };
+        <div className="space-y-8">
+          {classGroups.map(({ stage, classes: stageClasses }) => {
+            const meta = stageMeta[stage];
+            const Icon = meta.icon;
             return (
-              <Link key={klass.id} href={`/classes/${klass.id}`} className="group min-w-0">
-                <Card className="h-full transition-colors group-hover:border-amber-300 group-hover:bg-amber-50/20">
-                  <CardContent className="space-y-4 p-5">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <h2 className="truncate font-semibold text-slate-900">{klass.name}</h2>
-                          <Badge variant="secondary">{CLASS_STAGE_LABELS[klass.stage]}</Badge>
-                        </div>
-                        <p className="mt-1 text-sm text-slate-500">{klass.school_year}</p>
-                      </div>
-                      {!klass.is_active ? (
-                        <Badge
-                          variant="outline"
-                          className="border-slate-300 bg-slate-50 font-normal text-slate-500"
-                        >
-                          已停用
-                        </Badge>
-                      ) : null}
-                    </div>
-
-                    <dl className="grid grid-cols-2 gap-x-3 gap-y-2 border-t border-slate-100 pt-4 text-sm">
-                      <div>
-                        <dt className="text-xs text-slate-500">儿童</dt>
-                        <dd className="mt-0.5 text-slate-700">{item.children} 人</dd>
-                      </div>
-                      <div>
-                        <dt className="text-xs text-slate-500">最近观察</dt>
-                        <dd className="mt-0.5 text-slate-700">
-                          {item.latest ? formatDateCn(item.latest) : '暂无'}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt className="text-xs text-slate-500">已确认</dt>
-                        <dd className="mt-0.5 text-emerald-700">{item.confirmed} 条</dd>
-                      </div>
-                      <div>
-                        <dt className="text-xs text-slate-500">待处理</dt>
-                        <dd className="mt-0.5 text-amber-700">{item.pending} 条</dd>
-                      </div>
-                    </dl>
-
-                    <span className="flex items-center gap-1 text-sm font-medium text-amber-700">
-                      查看班级
-                      <ArrowUpRight className="size-3.5" aria-hidden="true" />
-                    </span>
-                  </CardContent>
-                </Card>
-              </Link>
+              <section key={stage} aria-labelledby={`classes-${stage}`}>
+                <div className="flex items-center gap-3">
+                  <span className={`flex size-10 items-center justify-center rounded-xl ${meta.tone}`} aria-hidden="true">
+                    <Icon className="size-5" />
+                  </span>
+                  <div>
+                    <h2 id={`classes-${stage}`} className="text-xl font-semibold text-slate-900">
+                      {CLASS_STAGE_LABELS[stage]}
+                    </h2>
+                    <p className="mt-0.5 text-sm text-slate-500">
+                      {stageClasses.length} 个班级 · {meta.description}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-4 divide-y divide-slate-200/80 border-y border-slate-200/80">
+                  {stageClasses.map((klass) => {
+                    const item = stats.get(klass.id) ?? { children: 0, confirmed: 0, pending: 0, latest: null };
+                    return (
+                      <Link
+                        key={klass.id}
+                        href={`/classes/${klass.id}`}
+                        className="group flex min-w-0 items-center gap-3 px-2 py-4 transition-colors hover:bg-amber-50/45 sm:gap-5 sm:px-3"
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="flex flex-wrap items-center gap-2">
+                            <strong className="truncate text-base text-slate-900">{klass.name}</strong>
+                            <Badge variant="secondary" className="font-normal">{klass.school_year}</Badge>
+                            {!klass.is_active ? <Badge variant="outline" className="font-normal text-slate-500">已停用</Badge> : null}
+                          </span>
+                        </span>
+                        <span className="hidden shrink-0 items-center gap-5 text-sm text-slate-500 sm:flex">
+                          <span><strong className="font-semibold text-slate-800">{item.children}</strong> 份成长档案</span>
+                          {item.pending > 0 ? <span className="text-amber-700"><strong className="font-semibold">{item.pending}</strong> 条待处理</span> : null}
+                          <span>{item.latest ? `最近 ${formatDateCn(item.latest)}` : '还没有观察'}</span>
+                        </span>
+                        <span className="flex shrink-0 items-center gap-1 text-sm font-medium text-emerald-700">
+                          <span className="sr-only">查看班级</span>
+                          <ArrowUpRight className="size-4 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" aria-hidden="true" />
+                        </span>
+                        <span className="flex shrink-0 flex-col items-end text-right text-xs text-slate-500 sm:hidden">
+                          <span>{item.children} 份档案</span>
+                          {item.pending > 0 ? <span className="text-amber-700">{item.pending} 条待处理</span> : null}
+                        </span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </section>
             );
           })}
         </div>

@@ -2,6 +2,7 @@ import { HeaderUtils } from "coze-coding-dev-sdk";
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireTeacher } from "@/lib/auth";
+import { ObservationStateConflictError } from "@/lib/evidence-snapshot";
 import { appendFollowUpAction, processObservationAgent } from "@/lib/observation-agent";
 import {
   getChild,
@@ -55,7 +56,12 @@ export async function POST(
       parsed.data.action,
       parsed.data.content,
     );
-    const saved = await updateObservationAgentContext(observation.id, context, "needs_input");
+    // 原子保护：状态、上下文与原草稿都必须仍匹配服务端读取时的快照
+    const saved = await updateObservationAgentContext(observation.id, context, "needs_input", {
+      expectedStatus: "needs_input",
+      expectedAgentContext: observation.agent_context ?? null,
+      expectedAiDraft: observation.ai_draft ?? null,
+    });
     const updated = await processObservationAgent({
       observation: saved,
       child,
@@ -63,6 +69,9 @@ export async function POST(
     });
     return NextResponse.json({ observation: updated });
   } catch (error) {
+    if (error instanceof ObservationStateConflictError) {
+      return NextResponse.json({ message: error.message }, { status: 409 });
+    }
     return NextResponse.json(
       { message: error instanceof Error ? error.message : "处理补充信息失败" },
       { status: 500 },

@@ -2,7 +2,7 @@ import { Badge } from "@/components/ui/badge";
 import { Sparkles } from "lucide-react";
 import type { ObservationStatus } from "@/lib/types";
 
-export function StatusBadge({ status }: { status: ObservationStatus }) {
+export function StatusBadge({ status, compact = false }: { status: ObservationStatus; compact?: boolean }) {
   if (status === "confirmed") {
     return (
       <Badge variant="secondary" className="bg-emerald-100 text-emerald-700">
@@ -13,7 +13,7 @@ export function StatusBadge({ status }: { status: ObservationStatus }) {
   if (status === "ai_organized") {
     return (
       <Badge variant="secondary" className="bg-amber-100 text-amber-700">
-        AI 已整理 · 待确认
+        {compact ? '待确认' : 'AI 已整理 · 待确认'}
       </Badge>
     );
   }
@@ -30,7 +30,6 @@ export function StatusBadge({ status }: { status: ObservationStatus }) {
     </Badge>
   );
 }
-
 /** 按参赛要求：所有 AI 生成的可见内容需明确标记 */
 export function AiBadge() {
   return (
@@ -41,18 +40,6 @@ export function AiBadge() {
     >
       <Sparkles className="size-3" />
       AI 生成
-    </Badge>
-  );
-}
-
-export function DemoBadge() {
-  return (
-    <Badge
-      variant="outline"
-      className="border-slate-300 bg-slate-50 text-slate-500"
-      title="演示用合成数据，非真实幼儿信息"
-    >
-      合成数据
     </Badge>
   );
 }

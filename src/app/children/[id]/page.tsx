@@ -12,11 +12,12 @@ import {
 
 import { ActivitySupportSection } from '@/components/activity-support-section';
 import { TransferClassDialog } from '@/components/class-dialogs';
+import { GrowthProfileRetry } from '@/components/growth-profile-retry';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { AiBadge, DemoBadge, StatusBadge } from '@/components/status-badges';
+import { StatusBadge } from '@/components/status-badges';
 import {
   ageText,
   classLabel,
@@ -92,7 +93,7 @@ function GrowthProfileSections({
         </div>
         <Card className="border-emerald-200 bg-emerald-50/50">
           <CardContent className="space-y-3 p-5 sm:p-6">
-            <p className="max-w-3xl text-[15px] leading-7 text-slate-700">{profile.summary}</p>
+            <p className="max-w-3xl text-base leading-7 text-slate-700">{profile.summary}</p>
             <p className="text-xs leading-5 text-slate-500">
               {isFallback
                 ? '已有确认观察会先在这里呈现；下一次确认后，Agent 会继续更新这段小结。'
@@ -126,21 +127,22 @@ function GrowthProfileSections({
       </section>
 
       <section aria-labelledby="next-support-title">
-        <ProfileCard
-          title="下一步支持"
-          icon={<Lightbulb className="size-4 text-emerald-600" aria-hidden="true" />}
-          className="border-sky-200 bg-sky-50/40"
-        >
-          <div className="space-y-4 text-sm leading-7 text-slate-600">
-            <p>{profile.next_support}</p>
-            <div className="rounded-lg bg-white/80 p-4">
-              <h3 id="next-support-title" className="mb-1 flex items-center gap-2 font-medium text-slate-700">
-                下一次可以继续看看
-              </h3>
-              <p>{profile.next_focus}</p>
+        <div className="space-y-4 rounded-2xl border border-sky-200 bg-sky-50/50 p-5 sm:p-6">
+          <div className="flex items-center gap-2">
+            <Lightbulb className="size-4 text-emerald-600" aria-hidden="true" />
+            <h2 id="next-support-title" className="text-base font-semibold text-slate-900">下一步支持</h2>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl bg-white/80 p-4">
+              <p className="text-xs font-medium text-emerald-700">可以试试</p>
+              <p className="mt-2 text-sm leading-7 text-slate-600">{profile.next_support}</p>
+            </div>
+            <div className="rounded-xl bg-white/80 p-4">
+              <p className="text-xs font-medium text-sky-700">继续观察</p>
+              <p className="mt-2 text-sm leading-7 text-slate-600">{profile.next_focus}</p>
             </div>
           </div>
-        </ProfileCard>
+        </div>
       </section>
     </>
   );
@@ -214,7 +216,15 @@ export default async function ChildDetailPage({
   );
   const fallbackProfile = buildGrowthProfileFallback(confirmedObservations);
   const profile = child.growth_profile ?? fallbackProfile;
-  const isFallback = !child.growth_profile && Boolean(fallbackProfile);
+  const isFallback =
+    child.growth_profile?.is_fallback === true ||
+    (!child.growth_profile && Boolean(fallbackProfile));
+  const profileObservationIds = child.growth_profile?.source_observation_ids ?? [];
+  const profileIsCurrent = Boolean(
+    child.growth_profile &&
+      profileObservationIds.length === confirmedObservations.length &&
+      confirmedObservations.every((observation) => profileObservationIds.includes(observation.id)),
+  );
   const storedActivitySupport = activitySupportSchema.safeParse(
     child.growth_profile?.activity_support,
   );
@@ -223,6 +233,9 @@ export default async function ChildDetailPage({
     hasCurrentActivitySupport(storedActivitySupport.data, confirmedObservations)
       ? storedActivitySupport.data
       : null;
+  const hasStaleActivitySupport = Boolean(
+    storedActivitySupport.success && storedActivitySupport.data && !activitySupport,
+  );
 
   return (
     <div className="space-y-8">
@@ -256,7 +269,6 @@ export default async function ChildDetailPage({
                     查看班级
                   </Link>
                 ) : null}
-                {child.is_demo ? <DemoBadge /> : null}
               </div>
               <p className="mt-1 text-sm text-slate-500">
                 出生日期 {formatDateCn(child.birth_date)} · 当前 {ageText(child.birth_date)}
@@ -275,6 +287,25 @@ export default async function ChildDetailPage({
               </Link>
             </Button>
           </div>
+        </div>
+      </section>
+
+      <section aria-label="观察概览" className="grid grid-cols-2 divide-x divide-y divide-slate-200/80 border-y border-slate-200/80 sm:grid-cols-3 sm:divide-y-0">
+        <div className="px-3 py-3 sm:px-4">
+          <p className="text-xs text-slate-500">已确认观察</p>
+          <p className="mt-1 text-lg font-semibold text-slate-900">{confirmedObservations.length} 条</p>
+        </div>
+        <div className="px-3 py-3 sm:px-4">
+          <p className="text-xs text-slate-500">最近记录</p>
+          <p className="mt-1 text-sm font-medium text-slate-800">
+            {observations[0] ? formatDateCn(observations[0].observed_at) : '还没有记录'}
+          </p>
+        </div>
+        <div className="col-span-2 px-3 py-3 sm:col-span-1 sm:px-4">
+          <p className="text-xs text-slate-500">当前班级</p>
+          <p className="mt-1 truncate text-sm font-medium text-slate-800">
+            {classLabel(child.class_stage, child.class_name) ?? '暂未分班'}
+          </p>
         </div>
       </section>
 
@@ -329,10 +360,15 @@ export default async function ChildDetailPage({
         </Card>
       )}
 
+      {confirmedObservations.length > 0 && !profileIsCurrent ? (
+        <GrowthProfileRetry childId={child.id} hasStoredProfile={Boolean(child.growth_profile)} />
+      ) : null}
+
       <ActivitySupportSection
         childId={child.id}
         confirmedObservationCount={confirmedObservations.length}
         initialSupport={activitySupport}
+        hasStaleSupport={hasStaleActivitySupport}
       />
 
       <section aria-labelledby="observation-timeline-title">
@@ -403,7 +439,6 @@ export default async function ChildDetailPage({
                         </Badge>
                       ) : null}
                       <span className="ml-auto flex items-center gap-2">
-                        {obs.ai_draft ? <AiBadge /> : null}
                         <StatusBadge status={obs.status} />
                       </span>
                     </div>

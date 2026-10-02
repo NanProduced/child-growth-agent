@@ -1,6 +1,7 @@
 import { HeaderUtils } from "coze-coding-dev-sdk";
 import { NextRequest, NextResponse } from "next/server";
 import { requireTeacher } from "@/lib/auth";
+import { ObservationStateConflictError } from "@/lib/evidence-snapshot";
 import { processObservationAgent } from "@/lib/observation-agent";
 import { getChild, getObservation } from "@/lib/queries";
 
@@ -42,6 +43,9 @@ export async function POST(
     });
     return NextResponse.json({ observation: updated });
   } catch (e) {
+    if (e instanceof ObservationStateConflictError) {
+      return NextResponse.json({ message: e.message }, { status: 409 });
+    }
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "AI 整理失败" },
       { status: 500 }

@@ -133,6 +133,7 @@ export function ClassFormDialog({
           size={size}
           disabled={locked}
           title={locked ? '管理班级需要教师登录' : undefined}
+          className="min-h-11"
         >
           {klass ? <Pencil className="size-4" /> : <Plus className="size-4" />}
           {label}
@@ -203,7 +204,7 @@ export function ClassFormDialog({
         </div>
 
         <DialogFooter>
-          <Button onClick={() => void handleSubmit()} disabled={busy}>
+          <Button onClick={() => void handleSubmit()} disabled={busy} className="min-h-11">
             {busy ? <Loader2 className="size-4 animate-spin" /> : null}
             {klass ? '保存修改' : '创建班级'}
           </Button>
@@ -275,6 +276,7 @@ export function TransferClassDialog({
           size="sm"
           disabled={locked}
           title={locked ? '转班需要教师登录' : undefined}
+          className="min-h-11"
         >
           <Repeat2 className="size-4" />
           转班
@@ -312,7 +314,7 @@ export function TransferClassDialog({
         </div>
 
         <DialogFooter>
-          <Button onClick={() => void handleSubmit()} disabled={busy || !target}>
+          <Button onClick={() => void handleSubmit()} disabled={busy || !target} className="min-h-11">
             {busy ? <Loader2 className="size-4 animate-spin" /> : <Repeat2 className="size-4" />}
             确认转班
           </Button>
