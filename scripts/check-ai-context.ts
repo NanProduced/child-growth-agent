@@ -17,6 +17,7 @@ import {
   EDUCATION_PRINCIPLES_SOURCES,
   EDUCATION_PRINCIPLES_VERIFIED_AT,
 } from '../src/lib/education-principles';
+import { isoDateInShanghai, parseIsoDateStrict } from '../src/lib/format';
 import { buildGrowthProfileFallback } from '../src/lib/growth-profile';
 import type { Observation, ObservationDraft } from '../src/lib/types';
 
@@ -269,7 +270,199 @@ async function main(): Promise<void> {
     passed += 1;
   }
 
-  console.log(JSON.stringify({ passed, total: 8 }));
+  // 9) 严格日历日期：无效日期不得被 Date 自动进位
+  {
+    const rolled = userMessage(
+      buildOrganizeMessages({
+        childName: '诺诺',
+        childGender: '男',
+        childBirthDate: '2022-02-30',
+        observedAt: '2026-09-22',
+        context: null,
+        rawText: '早操后，诺诺自己走到阴凉处坐下喝水。',
+        currentDate: '2026-10-02',
+      }),
+    );
+    assert.ok(rolled.includes('月龄未知'), '2022-02-30 必须判为月龄未知，不能进位成 3 月 1 日');
+    const noLeap = userMessage(
+      buildOrganizeMessages({
+        childName: '诺诺',
+        childGender: '男',
+        childBirthDate: '2025-02-29',
+        observedAt: '2026-09-22',
+        context: null,
+        rawText: '早操后，诺诺自己走到阴凉处坐下喝水。',
+        currentDate: '2026-10-02',
+      }),
+    );
+    assert.ok(noLeap.includes('月龄未知'), '2025-02-29 必须判为月龄未知');
+    const badMonth = userMessage(
+      buildOrganizeMessages({
+        childName: '诺诺',
+        childGender: '男',
+        childBirthDate: '2022-13-01',
+        observedAt: '2026-09-22',
+        context: null,
+        rawText: '早操后，诺诺自己走到阴凉处坐下喝水。',
+        currentDate: '2026-10-02',
+      }),
+    );
+    assert.ok(badMonth.includes('月龄未知'), '无效月份必须判为月龄未知');
+    const leap = userMessage(
+      buildOrganizeMessages({
+        childName: '诺诺',
+        childGender: '男',
+        childBirthDate: '2024-02-29',
+        observedAt: '2026-09-22',
+        context: null,
+        rawText: '早操后，诺诺自己走到阴凉处坐下喝水。',
+        currentDate: '2026-10-02',
+      }),
+    );
+    assert.ok(leap.includes('30 个月'), '合法闰日必须能计算月龄');
+    const future = userMessage(
+      buildOrganizeMessages({
+        childName: '诺诺',
+        childGender: '男',
+        childBirthDate: '2026-10-01',
+        observedAt: '2026-09-22',
+        context: null,
+        rawText: '早操后，诺诺自己走到阴凉处坐下喝水。',
+        currentDate: '2026-10-02',
+      }),
+    );
+    assert.ok(future.includes('月龄未知'), '出生日期晚于观察日期必须判为未知，不能为 0');
+    assert.equal(parseIsoDateStrict('2024-02-29')?.getUTCDate(), 29);
+    assert.equal(parseIsoDateStrict('2022-02-30'), null);
+    passed += 1;
+  }
+
+  // 10) 默认当前日期按 Asia/Shanghai 计算
+  {
+    assert.equal(
+      isoDateInShanghai(new Date('2026-10-01T17:00:00Z')),
+      '2026-10-02',
+      'UTC 17:00 已是北京时间次日，默认日期不得输出 2026-10-01',
+    );
+    assert.equal(isoDateInShanghai(new Date('2026-10-01T15:59:00Z')), '2026-10-01');
+    passed += 1;
+  }
+
+  // 11) 成长小结证据按 observed_at 排序，且不修改输入
+  {
+    const laterFirst = [
+      observation({
+        id: 'sort-2',
+        observed_at: '2026-09-28',
+        confirmed_content: content('较晚观察。'),
+      }),
+      observation({
+        id: 'sort-1',
+        observed_at: '2026-09-10',
+        confirmed_content: content('较早观察。'),
+      }),
+    ];
+    const before = JSON.stringify(laterFirst);
+    const message = userMessage(
+      buildGrowthProfileMessages({
+        childName: '果果',
+        childGender: '女',
+        childBirthDate: '2021-06-10',
+        observations: laterFirst,
+        currentDate: '2026-10-02',
+      }),
+    );
+    const earlierIndex = message.indexOf('"observed_at":"2026-09-10"');
+    const laterIndex = message.indexOf('"observed_at":"2026-09-28"');
+    assert.ok(earlierIndex >= 0 && laterIndex >= 0, '消息应包含两条观察日期');
+    assert.ok(earlierIndex < laterIndex, '证据必须按 observed_at 升序排列');
+    assert.equal(JSON.stringify(laterFirst), before, '排序不得修改输入数组');
+    passed += 1;
+  }
+
+  // 12) fallback 的最近记录按真实观察日期，而非录入顺序
+  {
+    const backfilled = observation({
+      id: 'fallback-old-but-late-created',
+      observed_at: '2026-08-15',
+      created_at: '2026-09-30T09:00:00.000Z',
+      confirmed_content: content('八月补录的旧观察。'),
+    });
+    const recent = observation({
+      id: 'fallback-recent',
+      observed_at: '2026-09-25',
+      created_at: '2026-09-26T09:00:00.000Z',
+      confirmed_content: content('九月最新的观察。'),
+    });
+    const fallback = buildGrowthProfileFallback([backfilled, recent]);
+    assert.ok(fallback);
+    assert.ok(
+      fallback.recent_change.includes('九月最新的观察'),
+      'fallback 必须选择真实观察日期最新的记录',
+    );
+    assert.ok(!fallback.recent_change.includes('八月补录的旧观察'));
+    passed += 1;
+  }
+
+  // 13) 同日多条与不可靠日期：不声称确定“最近一次”或事件先后
+  {
+    const sameDay = buildGrowthProfileFallback([
+      observation({
+        id: 'same-day-1',
+        observed_at: '2026-09-25',
+        confirmed_content: content('同日上午的记录。'),
+      }),
+      observation({
+        id: 'same-day-2',
+        observed_at: '2026-09-25',
+        confirmed_content: content('同日午后的记录。'),
+      }),
+    ]);
+    assert.ok(sameDay);
+    assert.ok(
+      sameDay.recent_change.includes('同一天') && sameDay.recent_change.includes('暂不推断'),
+      '同日多条不得推断事件先后',
+    );
+    assert.ok(!sameDay.recent_change.includes('最近一次记录是'));
+
+    const unreliable = buildGrowthProfileFallback([
+      observation({
+        id: 'bad-date-1',
+        observed_at: '2022-02-30',
+        confirmed_content: content('日期不可靠的记录。'),
+      }),
+      observation({
+        id: 'bad-date-2',
+        observed_at: '2026-09-25',
+        confirmed_content: content('日期可靠的记录。'),
+      }),
+    ]);
+    assert.ok(unreliable);
+    assert.ok(
+      !unreliable.recent_change.includes('最近一次记录是'),
+      '存在不可靠日期时不得声称已确定最近一次',
+    );
+    passed += 1;
+  }
+
+  // 14) 必要追问：一次动作词不等于必然放行，缺失支持条件也不能默默忽略
+  {
+    const followUpPrompt = (
+      await import('../src/lib/ai')
+    ).FOLLOW_UP_SYSTEM_PROMPT;
+    assert.ok(
+      followUpPrompt.includes('缺失信息') && followUpPrompt.includes('影响'),
+      '追问 Prompt 必须说明缺失信息影响什么，而非只看有无动作词',
+    );
+    assert.ok(
+      followUpPrompt.includes('不能只写“信息不完整”') ||
+        followUpPrompt.includes('不能只写信息不完整'),
+      '追问 Prompt 必须要求 reason 具体',
+    );
+    passed += 1;
+  }
+
+  console.log(JSON.stringify({ passed, total: 14 }));
 }
 
 void main();

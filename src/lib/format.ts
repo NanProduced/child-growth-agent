@@ -55,6 +55,40 @@ export function excerpt(text: string, max = 60): string {
 
 export function todayStr(): string {
   const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
+  const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
+ * 严格解析 YYYY-MM-DD：日期必须真实存在，不允许 Date 自动进位
+ * （如 2022-02-30、2025-02-29、2022-13-01 都返回 null）。
+ * 返回 UTC 日期对象，仅供月龄等纯计算使用。
+ */
+export function parseIsoDateStrict(value: string | null | undefined): Date | null {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return date;
+}
+
+/** 按亚洲/上海时区返回 YYYY-MM-DD；服务端默认“当前日期”的唯一来源 */
+export function isoDateInShanghai(date: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
 }

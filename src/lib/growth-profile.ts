@@ -1,5 +1,6 @@
 import { generateGrowthProfile } from "./ai";
 import { StaleEvidenceError } from "./evidence-snapshot";
+import { parseIsoDateStrict } from "./format";
 import { invokeLlm } from "./llm";
 import { listObservations, updateChildGrowthProfileSummary } from "./queries";
 import type { Child, GrowthProfile, GrowthProfileDraft, Observation } from "./types";
@@ -49,13 +50,47 @@ export async function assertEvidenceUnchanged(
   }
 }
 
+/**
+ * 按真实观察日期选择“最近记录”，不使用录入顺序；
+ * 日期不可靠或同日多条时不推断事件先后。
+ */
+function latestConfirmedObservation(confirmed: Observation[]): {
+  observation: Observation;
+  dateReliable: boolean;
+  sameDayCount: number;
+} {
+  const dated = confirmed.map((observation) => ({
+    observation,
+    date: parseIsoDateStrict(observation.observed_at),
+  }));
+  const dateReliable = dated.every((item) => item.date !== null);
+  if (!dateReliable) {
+    return {
+      observation: confirmed[confirmed.length - 1],
+      dateReliable: false,
+      sameDayCount: 0,
+    };
+  }
+  const sorted = [...dated].sort(
+    (left, right) => (left.date as Date).getTime() - (right.date as Date).getTime(),
+  );
+  const maxTime = (sorted[sorted.length - 1].date as Date).getTime();
+  const sameDay = sorted.filter((item) => (item.date as Date).getTime() === maxTime);
+  return {
+    observation: sameDay[sameDay.length - 1].observation,
+    dateReliable: true,
+    sameDayCount: sameDay.length,
+  };
+}
+
 /** 没有已保存 profile 时，只从已有 confirmed 记录拼出可读的保守回退内容。 */
 export function buildGrowthProfileFallback(
   observations: Observation[],
 ): GrowthProfileDraft | null {
   const confirmed = confirmedObservations(observations);
-  const latest = confirmed[0];
-  if (!latest) return null;
+  if (confirmed.length === 0) return null;
+  const latestStatus = latestConfirmedObservation(confirmed);
+  const latest = latestStatus.observation;
 
   const content = latest.confirmed_content;
   const clues = confirmed
@@ -65,10 +100,16 @@ export function buildGrowthProfileFallback(
   const latestNote =
     content?.objective_description || content?.highlight_quote || latest.raw_text;
   // 保守回退不把最新表现直接复制成“变化”，也不暗示已有趋势
-  const recentChange =
-    confirmed.length === 1
-      ? `目前只有一条确认观察，还不能判断变化；这条记录是：${latestNote}`
-      : `已有多条确认观察，但还没有生成可比较的成长小结；最近一次记录是：${latestNote}`;
+  let recentChange: string;
+  if (confirmed.length === 1) {
+    recentChange = `目前只有一条确认观察，还不能判断变化；这条记录是：${latestNote}`;
+  } else if (!latestStatus.dateReliable) {
+    recentChange = `已有多条确认观察，但观察日期无法可靠排序，暂不判断变化；其中一条记录是：${latestNote}`;
+  } else if (latestStatus.sameDayCount > 1) {
+    recentChange = `最近的确认观察集中在同一天（${latest.observed_at}，共 ${latestStatus.sameDayCount} 条），暂不推断先后；其中一条记录是：${latestNote}`;
+  } else {
+    recentChange = `已有多条确认观察，但还没有生成可比较的成长小结；最近一次记录是：${latestNote}`;
+  }
 
   return {
     summary:
