@@ -128,6 +128,10 @@ export const observations = pgTable(
     ai_organized_at: timestamp("ai_organized_at", { withTimezone: true }),
     confirmed_content: jsonb("confirmed_content"),
     confirmed_at: timestamp("confirmed_at", { withTimezone: true }),
+    /** 观察发生时班级快照（ObservationClassContextSnapshot）；旧记录为 NULL=历史未知，禁止用 classes 动态回填 */
+    class_context_snapshot: jsonb("class_context_snapshot"),
+    /** 指南证据容器（ObservationGuideEvidence，G5 读写）；NULL=正常未关联，损坏值需显式识别 */
+    guide_evidence: jsonb("guide_evidence"),
     is_demo: boolean("is_demo").notNull().default(false),
     created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updated_at: timestamp("updated_at", { withTimezone: true }),

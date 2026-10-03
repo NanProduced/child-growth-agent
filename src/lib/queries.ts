@@ -5,6 +5,8 @@ import {
   withTransaction,
 } from "@/storage/database/pg-client";
 import { ObservationStateConflictError, StaleEvidenceError } from "./evidence-snapshot";
+import { isoDateInShanghai } from "./format";
+import type { ObservationClassContextSnapshot } from "./guide/types";
 import type {
   ActivitySupport,
   AgentContext,
@@ -95,6 +97,9 @@ export function mapObservation(row: Row): Observation {
     ai_organized_at: strOrNull(row.ai_organized_at),
     confirmed_content: (row.confirmed_content ?? null) as ObservationDraft | null,
     confirmed_at: strOrNull(row.confirmed_at),
+    class_context_snapshot: (row.class_context_snapshot ?? null) as ObservationClassContextSnapshot | null,
+    // 原始透传：NULL 是正常未关联；损坏/未知结构原样保留，由 G5 显式识别，不在此归为 NULL
+    guide_evidence: row.guide_evidence ?? null,
     is_demo: Boolean(row.is_demo),
     created_at: str(row.created_at),
     updated_at: strOrNull(row.updated_at),
@@ -229,7 +234,8 @@ export async function enrollChildInClass(input: {
   class_id: string;
   start_date?: string;
 }): Promise<{ closed: number; opened: number }> {
-  const startDate = input.start_date ?? new Date().toISOString().slice(0, 10);
+  // 默认分班日期按服务端统一口径取亚洲/上海日历日，避免 UTC 跨日导致归属日期错位
+  const startDate = input.start_date ?? isoDateInShanghai();
   const row = await queryOne<{ closed: number; opened: number }>(
     `WITH closed AS (
        UPDATE child_class_enrollments
@@ -486,8 +492,9 @@ export async function getObservation(id: string): Promise<Observation | null> {
 }
 
 /**
- * 保存观察原文：class_id 必须由调用方取自儿童当前班级（发生时快照），
- * 转班后旧观察仍保留原班级语境；raw_text 保存后不再改写。
+ * 保存观察原文：class_id 与 class_context_snapshot 由创建接口按“发生时班级”解析后传入
+ * （分班历史唯一命中或教师确认），转班、改名后快照不变；raw_text 保存后不再改写。
+ * guide_evidence 保持 NULL（未关联是正常状态，由 G5 后续读写）。
  */
 export async function createObservation(input: {
   child_id: string;
@@ -496,10 +503,12 @@ export async function createObservation(input: {
   context: string | null;
   raw_text: string;
   is_demo: boolean;
+  class_context_snapshot: ObservationClassContextSnapshot | null;
 }): Promise<Observation> {
   const row = await queryOne<{ id: string }>(
-    `INSERT INTO observations (child_id, class_id, observed_at, context, raw_text, is_demo)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO observations
+       (child_id, class_id, observed_at, context, raw_text, is_demo, class_context_snapshot)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
      RETURNING id`,
     [
       input.child_id,
@@ -508,6 +517,9 @@ export async function createObservation(input: {
       input.context,
       input.raw_text,
       input.is_demo,
+      input.class_context_snapshot === null
+        ? null
+        : JSON.stringify(input.class_context_snapshot),
     ]
   );
   if (!row) throw new Error("保存观察记录失败：写入后未能读取记录");

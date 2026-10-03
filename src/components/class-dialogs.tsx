@@ -70,6 +70,8 @@ export function ClassFormDialog({
   const [active, setActive] = useState(true);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [busy, setBusy] = useState(false);
+  // 已有分班或观察记录的班级不能直接改学段/学年（升班需新建班级并转班）
+  const [hasHistory, setHasHistory] = useState(false);
 
   const locked = loading || !configured || !isTeacher;
 
@@ -80,6 +82,26 @@ export function ClassFormDialog({
       setSchoolYear(klass?.school_year ?? defaultSchoolYear());
       setActive(klass?.is_active ?? true);
       setErrors({});
+      setHasHistory(false);
+      if (klass) {
+        fetch(`/api/classes/${klass.id}`)
+          .then((r) => r.json())
+          .then(
+            (data: {
+              history?: { enrollment_count?: number; observation_count?: number };
+            }) => {
+              const history = data.history;
+              setHasHistory(
+                Boolean(
+                  history &&
+                    ((history.enrollment_count ?? 0) > 0 ||
+                      (history.observation_count ?? 0) > 0),
+                ),
+              );
+            },
+          )
+          .catch(() => undefined);
+      }
     }
     setOpen(next);
   }
@@ -162,7 +184,7 @@ export function ClassFormDialog({
 
           <div className="space-y-1.5">
             <Label>学段 *</Label>
-            <Select value={stage} onValueChange={setStage}>
+            <Select value={stage} onValueChange={setStage} disabled={hasHistory}>
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="选择学段" />
               </SelectTrigger>
@@ -185,8 +207,14 @@ export function ClassFormDialog({
               maxLength={20}
               value={schoolYear}
               onChange={(e) => setSchoolYear(e.target.value)}
+              disabled={hasHistory}
             />
             <ErrorText message={errors.school_year} />
+            {hasHistory ? (
+              <p className="text-xs leading-5 text-amber-700">
+                该班级已有分班或观察记录。升班请建立新学年的班级并转班；这里仍可修改班级名称或停用班级。
+              </p>
+            ) : null}
           </div>
 
           <div className="flex items-center justify-between gap-3 rounded-lg border bg-slate-50/70 px-3 py-2.5">

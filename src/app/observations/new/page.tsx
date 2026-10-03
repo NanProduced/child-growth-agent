@@ -27,19 +27,36 @@ import {
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
-import { classLabel, todayStr } from '@/lib/format';
-import type { Child } from '@/lib/types';
+import type { ClassContextConfirmationReason } from '@/lib/class-context';
+import { classLabel, parseIsoDateStrict, todayStr } from '@/lib/format';
+import type { Child, SchoolClass } from '@/lib/types';
+
+type ClassContextState =
+  | { status: 'idle' }
+  | { status: 'checking' }
+  | { status: 'resolved'; class: SchoolClass }
+  | { status: 'needs_confirmation'; reason: ClassContextConfirmationReason; message: string };
+
+interface ClassContextResponse {
+  status?: 'resolved' | 'needs_confirmation';
+  reason?: ClassContextConfirmationReason | null;
+  message?: string;
+  class?: SchoolClass | null;
+}
 
 export default function NewObservationPage() {
   const router = useRouter();
   const { loading: authLoading, configured, isTeacher } = useTeacher();
   const [children, setChildren] = useState<Child[]>([]);
+  const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [loadingChildren, setLoadingChildren] = useState(true);
 
   const [childId, setChildId] = useState('');
   const [observedAt, setObservedAt] = useState('');
   const [context, setContext] = useState('');
   const [rawText, setRawText] = useState('');
+  const [classContext, setClassContext] = useState<ClassContextState>({ status: 'idle' });
+  const [confirmedClassId, setConfirmedClassId] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   // 默认日期仅客户端挂载后写入，保证服务端渲染与水合一致
@@ -69,15 +86,61 @@ export default function NewObservationPage() {
     };
   }, []);
 
+  // 教师确认“当时班级”时的候选列表：包含已停用班级（历史班级可能已停用）
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/classes')
+      .then((r) => r.json())
+      .then((data: { classes?: SchoolClass[] }) => {
+        if (alive) setClasses(data.classes ?? []);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // 幼儿或日期变化时，按分班历史核对发生班级；不可靠时要求教师确认，不默认套用当前班级
+  useEffect(() => {
+    if (!childId || !observedAt || !parseIsoDateStrict(observedAt)) {
+      setClassContext({ status: 'idle' });
+      setConfirmedClassId('');
+      return;
+    }
+    const controller = new AbortController();
+    setClassContext({ status: 'checking' });
+    setConfirmedClassId('');
+    fetch(
+      `/api/children/${childId}/class-context?observed_at=${encodeURIComponent(observedAt)}`,
+      { signal: controller.signal }
+    )
+      .then(async (res) => {
+        const data = (await res.json().catch(() => ({}))) as ClassContextResponse;
+        if (!res.ok) throw new Error(data.message ?? '核对发生时班级失败');
+        if (data.status === 'resolved' && data.class) {
+          setClassContext({ status: 'resolved', class: data.class });
+          return;
+        }
+        setClassContext({
+          status: 'needs_confirmation',
+          reason: data.reason ?? 'no_attribution',
+          message: data.message ?? '无法自动确定这条观察发生时的班级，请选择。',
+        });
+      })
+      .catch((e: unknown) => {
+        if (e instanceof DOMException && e.name === 'AbortError') return;
+        setClassContext({ status: 'idle' });
+        toast.error(e instanceof Error ? e.message : '核对发生时班级失败');
+      });
+    return () => controller.abort();
+  }, [childId, observedAt]);
+
   const selectedChild = children.find((c) => c.id === childId) ?? null;
+  const needsClassConfirmation = classContext.status === 'needs_confirmation';
 
   async function handleSubmit() {
     if (!childId) {
       toast.error('请选择幼儿');
-      return;
-    }
-    if (selectedChild && !selectedChild.class_id) {
-      toast.error('该幼儿尚未分班，请先在成长档案中完成分班');
       return;
     }
     if (!observedAt) {
@@ -86,6 +149,14 @@ export default function NewObservationPage() {
     }
     if (rawText.trim().length < 10) {
       toast.error('观察原文至少 10 个字，请尽量白描具体行为');
+      return;
+    }
+    if (classContext.status === 'checking') {
+      toast.error('正在核对这条观察发生时的班级，请稍候');
+      return;
+    }
+    if (needsClassConfirmation && !confirmedClassId) {
+      toast.error('请选择这条观察发生时的班级');
       return;
     }
     setSubmitting(true);
@@ -98,13 +169,22 @@ export default function NewObservationPage() {
           observed_at: observedAt,
           context: context.trim() || null,
           raw_text: rawText.trim(),
+          ...(confirmedClassId ? { confirmed_class_id: confirmedClassId } : {}),
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as {
+      const data = (await res.json().catch(() => ({}))) as ClassContextResponse & {
+        error?: string;
         observation?: { id: string };
-        message?: string;
       };
       if (!res.ok || !data.observation) {
+        if (data.error === 'class_context_confirmation_required') {
+          setClassContext({
+            status: 'needs_confirmation',
+            reason: data.reason ?? 'no_attribution',
+            message: data.message ?? '无法自动确定这条观察发生时的班级，请选择。',
+          });
+          setConfirmedClassId('');
+        }
         throw new Error(data.message ?? '保存失败，请稍后再试');
       }
       toast.success('观察已保存，原文将不可修改');
@@ -213,13 +293,47 @@ export default function NewObservationPage() {
           </div>
 
           {selectedChild ? (
-            <div className="rounded-lg border bg-slate-50/70 px-3 py-2.5 text-xs leading-5 text-slate-500">
-              发生班级：
-              <Badge variant="secondary" className="mx-1 font-normal">
-                {classLabel(selectedChild.class_stage, selectedChild.class_name) ?? '未分班'}
-              </Badge>
-              随幼儿档案自动带入，保存时写入这条观察，之后不能在观察里修改。
-            </div>
+            classContext.status === 'checking' ? (
+              <div className="rounded-lg border bg-slate-50/70 px-3 py-2.5 text-xs leading-5 text-slate-500">
+                正在按分班历史核对这条观察发生时的班级…
+              </div>
+            ) : classContext.status === 'resolved' ? (
+              <div className="rounded-lg border bg-slate-50/70 px-3 py-2.5 text-xs leading-5 text-slate-500">
+                发生时班级：
+                <Badge variant="secondary" className="mx-1 font-normal">
+                  {classLabel(classContext.class.stage, classContext.class.name) ??
+                    classContext.class.name}
+                </Badge>
+                按分班历史核对，保存时写入这条观察的快照；以后班级改名或转班都不会改变它。
+              </div>
+            ) : classContext.status === 'needs_confirmation' ? (
+              <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50/70 px-3 py-3">
+                <p className="text-xs leading-5 text-amber-900">{classContext.message}</p>
+                <div className="space-y-1.5">
+                  <Label htmlFor="class-context">当时所在班级 *</Label>
+                  <Select value={confirmedClassId} onValueChange={setConfirmedClassId}>
+                    <SelectTrigger id="class-context" className="w-full">
+                      <SelectValue placeholder="选择当时所在班级" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {classes.map((c) => (
+                        <SelectItem key={c.id} value={c.id}>
+                          {classLabel(c.stage, c.name) ?? c.name} · {c.school_year}
+                          {c.is_active ? '' : '（已停用）'}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <p className="text-xs leading-5 text-amber-800/80">
+                  只用于记录这条观察的班级语境，不会改变幼儿当前分班。
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-lg border bg-slate-50/70 px-3 py-2.5 text-xs leading-5 text-slate-500">
+                选择观察日期后，会自动按分班历史核对这条观察发生时的班级。
+              </div>
+            )
           ) : null}
 
           <div className="space-y-1.5">
@@ -259,7 +373,7 @@ export default function NewObservationPage() {
           <Button
             className="w-full"
             onClick={() => void handleSubmit()}
-            disabled={submitting || loadingChildren}
+            disabled={submitting || loadingChildren || classContext.status === 'checking'}
           >
             {submitting ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
             保存观察并继续整理

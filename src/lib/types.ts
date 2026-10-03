@@ -1,3 +1,5 @@
+import type { ObservationClassContextSnapshot } from "./guide/types";
+
 export const OBSERVATION_STATUSES = ["draft", "needs_input", "ai_organized", "confirmed"] as const;
 export type ObservationStatus = (typeof OBSERVATION_STATUSES)[number];
 
@@ -199,6 +201,16 @@ export interface Observation {
   ai_organized_at: string | null;
   confirmed_content: ObservationDraft | null;
   confirmed_at: string | null;
+  /**
+   * 发生时班级快照（G2 落库）：旧记录缺失时为 null=历史未知，
+   * 不得用当前班级或动态 classes.stage 回填；读取一律以此为准。
+   */
+  class_context_snapshot?: ObservationClassContextSnapshot | null;
+  /**
+   * 指南证据原始 JSONB（G5 校验读写）：null=正常未关联；
+   * 结构异常的值原样保留（unknown），由 G5 显式识别为损坏，不在映射层静默归为 NULL。
+   */
+  guide_evidence?: unknown;
   is_demo: boolean;
   created_at: string;
   updated_at: string | null;

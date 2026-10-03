@@ -26,6 +26,8 @@ const TEACHER_PASSCODE_KEY = 'TEACHER_PASSCODE';
 
 interface ApiBody {
   message?: string;
+  error?: string;
+  reason?: string;
   classes?: SchoolClass[];
   class?: SchoolClass;
   children?: Child[];
@@ -418,13 +420,17 @@ async function main(): Promise<void> {
       );
       passed += 1;
 
-      // 12) 新观察保存发生时班级快照；未登录写操作 401；无归属儿童明确报错
+      // 12) 新观察保存发生时班级快照；未登录写操作 401；无归属儿童要求教师确认（不套默认班级）
+      // 观察日期不早于入班日期时，按分班历史解析（早于入班的日期需要教师确认，见 G2 自检）
+      const createdEnrollments = await listEnrollments(createdChild.id);
+      assert.equal(createdEnrollments.length, 1);
+      const enrollmentStart = createdEnrollments[0].start_date;
       const firstObsRes = await createObservationHandler(
         apiRequest('/api/observations', {
           method: 'POST',
           body: {
             child_id: createdChild.id,
-            observed_at: '2026-09-28',
+            observed_at: enrollmentStart,
             context: '自检区域活动',
             raw_text: '自检幼儿在积木区把三块长积木并排搭成小桥，桥上放了一个小汽车，桥没有倒。',
           },
@@ -435,6 +441,8 @@ async function main(): Promise<void> {
       const firstObs = ((await firstObsRes.json()) as ApiBody).observation as Observation;
       assert.equal(firstObs.class_id, created.small.id);
       assert.equal(firstObs.observed_class?.name, '自检小班');
+      assert.equal(firstObs.class_context_snapshot?.source, 'enrollment_lookup');
+      assert.equal(firstObs.class_context_snapshot?.class_id, created.small.id);
 
       assert.equal(
         (
@@ -459,14 +467,16 @@ async function main(): Promise<void> {
           method: 'POST',
           body: {
             child_id: orphan.id,
-            observed_at: '2026-09-28',
-            raw_text: '没有班级归属的儿童写观察，应当被明确拒绝而不是套用默认班级。',
+            observed_at: enrollmentStart,
+            raw_text: '没有班级归属的儿童写观察，应当要求教师确认当时班级而不是套用默认班级。',
           },
           cookie,
         })
       );
-      assert.equal(orphanRes.status, 400);
-      assert.ok(((await orphanRes.json()) as ApiBody).message?.includes('尚未分配班级'));
+      assert.equal(orphanRes.status, 409);
+      const orphanBody = (await orphanRes.json()) as ApiBody;
+      assert.equal(orphanBody.error, 'class_context_confirmation_required');
+      assert.equal(orphanBody.reason, 'no_attribution');
       passed += 1;
 
       // 13) 转班：旧归属保留、旧观察快照不变、新观察写入新班级、重复分班 409
@@ -506,8 +516,8 @@ async function main(): Promise<void> {
           method: 'POST',
           body: {
             child_id: createdChild.id,
-            observed_at: '2026-09-30',
-            context: '转班后',
+            observed_at: transferStart,
+            context: '转班当天',
             raw_text: '转班之后的观察原文，需要超过十个字以便通过校验规则。',
           },
           cookie,
@@ -517,6 +527,8 @@ async function main(): Promise<void> {
       const secondObs = ((await secondObsRes.json()) as ApiBody).observation as Observation;
       assert.equal(secondObs.class_id, created.middle.id);
       assert.equal(secondObs.observed_class?.name, '自检中班');
+      assert.equal(secondObs.class_context_snapshot?.source, 'enrollment_lookup');
+      assert.equal(secondObs.class_context_snapshot?.class_id, created.middle.id);
 
       assert.equal(
         (
