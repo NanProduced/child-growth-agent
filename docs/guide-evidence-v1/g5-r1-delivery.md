@@ -28,14 +28,14 @@
 
 | 文件 | 职责 |
 |---|---|
-| `scripts/check-guide-evidence-r1.ts` | G5-R1 专属离线反例（A–G，64 项）；含假事务客户端直接验证共享保存边界，不写数据库、不调用模型 |
+| `scripts/check-guide-evidence-r1.ts` | G5-R1 专属离线反例（A–G，68 项）；含假事务客户端直接验证共享保存边界，不写数据库、不调用模型 |
 | `docs/guide-evidence-v1/g5-r1-delivery.md` | 本记录 |
 
 未修改：G0 契约/冻结类型/契约 fixture/`check-guide-contract.ts`、G1 目录、G2 迁移与学期配置、G3/G4 组件与 fixture、正式页面、`scripts/check-guide-evidence-db.ts`、旧 `g5-delivery.md`；无新增依赖；未连接托管库、未调用真实模型。
 
 ## 2. 逐项 RED → GREEN
 
-RED 证据：`pnpm tsx scripts/check-guide-evidence-r1.ts` 在返修前输出 35 条失败（A–G 全覆盖）；修正测试装置后 34 条失败；修复后 64/64 通过。路由 C 反例在 `check-guide-evidence-routes.ts` 中先失败后通过。
+RED 证据：`pnpm tsx scripts/check-guide-evidence-r1.ts` 在返修前输出 35 条失败（A–G 全覆盖）；修正测试装置后 34 条失败；修复后 68/68 通过。路由 C 反例在 `check-guide-evidence-routes.ts` 中先失败后通过。
 
 ### A) 独立操作必须检查宿主观察已归档
 
@@ -101,7 +101,7 @@ RED 证据：`pnpm tsx scripts/check-guide-evidence-r1.ts` 在返修前输出 35
 | `pnpm build`（next build + tsup） | 通过（exit 0；本机默认 `bash` 为不可用 WSL，使用 Git Bash 执行同一 `scripts/build.sh`） |
 | G5 离线运行时 `check-guide-evidence-runtime.ts` | **140/140**（原 138 + 新增 2 条来源 Prompt 断言） |
 | G5 路由离线 `check-guide-evidence-routes.ts` | **26/26**（原 20 + 新增 6 条详情补查断言） |
-| **G5-R1 专属离线** `check-guide-evidence-r1.ts` | **64/64**（返修前 RED 35 条失败） |
+| **G5-R1 专属离线** `check-guide-evidence-r1.ts` | **68/68**（返修前 RED 35 条失败） |
 | G0 `check-guide-contract.ts` | 19/19 |
 | G1 `check-guide-catalog.ts` | 11/11 |
 | G3 `check-child-evidence-book-fixtures.ts` | 63/63 |
@@ -109,7 +109,7 @@ RED 证据：`pnpm tsx scripts/check-guide-evidence-r1.ts` 在返修前输出 35
 | 回归 agent-flow / organize-retry / growth-profile / activity-support / teacher-clarify / save-consistency / class-reports-pages | 30/30、9/9、13/13、19/19、13/13、24/24、11/11 |
 | 回归 homepage-map | 通过 |
 
-测试数量变化：运行时 138→140、路由 20→26、新增 64；无删除断言或放松规则。全部模型路径使用注入替身，`real_model_requests: 0`。
+测试数量变化：运行时 138→140、路由 20→26、新增 68；无删除断言或放松规则。全部模型路径使用注入替身，`real_model_requests: 0`。
 
 ## 4. 未执行项（NOT_RUN）
 
@@ -121,7 +121,7 @@ RED 证据：`pnpm tsx scripts/check-guide-evidence-r1.ts` 在返修前输出 35
 
 ## 5. 待 QA1 实库验证的业务反例清单
 
-A（宿主守门）：draft / needs_input / ai_organized 宿主分别独立 confirm、reject、withdraw（含依据指向另一条合法 confirmed 来源）→ 409 `state_conflict`，容器与 revision 不变；幂等重复同样 409；宿主 confirmed 后合法操作成功、完全重复 200 幂等且 revision 不增长。
+A（宿主守门）：draft / needs_input / ai_organized 宿主分别独立 confirm、reject、withdraw（含依据指向另一条合法 confirmed 来源）→ 409 `state_conflict`，容器与 revision 不变；幂等重复同样 409；宿主 confirmed 后合法操作成功、完全重复 200 幂等且 revision 不增长；未归档宿主上 `suggest` 仍可写入待核对建议且不产生正式状态。
 
 B（版本）：旧 `catalog_version` 关联 `link_id` 确认 → 409 `catalog_version_mismatch`；来源 `confirmed_at` 漂移 → 409 `basis_expired` 且整批不写入；空/非法版本独立确认 → 409；同事务归档宿主首次获得 `confirmed_at` → 成功并写新快照；明确换用另一已确认来源/新手动关联 → 成功；批量一条过期 → 全批回滚。
 

@@ -296,6 +296,7 @@ async function testHostGuard(): Promise<void> {
       code = errorCode(error);
     }
     check(code === "state_conflict", `宿主 ${status} 独立确认必须 409 state_conflict（实际 ${code}）`);
+    check(host.guide_evidence === null, `宿主 ${status} 被拒时不得写入容器`);
   }
 
   const aiLink = makeLink({
@@ -366,6 +367,10 @@ async function testHostGuard(): Promise<void> {
     idempotentCode = errorCode(error);
   }
   check(idempotentCode === "state_conflict", `幂等重复不得绕过宿主状态（实际 ${idempotentCode}）`);
+  check(
+    (hostWithIdentical.guide_evidence as ObservationGuideEvidence).revision === 1,
+    "宿主未归档被拒时不得增长 revision",
+  );
 
   // 宿主正常归档后的合法操作与重复幂等保持可用
   const confirmedHost = makeObs({ id: OBS_A });
