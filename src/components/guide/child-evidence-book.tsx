@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useState } from "react";
-import { ChevronDown, CircleAlert, PenLine } from "lucide-react";
+import { BookOpen, ChevronDown, CircleAlert, PenLine } from "lucide-react";
 
 import { classLabel, formatDateCn, formatDateTimeCn, parseIsoDateStrict } from "@/lib/format";
 import { CLASS_STAGE_LABELS } from "@/lib/types";
@@ -101,6 +101,20 @@ const ORIGIN_LABELS: Record<GuideEvidenceLinkOrigin, string> = {
   manual: "教师手动关联",
 };
 
+/** 保健参考展示分支：资料参考 / 来源查阅 / 教师核对关联，不套用行为表现确认文案（内部状态保留在 data 属性中用于审计） */
+const HEALTH_LINK_STATUS_LABELS: Record<GuideEvidenceLinkStatus, string> = {
+  ai_suggested: "AI 建议待核对",
+  confirmed_performance: "资料已核对",
+  confirmed_clue: "资料线索已核对",
+  rejected: "已不采用",
+  withdrawn: "已撤回",
+};
+
+const HEALTH_ORIGIN_LABELS: Record<GuideEvidenceLinkOrigin, string> = {
+  ai: "AI 建议关联",
+  manual: "教师核对关联",
+};
+
 const NOTICE_SEVERITY_LABELS = {
   info: "提示",
   warning: "需要留意",
@@ -121,6 +135,14 @@ const LINK_STATUS_CLASS: Record<GuideEvidenceLinkStatus, string> = {
   withdrawn: "link-withdrawn",
 };
 
+const HEALTH_LINK_STATUS_CLASS: Record<GuideEvidenceLinkStatus, string> = {
+  ai_suggested: "link-pending",
+  confirmed_performance: "link-reference",
+  confirmed_clue: "link-reference",
+  rejected: "link-rejected",
+  withdrawn: "link-withdrawn",
+};
+
 const AGE_BAND_OPTIONS: Array<{ value: GuideAgeBand | null; label: string }> = [
   { value: null, label: "全部" },
   { value: "3-4", label: GUIDE_AGE_BAND_LABELS["3-4"] },
@@ -129,7 +151,7 @@ const AGE_BAND_OPTIONS: Array<{ value: GuideAgeBand | null; label: string }> = [
 ];
 
 const RELIABILITY_NOTICE: Record<"partial" | "unavailable", string> = {
-  partial: "以下呈现只依据已核验的资料；另有部分资料未通过核对，未纳入本次呈现，可能还有未显示的相关证据。",
+  partial: "以下呈现只依据已核验的资料；另有部分资料未通过核对，未计入当前状态，可能还有未显示的相关证据。",
   unavailable: "该条目的相关记录暂时无法读取，不能按「暂无相关记录」理解，也不代表没有相关观察。",
 };
 
@@ -165,7 +187,7 @@ function supportLabel(support: GuideEvidenceSupportKind, evidenceType: GuideItem
 function itemRuleLine(item: GuidePerformanceItem): string {
   const age = GUIDE_AGE_BAND_LABELS[item.age_band];
   if (item.product_rules.evidence_type === "health_reference") {
-    return `资料参考：指南参考 ${age} · 保健参考；只作保育资料参考，不套用行为表现确认与成人帮助规则。`;
+    return `资料参考：指南参考 ${age} · 保育参考资料；仅作查阅与核对，不构成发展确认。`;
   }
   const type = EVIDENCE_TYPE_LABELS[item.product_rules.evidence_type];
   const help =
@@ -213,13 +235,22 @@ function BasisRow({ source }: { source: EvidenceBasisView }) {
 }
 
 function LinkBlock({ link, evidenceType }: { link: EvidenceLinkView; evidenceType: GuideItemEvidenceType }) {
+  const isReference = evidenceType === "health_reference";
   return (
-    <li className={cx("link-block")} data-testid="evidence-link" data-counts={link.counts_toward_status}>
+    <li
+      className={cx("link-block")}
+      data-testid="evidence-link"
+      data-counts={link.counts_toward_status}
+      data-link-status={link.status}
+      data-link-id={link.link_id}
+    >
       <div className={cx("link-head")}>
-        <span className={cx("link-status", LINK_STATUS_CLASS[link.status])}>
-          {GUIDE_EVIDENCE_LINK_STATUS_LABELS[link.status]}
+        <span
+          className={cx("link-status", isReference ? HEALTH_LINK_STATUS_CLASS[link.status] : LINK_STATUS_CLASS[link.status])}
+        >
+          {isReference ? HEALTH_LINK_STATUS_LABELS[link.status] : GUIDE_EVIDENCE_LINK_STATUS_LABELS[link.status]}
         </span>
-        <span className={cx("link-meta")}>{ORIGIN_LABELS[link.origin]}</span>
+        <span className={cx("link-meta")}>{isReference ? HEALTH_ORIGIN_LABELS[link.origin] : ORIGIN_LABELS[link.origin]}</span>
         {link.support ? (
           <span className={cx("link-meta")}>{supportLabel(link.support, evidenceType)}</span>
         ) : null}
@@ -276,6 +307,7 @@ function EvidenceItemRow({
 }) {
   const panelId = `evidence-panel-${item.item.id}`;
   const unreadable = item.reliability === "unavailable";
+  const isReference = item.item.product_rules.evidence_type === "health_reference";
   const countingObservationIds = new Set(
     item.links
       .filter((link) => link.counts_toward_status)
@@ -306,6 +338,11 @@ function EvidenceItemRow({
             <CircleAlert className={cx("unreadable-icon")} aria-hidden="true" />
             资料暂不可读
           </span>
+        ) : isReference ? (
+          <span className={cx("item-reference")} data-testid="item-reference">
+            <BookOpen className={cx("reference-icon")} aria-hidden="true" />
+            资料参考
+          </span>
         ) : (
           <span
             className={cx("item-status", STATUS_CLASS[item.status])}
@@ -315,16 +352,21 @@ function EvidenceItemRow({
           </span>
         )}
         <span className={cx("item-chip")}>指南参考 · {GUIDE_AGE_BAND_LABELS[item.item.age_band]}</span>
-        {item.item.product_rules.evidence_type === "health_reference" ? (
-          <span className={cx("item-chip")}>保健参考</span>
-        ) : null}
         {!unreadable ? (
           <span className={cx("item-meta")}>
-            {evidenceCount > 0
-              ? `相关证据 ${evidenceCount} 条${
-                  item.latest_observed_at ? ` · 最近 ${formatDateCn(item.latest_observed_at)}` : ""
-                }`
-              : "还没有计入状态的观察证据"}
+            {isReference
+              ? evidenceCount > 0
+                ? `收录 ${evidenceCount} 条参考资料${
+                    item.latest_observed_at ? ` · 最近 ${formatDateCn(item.latest_observed_at)}` : ""
+                  }`
+                : "暂无已核验的参考资料"
+              : evidenceCount > 0
+                ? `相关证据 ${evidenceCount} 条${
+                    item.latest_observed_at ? ` · 最近 ${formatDateCn(item.latest_observed_at)}` : ""
+                  }`
+                : item.reliability === "partial"
+                  ? "暂无计入状态的已核验依据"
+                  : "还没有计入状态的观察证据"}
           </span>
         ) : null}
         {pendingCount > 0 ? <span className={cx("item-pending")}>AI 待核对 {pendingCount} 条</span> : null}
@@ -349,8 +391,13 @@ function EvidenceItemRow({
         <div className={cx("item-panel")} id={panelId}>
           <p className={cx("item-rule")}>{itemRuleLine(item.item)}</p>
           {formalLinks.length > 0 ? (
-            <section className={cx("source-group")} aria-label="计入当前状态的依据">
-              <h4 className={cx("source-group-title")}>计入当前状态的依据</h4>
+            <section
+              className={cx("source-group")}
+              aria-label={isReference ? "可查阅的参考资料" : "计入当前状态的依据"}
+            >
+              <h4 className={cx("source-group-title")}>
+                {isReference ? "可查阅的参考资料" : "计入当前状态的依据"}
+              </h4>
               <ul className={cx("link-list")}>
                 {formalLinks.map((link) => (
                   <LinkBlock key={link.link_id} link={link} evidenceType={item.item.product_rules.evidence_type} />
@@ -372,7 +419,11 @@ function EvidenceItemRow({
             <p className={cx("source-empty")}>
               {unreadable
                 ? "相关记录暂时无法读取，无法核对这个条目是否有观察证据。"
-                : "还没有与该条目相关的观察记录。记录一次相关观察后，这里会出现可核对的事实片段。"}
+                : item.reliability === "partial"
+                  ? "当前没有可计入状态的已核验依据；这不代表没有相关观察，可能有资料尚未核对。"
+                  : isReference
+                    ? "还没有可查阅的参考资料；记录相关观察后，这里会出现可核对的资料片段。"
+                    : "还没有与该条目相关的观察记录。记录一次相关观察后，这里会出现可核对的事实片段。"}
             </p>
           ) : null}
           {onRecordObservation ? (
@@ -452,6 +503,8 @@ export function ChildEvidenceBook({
     book.scope.kind === "custom_range" &&
     draft.from === (book.scope.start_date ?? "") &&
     draft.to === (book.scope.end_date ?? "");
+  /* 生效范围是 custom_range 时编辑区始终可达；其余范围按草稿开关显示 */
+  const draftOpen = draft.open || book.scope.kind === "custom_range";
 
   function toggleItem(itemId: string) {
     setExpandedIds((previous) => {
@@ -467,7 +520,7 @@ export function ChildEvidenceBook({
       setDraft((previous) => ({ ...previous, open: true }));
       return;
     }
-    setDraft((previous) => ({ ...previous, open: false }));
+    /* 不关闭日期草稿：book.scope 仍是 custom_range 时（父级拒绝/请求失败），编辑区必须保持可达 */
     setRangeError(null);
     if (value === "all_history") {
       onScopeChange?.({ kind: "all_history" });
@@ -551,7 +604,7 @@ export function ChildEvidenceBook({
             <option value="custom_range">自定义日期…</option>
           </select>
           <p className={cx("control-hint")}>按观察发生日期筛选，含首尾两天；个人历史回看不排除任何学段。</p>
-          {draft.open ? (
+          {draftOpen ? (
             <div className={cx("custom-range")} data-testid="custom-range-draft" data-applied={draftApplied}>
               <p className={cx("draft-status")} data-testid="draft-status">
                 自定义日期{draftApplied ? "（已应用）" : "（尚未应用）"}

@@ -402,6 +402,25 @@
   height: 14px;
 }
 
+.item-reference {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 4px 10px;
+  color: var(--guide-blue);
+  background: var(--guide-blue-tint);
+  border: 1px solid var(--guide-blue-edge);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.reference-icon {
+  width: 14px;
+  height: 14px;
+}
+
 .item-chip {
   padding: 3px 8px;
   color: var(--guide-muted);
@@ -563,6 +582,12 @@
 }
 
 .link-clue {
+  color: var(--guide-blue);
+  background: var(--guide-blue-tint);
+  border-color: var(--guide-blue-edge);
+}
+
+.link-reference {
   color: var(--guide-blue);
   background: var(--guide-blue-tint);
   border-color: var(--guide-blue-edge);

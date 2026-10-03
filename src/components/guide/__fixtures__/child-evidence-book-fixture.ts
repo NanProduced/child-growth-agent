@@ -153,6 +153,15 @@ const LANGUAGE_DOMAIN = domain({
               text: "愿意在熟悉的人面前说话，能大方地与人打招呼（fixture 示意）。",
               product_rules: rules("behavior", "allowed"),
             }),
+            item({
+              id: "item.ui.language.2.4-5",
+              domain_id: "dom.ui.language",
+              sub_domain_id: "sub.ui.language.listen_speak",
+              goal_id: "goal.ui.language.2",
+              age_band: "4-5",
+              text: "能清楚地表达自己的想法和感受（fixture 示意）。",
+              product_rules: rules("behavior", "allowed"),
+            }),
           ],
         }),
       ],
@@ -166,34 +175,34 @@ const HEALTH_DOMAIN = domain({
   name: "健康",
   sub_domains: [
     subDomain({
-      id: "sub.ui.health.self_care",
+      id: "sub.ui.health.physique",
       domain_id: "dom.ui.health",
-      name: "生活习惯与生活能力",
+      name: "身心状况",
       goals: [
         goal({
           id: "goal.ui.health.1",
           domain_id: "dom.ui.health",
-          sub_domain_id: "sub.ui.health.self_care",
+          sub_domain_id: "sub.ui.health.physique",
           index: 1,
-          title: "具有良好的生活与卫生习惯（fixture 示意）",
+          title: "具有健康的体态（fixture 示意）",
           items: [
             item({
               id: "item.ui.health.1.3-4",
               domain_id: "dom.ui.health",
-              sub_domain_id: "sub.ui.health.self_care",
+              sub_domain_id: "sub.ui.health.physique",
               goal_id: "goal.ui.health.1",
               age_band: "3-4",
-              text: "在提醒下按时午睡、饭前便后洗手（fixture 示意）。",
+              text: "身高、体重的定期测量记录（fixture 示意，仅作保育资料参考）。",
               product_rules: rules("health_reference", "allowed"),
             }),
             item({
               id: "item.ui.health.1.4-5",
               domain_id: "dom.ui.health",
-              sub_domain_id: "sub.ui.health.self_care",
+              sub_domain_id: "sub.ui.health.physique",
               goal_id: "goal.ui.health.1",
               age_band: "4-5",
-              text: "能自己穿脱衣服、鞋袜、扣纽扣（fixture 示意）。",
-              product_rules: rules("behavior", "allowed"),
+              text: "体态发育的连续测量趋势（fixture 示意，仅作保育资料参考）。",
+              product_rules: rules("health_reference", "allowed"),
             }),
           ],
         }),
@@ -613,18 +622,16 @@ const RICH_LINKS: Record<string, EvidenceLinkView[]> = {
   ],
   "item.ui.health.1.3-4": [
     link({
-      id: "link.ui.health.1.3-4.performance",
+      id: "link.ui.health.1.3-4.record",
       itemId: "item.ui.health.1.3-4",
       status: "confirmed_performance",
       support: "single_event",
       origin: "manual",
-      adultHelpUsed: true,
-      teacherNote: "帮助方式：午睡前教师轻声提醒并示范。",
       basis: [
         basis({
           observationId: "obs.ui.health.1.3-4.a",
           observedAt: "2026-09-12",
-          quote: "午睡前，小雨听到提醒后自己脱好鞋子摆整齐，然后上床躺好。",
+          quote: "保健室测量记录：身高 102.5 厘米，体重 16.2 千克（2026 年 9 月）。",
           classContext: MIDDLE_CLASS,
         }),
       ],
@@ -735,7 +742,10 @@ const RICH_LINKS: Record<string, EvidenceLinkView[]> = {
   ],
 };
 
-const RICH_GOALS = buildGoals(UI_FIXTURE_CATALOG, RICH_LINKS);
+const RICH_GOALS = buildGoals(UI_FIXTURE_CATALOG, RICH_LINKS, {
+  /* partial + links=[]：没有可读关联时，只说明没有可计入的已核验依据 */
+  "item.ui.language.2.4-5": { reliability: "partial" },
+});
 
 export const CHILD_EVIDENCE_BOOK_FIXTURE: ChildEvidenceBook = {
   audience: "child_history",

@@ -65,17 +65,29 @@ ok(
   "跨期关联必须标记 basis_out_of_period 且不计入",
 );
 
-/* 3) 可靠性样本：unavailable 无可读依据；partial 含未通过核对的资料 */
+/* 3) 可靠性样本：unavailable 无可读依据；partial 覆盖“无可读关联”与“仅失效审计关联” */
 const unavailableItem = allItems(CHILD_EVIDENCE_BOOK_UNAVAILABLE_FIXTURE).find(
   (item) => item.reliability === "unavailable",
 );
 assert.ok(unavailableItem, "unavailable 样本必须存在");
 ok(unavailableItem.links.length === 0, "unavailable 样本不应伪造可读依据");
-const partialItem = allItems(CHILD_EVIDENCE_BOOK_FIXTURE).find((item) => item.reliability === "partial");
-assert.ok(partialItem, "partial 样本必须存在");
+const partialEmptyItem = allItems(CHILD_EVIDENCE_BOOK_FIXTURE).find(
+  (item) => item.reliability === "partial" && item.links.length === 0,
+);
+assert.ok(partialEmptyItem, "partial+links=[] 样本必须存在");
+ok(partialEmptyItem.status === "no_records", "partial 空样本不得给出正式确认状态");
 ok(
-  partialItem.links.some((link) => link.basis.some((basis) => !basis.valid)),
-  "partial 样本必须包含未通过核对的资料",
+  partialEmptyItem.first_observed_at === null && partialEmptyItem.latest_observed_at === null,
+  "partial 空样本不得产生正式证据日期",
+);
+const partialAuditItem = allItems(CHILD_EVIDENCE_BOOK_FIXTURE).find(
+  (item) => item.reliability === "partial" && item.links.length > 0,
+);
+assert.ok(partialAuditItem, "partial+仅失效审计关联样本必须存在");
+ok(partialAuditItem.links.every((link) => !link.counts_toward_status), "partial 审计样本不得有计入状态的关联");
+ok(
+  partialAuditItem.links.some((link) => link.basis.some((basis) => !basis.valid)),
+  "partial 审计样本必须保留失效依据用于审计",
 );
 
 /* 4) 同源多片段：片段内容不同，key 必须带序号才能唯一 */
@@ -103,12 +115,33 @@ ok(richQuotes.some((quote) => quote.includes(CHILD_EVIDENCE_BOOK_FIXTURE.child.n
 const largeQuotes = allLinks(CHILD_EVIDENCE_BOOK_LARGE_FIXTURE).flatMap((link) => link.basis.map((basis) => basis.quote));
 ok(largeQuotes.every((quote) => !quote.includes("小雨")), "大目录引文不得混入其他主角");
 
-/* 6) 保健参考产品规则 */
-const healthItem = allItems(CHILD_EVIDENCE_BOOK_FIXTURE).find(
+/* 6) 保健参考产品规则：真实身高/体重资料，不做正常/异常判断 */
+const healthItems = allItems(CHILD_EVIDENCE_BOOK_FIXTURE).filter(
   (item) => item.item.product_rules.evidence_type === "health_reference",
 );
-assert.ok(healthItem, "保健参考样本必须存在");
-ok(healthItem.item.product_rules.counts_in_behavior_stats === false, "保健参考不参与行为统计");
+ok(healthItems.length >= 2, "保健参考样本必须覆盖有资料与空资料两种");
+for (const healthItem of healthItems) {
+  ok(healthItem.item.product_rules.counts_in_behavior_stats === false, "保健参考不参与行为统计");
+  ok(
+    !/午睡|洗手/.test(healthItem.item.text),
+    "保健参考不得把生活环节当作参考资料",
+  );
+  ok(/身高|体重|测量|体态/.test(healthItem.item.text), "保健参考应使用身高/体重等测量资料示意");
+  const healthTexts = [
+    healthItem.item.text,
+    ...healthItem.links.flatMap((link) => link.basis.map((basis) => basis.quote)),
+  ];
+  ok(
+    healthTexts.every((text) => !/正常|异常|达标|偏高|偏低/.test(text)),
+    "保健参考资料不得包含正常/异常判断",
+  );
+}
+const healthLinkedItem = healthItems.find((item) => item.links.length > 0);
+assert.ok(healthLinkedItem, "保健参考必须有带资料的样本");
+ok(
+  healthLinkedItem.links.every((link) => link.status === "confirmed_performance"),
+  "保健参考内部关联状态保留用于审计",
+);
 
 /* 7) status_counts 与条目状态一致 */
 for (const book of [
