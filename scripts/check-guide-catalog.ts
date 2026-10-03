@@ -189,17 +189,47 @@ async function main(): Promise<void> {
     assert.ok(item.text.includes("参考标准"));
     assert.equal(item.product_rules.adult_help, "allowed");
   }
-  assert.equal(items.filter((item) => item.product_rules.evidence_type === "sustained").length, 22);
+  assert.equal(items.filter((item) => item.product_rules.evidence_type === "sustained").length, 27);
   assert.equal(
     items.filter((item) => item.product_rules.adult_help === "requires_independence").length,
-    18,
+    20,
   );
   const independenceItem = itemByText("1．能自己穿脱衣服、鞋袜、扣钮扣。");
   assert.equal(independenceItem.product_rules.adult_help, "requires_independence");
+  const autonomyItem = itemByText("3．自己的事情尽量自己做，不愿意依赖别人。");
+  assert.equal(autonomyItem.product_rules.adult_help, "requires_independence");
+  const selfDisciplineItem = itemByText("2．能自觉遵守基本的安全规则和交通规则。");
+  assert.equal(selfDisciplineItem.product_rules.adult_help, "requires_independence");
   const assistedItem = itemByText("2．在提醒下能自然坐直、站直。");
   assert.equal(assistedItem.product_rules.adult_help, "allowed");
   const sustainedItem = itemByText("1．经常保持愉快的情绪，不高兴时能较快缓解。");
   assert.equal(sustainedItem.product_rules.evidence_type, "sustained");
+  // R1 补审：频率 / 比率表述不能归为单次行为
+  for (const text of [
+    "1．情绪比较稳定，很少因一点小事哭闹不止。",
+    "2．换新环境时较少出现身体不适。",
+    "2．天气变化时较少感冒，能适应车、船等交通工具造成的轻微颠簸。",
+    "1．反复看自己喜欢的图书。",
+    "4．常喝白开水，不贪喝饮料。",
+  ]) {
+    assert.equal(itemByText(text).product_rules.evidence_type, "sustained", `频率条目必须 sustained：${text}`);
+  }
+  // R1 反例：单次意愿、情境行为与非持续性“坚持”不被机械升级
+  assert.equal(itemByText("2．喜欢参加体育活动。").product_rules.evidence_type, "behavior");
+  assert.equal(
+    itemByText("3．愿意把自己的情绪告诉亲近的人，一起分享快乐或求得安慰。").product_rules.evidence_type,
+    "behavior",
+  );
+  assert.equal(
+    itemByText("5．与别人的看法不同时，敢于坚持自己的意见并说出理由。").product_rules.evidence_type,
+    "behavior",
+  );
+  assert.equal(
+    itemByText("5．初步感知常用科技产品与自己生活的关系，知道科技产品有利也有弊。").product_rules.evidence_type,
+    "behavior",
+  );
+  assert.equal(itemByText("4．敢于尝试有一定难度的活动和任务。").product_rules.adult_help, "allowed");
+  assert.equal(itemByText("4．知道简单的求助方式。").product_rules.adult_help, "allowed");
   passed += 1;
 
   // 8) 教育建议：独立保存、按目标关联、完整覆盖 32 个目标
@@ -254,10 +284,70 @@ async function main(): Promise<void> {
   assert.deepEqual(await listEducationSuggestions("goal.moe.unknown.1"), []);
   passed += 1;
 
+  // 10) 防污染反例：返回值深拷贝，调用方加工不改变后续查询与目录真值
+  const targetGoal = sampleGoal;
+  const targetItemId = targetGoal.items[0].id;
+  const baselineText = targetGoal.items[0].text;
+  const baselineType = targetGoal.items[0].product_rules.evidence_type;
+  const baselineSection = targetGoal.items[0].source.section;
+
+  const firstList = await listGuideItems({ goal_id: targetGoal.id });
+  const firstItem = firstList[0];
+  assert.ok(firstItem);
+  firstItem.text = "调用方修改";
+  firstItem.product_rules.evidence_type = "health_reference";
+  firstItem.product_rules.adult_help = "requires_independence";
+  firstItem.source.section = "调用方修改";
+  firstList.length = 0;
+
+  const secondList = await listGuideItems({ goal_id: targetGoal.id });
+  assert.equal(secondList.length, targetGoal.items.length);
+  assert.equal(secondList[0].text, baselineText);
+  assert.equal(secondList[0].product_rules.evidence_type, baselineType);
+  assert.equal(secondList[0].source.section, baselineSection);
+
+  const firstDetail = await getGuideItem(targetItemId);
+  assert.ok(firstDetail);
+  firstDetail.item.text = "调用方修改";
+  firstDetail.goal.title = "调用方修改";
+  firstDetail.sub_domain.name = "调用方修改";
+  firstDetail.domain.name = "调用方修改";
+  firstDetail.education_suggestions.length = 0;
+
+  const secondDetail = await getGuideItem(targetItemId);
+  assert.ok(secondDetail);
+  assert.equal(secondDetail.item.text, baselineText);
+  assert.notEqual(secondDetail.goal.title, "调用方修改");
+  assert.notEqual(secondDetail.sub_domain.name, "调用方修改");
+  assert.notEqual(secondDetail.domain.name, "调用方修改");
+  assert.ok(secondDetail.education_suggestions.length > 0);
+
+  const firstSuggestions = await listEducationSuggestions(targetGoal.id);
+  const baselineSuggestion = firstSuggestions[0]?.text;
+  assert.ok(baselineSuggestion);
+  firstSuggestions[0].text = "调用方修改";
+  firstSuggestions.length = 0;
+  const secondSuggestions = await listEducationSuggestions(targetGoal.id);
+  assert.equal(secondSuggestions[0].text, baselineSuggestion);
+  assert.equal(secondSuggestions.length, suggestionsByGoal.get(targetGoal.id));
+  passed += 1;
+
+  // 11) 公开数据出口冻结：目录与教育建议深层不可变
+  assert.ok(Object.isFrozen(GUIDE_CATALOG));
+  assert.ok(Object.isFrozen(GUIDE_CATALOG.domains));
+  assert.ok(Object.isFrozen(GUIDE_CATALOG.domains[0]));
+  const frozenGoal = GUIDE_CATALOG.domains[0].sub_domains[0].goals[0];
+  assert.ok(Object.isFrozen(frozenGoal.items[0]));
+  assert.ok(Object.isFrozen(frozenGoal.items[0].product_rules));
+  assert.ok(Object.isFrozen(frozenGoal.items[0].source));
+  assert.ok(Object.isFrozen(GUIDE_EDUCATION_SUGGESTIONS));
+  assert.ok(Object.isFrozen(GUIDE_EDUCATION_SUGGESTIONS[0]));
+  passed += 1;
+
   console.log(
     JSON.stringify({
       passed,
-      total: 9,
+      total: 11,
       version: GUIDE_CATALOG_VERSION,
       domains: GUIDE_CATALOG.domains.length,
       sub_domains: subDomains.length,

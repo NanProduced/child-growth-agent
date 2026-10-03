@@ -398,7 +398,7 @@ export const LANGUAGE_DOMAIN: GuideDomain = {
               age_band: "4-5",
               text: "1．反复看自己喜欢的图书。",
               source: guideSource("语言领域 · 阅读与书写准备 · 目标1 · 4～5岁"),
-              product_rules: { evidence_type: "behavior", counts_in_behavior_stats: true, adult_help: "allowed" },
+              product_rules: { evidence_type: "sustained", counts_in_behavior_stats: true, adult_help: "allowed" },
             },
             {
               id: "item.moe.language.reading_writing.1.4-5.2",

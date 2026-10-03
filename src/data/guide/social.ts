@@ -310,7 +310,7 @@ export const SOCIAL_DOMAIN: GuideDomain = {
               age_band: "4-5",
               text: "3．自己的事情尽量自己做，不愿意依赖别人。",
               source: guideSource("社会领域 · 人际交往 · 目标3 · 4～5岁"),
-              product_rules: { evidence_type: "behavior", counts_in_behavior_stats: true, adult_help: "allowed" },
+              product_rules: { evidence_type: "behavior", counts_in_behavior_stats: true, adult_help: "requires_independence" },
             },
             {
               id: "item.moe.social.interpersonal.3.4-5.4",

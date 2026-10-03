@@ -70,9 +70,9 @@ function buildIndex(): CatalogIndex {
   return { allItems, detailsById, suggestionsByGoal, domainCodeByDomainId };
 }
 
-/** 目录条目查询：按领域 / 子领域 / 目标 / 年龄段筛选；缺省返回全部条目 */
+/** 目录条目查询：按领域 / 子领域 / 目标 / 年龄段筛选；缺省返回全部条目。返回深拷贝，调用方修改不影响目录真值 */
 export async function listGuideItems(filter: GuideItemFilter = {}): Promise<GuidePerformanceItem[]> {
-  return catalogIndex.allItems.filter((item) => {
+  const matched = catalogIndex.allItems.filter((item) => {
     if (filter.domain_code && catalogIndex.domainCodeByDomainId.get(item.domain_id) !== filter.domain_code) {
       return false;
     }
@@ -81,14 +81,17 @@ export async function listGuideItems(filter: GuideItemFilter = {}): Promise<Guid
     if (filter.age_band && item.age_band !== filter.age_band) return false;
     return true;
   });
+  return structuredClone(matched);
 }
 
-/** 条目详情：包含定位链与目标级教育建议；不存在返回 null */
+/** 条目详情：包含定位链与目标级教育建议；不存在返回 null。返回深拷贝，调用方修改不影响目录真值 */
 export async function getGuideItem(itemId: string): Promise<GuideItemDetail | null> {
-  return catalogIndex.detailsById.get(itemId) ?? null;
+  const detail = catalogIndex.detailsById.get(itemId);
+  return detail ? structuredClone(detail) : null;
 }
 
-/** 目标的教育建议：独立于儿童证据；未知目标返回空数组 */
+/** 目标的教育建议：独立于儿童证据；未知目标返回空数组。返回深拷贝，调用方修改不影响目录真值 */
 export async function listEducationSuggestions(goalId: string): Promise<GuideEducationSuggestion[]> {
-  return [...(catalogIndex.suggestionsByGoal.get(goalId) ?? [])];
+  const suggestions = catalogIndex.suggestionsByGoal.get(goalId);
+  return suggestions ? structuredClone(suggestions) : [];
 }

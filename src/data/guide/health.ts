@@ -100,7 +100,7 @@ export const HEALTH_DOMAIN: GuideDomain = {
               age_band: "3-4",
               text: "1．情绪比较稳定，很少因一点小事哭闹不止。",
               source: guideSource("健康领域 · 身心状况 · 目标2 · 3～4岁"),
-              product_rules: { evidence_type: "behavior", counts_in_behavior_stats: true, adult_help: "allowed" },
+              product_rules: { evidence_type: "sustained", counts_in_behavior_stats: true, adult_help: "allowed" },
             },
             {
               id: "item.moe.health.physical.2.3-4.2",
@@ -230,7 +230,7 @@ export const HEALTH_DOMAIN: GuideDomain = {
               age_band: "4-5",
               text: "2．换新环境时较少出现身体不适。",
               source: guideSource("健康领域 · 身心状况 · 目标3 · 4～5岁"),
-              product_rules: { evidence_type: "behavior", counts_in_behavior_stats: true, adult_help: "allowed" },
+              product_rules: { evidence_type: "sustained", counts_in_behavior_stats: true, adult_help: "allowed" },
             },
             {
               id: "item.moe.health.physical.3.4-5.3",
@@ -260,7 +260,7 @@ export const HEALTH_DOMAIN: GuideDomain = {
               age_band: "5-6",
               text: "2．天气变化时较少感冒，能适应车、船等交通工具造成的轻微颠簸。",
               source: guideSource("健康领域 · 身心状况 · 目标3 · 5～6岁"),
-              product_rules: { evidence_type: "behavior", counts_in_behavior_stats: true, adult_help: "allowed" },
+              product_rules: { evidence_type: "sustained", counts_in_behavior_stats: true, adult_help: "allowed" },
             },
             {
               id: "item.moe.health.physical.3.5-6.3",
@@ -826,7 +826,7 @@ export const HEALTH_DOMAIN: GuideDomain = {
               age_band: "4-5",
               text: "4．常喝白开水，不贪喝饮料。",
               source: guideSource("健康领域 · 生活习惯与生活能力 · 目标1 · 4～5岁"),
-              product_rules: { evidence_type: "behavior", counts_in_behavior_stats: true, adult_help: "allowed" },
+              product_rules: { evidence_type: "sustained", counts_in_behavior_stats: true, adult_help: "allowed" },
             },
             {
               id: "item.moe.health.daily_living.1.4-5.5",
@@ -1086,7 +1086,7 @@ export const HEALTH_DOMAIN: GuideDomain = {
               age_band: "5-6",
               text: "2．能自觉遵守基本的安全规则和交通规则。",
               source: guideSource("健康领域 · 生活习惯与生活能力 · 目标3 · 5～6岁"),
-              product_rules: { evidence_type: "sustained", counts_in_behavior_stats: true, adult_help: "allowed" },
+              product_rules: { evidence_type: "sustained", counts_in_behavior_stats: true, adult_help: "requires_independence" },
             },
             {
               id: "item.moe.health.daily_living.3.5-6.3",
