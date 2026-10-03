@@ -10,13 +10,14 @@
  *   复制创建；若目标已存在则拒绝运行，绝不覆盖；结束时只删除本次创建的文件与空目录。
  * - playwright-core 解析：环境变量 G3_PLAYWRIGHT_CORE → 项目 node_modules → 临时目录自动安装。
  * - 浏览器解析：环境变量 G3_CHROME → 常见 Chrome/Edge 路径 → playwright channel: chrome。
- * - 端口：环境变量 G3_PORT，默认 3100。
+ * - 端口：环境变量 G3_PORT，默认 3210；启动前检测占用，被占用时立即报错（不误杀他人进程）。
  * 不写数据库、不调用模型、不 push、不部署；不保留生产可访问的 mock 路由。
  */
 
 "use strict";
 
 const fs = require("node:fs");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
@@ -25,7 +26,7 @@ const ROOT = path.resolve(__dirname, "..");
 const TEMPLATE = path.join(ROOT, "scripts", "__fixtures__", "guide-preview-page.tsx");
 const ROUTE_DIR = path.join(ROOT, "src", "app", "guide-preview");
 const ROUTE_FILE = path.join(ROUTE_DIR, "page.tsx");
-const PORT = Number(process.env.G3_PORT || 3100);
+const PORT = Number(process.env.G3_PORT || 3210);
 const BASE = `http://127.0.0.1:${PORT}/guide-preview`;
 const EVIDENCE = process.argv[2] || path.join(os.tmpdir(), "g3-evidence");
 const SERVER_LOG = path.join(os.tmpdir(), "g3-preview-server.log");
@@ -109,6 +110,20 @@ function cleanupRoute() {
       }
     }
   }
+}
+
+async function isPortInUse() {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port: PORT });
+    const done = (value) => {
+      socket.destroy();
+      resolve(value);
+    };
+    socket.setTimeout(1000);
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+    socket.once("timeout", () => done(false));
+  });
 }
 
 async function waitForServer(timeoutMs) {
@@ -368,7 +383,21 @@ async function runChecks(browser, evidenceDir) {
   await pendingItem.locator("[data-testid=item-disclosure]").click();
   check("AI 待核对理由展示", (await pendingItem.innerText()).includes("AI 建议理由："), "");
 
-  /* 领域与年龄段筛选 */
+  /* 筛选内容断言：每次筛选都从完整 fixture 计算展示子集 */
+  const goalCount = () => page.locator('h3[id^="goal-"]').count();
+  const itemCount = () => page.locator(`${BOOK} [data-testid=evidence-item]`).count();
+
+  check(
+    "预览免责声明（非 G5 读模型/期间统计）",
+    (await page.locator("[data-testid=preview-disclaimer]").innerText()).includes("不代表 G5 读模型或真实期间统计"),
+    "",
+  );
+  check(
+    "初始完整目标与条目",
+    (await goalCount()) === 6 && (await itemCount()) === 12,
+    `${await goalCount()}/${await itemCount()}`,
+  );
+
   await page.locator('[data-domain="language"]').click();
   const languageIds = await page.$$eval(`${BOOK} [data-testid=evidence-item]`, (els) =>
     els.map((el) => el.dataset.itemId),
@@ -378,6 +407,7 @@ async function runChecks(browser, evidenceDir) {
     languageIds.length === 4 && languageIds.every((id) => id.startsWith("item.ui.language")),
     languageIds.join(","),
   );
+  check("领域筛选目标数", (await goalCount()) === 2, String(await goalCount()));
   const filterEvent = await lastEvent(page, "filters");
   check("领域筛选回调 domain_code=language", filterEvent && filterEvent.payload.domain_code === "language", JSON.stringify(filterEvent));
   check(
@@ -386,32 +416,54 @@ async function runChecks(browser, evidenceDir) {
     await page.locator('h3[id^="goal-"]').first().innerText(),
   );
 
+  await page.locator('[data-domain="all"]').click();
+  await page.waitForTimeout(50);
+  check(
+    "领域切回全部恢复全部目标与条目",
+    (await goalCount()) === 6 && (await itemCount()) === 12,
+    `${await goalCount()}/${await itemCount()}`,
+  );
+
   await page.locator('[data-age-band="4-5"]').click();
   const ageIds = await page.$$eval(`${BOOK} [data-testid=evidence-item]`, (els) => els.map((el) => el.dataset.itemId));
   check(
     "参考年龄段筛选生效",
-    ageIds.length === 2 &&
-      ageIds.includes("item.ui.language.1.4-5") &&
-      ageIds.includes("item.ui.language.2.4-5"),
+    ageIds.length === 6 && ageIds.every((id) => id.endsWith(".4-5")),
     ageIds.join(","),
   );
-
-  await page.locator('[data-domain="all"]').click();
   await page.locator('[data-age-band="all"]').click();
   await page.waitForTimeout(50);
+  check("年龄切回全部恢复全部条目", (await itemCount()) === 12, String(await itemCount()));
   check(
     "全部领域模式显示领域/子领域定位",
     (await page.locator('h3[id^="goal-"]').first().innerText()).includes("语言 · 倾听与表达"),
     await page.locator('h3[id^="goal-"]').first().innerText(),
   );
 
-  /* goal_id：范围说明、解除入口、切“全部”清空 */
+  /* goal_id：范围说明、内容恢复、解除入口、切“全部”清空 */
   await page.locator("[data-testid=inject-goal]").click();
   await page.waitForSelector("[data-testid=goal-scope-banner]");
   const bannerText = await page.locator("[data-testid=goal-scope-banner]").innerText();
   check("限定目标显示范围说明", bannerText.includes("愿意讲话并能清楚地表达"), bannerText);
-  check("限定目标只显示该目标", (await page.locator('h3[id^="goal-"]').count()) === 1, "");
+  check(
+    "限定目标只显示该目标",
+    (await goalCount()) === 1 && (await itemCount()) === 2,
+    `${await goalCount()}/${await itemCount()}`,
+  );
 
+  await page.locator("[data-testid=goal-scope-release]").click();
+  const releaseEvent = await lastEvent(page, "filters");
+  check("解除入口发出 goal_id=null", releaseEvent && releaseEvent.payload.goal_id === null, JSON.stringify(releaseEvent));
+  await page.waitForTimeout(50);
+  check("解除后不再限定目标", (await page.locator("[data-testid=goal-scope-banner]").count()) === 0, "");
+  check(
+    "解除目标后恢复完整目标与条目",
+    (await goalCount()) === 6 && (await itemCount()) === 12,
+    `${await goalCount()}/${await itemCount()}`,
+  );
+
+  await page.locator("[data-testid=inject-goal]").click();
+  await page.waitForSelector("[data-testid=goal-scope-banner]");
   await page.locator('[data-domain="all"]').click();
   const clearEvent = await lastEvent(page, "filters");
   check(
@@ -421,14 +473,55 @@ async function runChecks(browser, evidenceDir) {
   );
   await page.waitForTimeout(50);
   check("清空后解除目标范围", (await page.locator("[data-testid=goal-scope-banner]").count()) === 0, "");
+  check(
+    "清空后恢复完整目标与条目",
+    (await goalCount()) === 6 && (await itemCount()) === 12,
+    `${await goalCount()}/${await itemCount()}`,
+  );
 
+  /* 组合筛选逐项解除 */
+  await page.locator('[data-domain="language"]').click();
+  await page.locator('[data-age-band="4-5"]').click();
+  await page.waitForTimeout(50);
+  check(
+    "组合筛选（领域+年龄）",
+    (await goalCount()) === 2 && (await itemCount()) === 2,
+    `${await goalCount()}/${await itemCount()}`,
+  );
   await page.locator("[data-testid=inject-goal]").click();
   await page.waitForSelector("[data-testid=goal-scope-banner]");
+  check(
+    "组合筛选（+目标）",
+    (await goalCount()) === 1 && (await itemCount()) === 1,
+    `${await goalCount()}/${await itemCount()}`,
+  );
   await page.locator("[data-testid=goal-scope-release]").click();
-  const releaseEvent = await lastEvent(page, "filters");
-  check("解除入口发出 goal_id=null", releaseEvent && releaseEvent.payload.goal_id === null, JSON.stringify(releaseEvent));
   await page.waitForTimeout(50);
-  check("解除后不再限定目标", (await page.locator("[data-testid=goal-scope-banner]").count()) === 0, "");
+  check(
+    "解除目标后保留领域与年龄",
+    (await goalCount()) === 2 && (await itemCount()) === 2,
+    `${await goalCount()}/${await itemCount()}`,
+  );
+  await page.locator('[data-domain="all"]').click();
+  await page.waitForTimeout(50);
+  check(
+    "解除领域后保留年龄筛选",
+    (await goalCount()) === 6 && (await itemCount()) === 6,
+    `${await goalCount()}/${await itemCount()}`,
+  );
+  await page.locator('[data-age-band="all"]').click();
+  await page.waitForTimeout(50);
+  check(
+    "解除年龄后恢复完整 fixture",
+    (await goalCount()) === 6 && (await itemCount()) === 12,
+    `${await goalCount()}/${await itemCount()}`,
+  );
+  const baseProbe = await page.evaluate(() => window.__g3baseProbe?.());
+  check(
+    "原 fixture 未被修改",
+    baseProbe && baseProbe.goals === 6 && baseProbe.items === 12,
+    JSON.stringify(baseProbe),
+  );
 
   /* 受控期间：草稿、未应用、父级拒绝、外部切换 */
   const select = page.locator("[data-testid=scope-select]");
@@ -659,6 +752,10 @@ async function runChecks(browser, evidenceDir) {
     const playwrightCorePath = resolvePlaywrightCore();
     const { chromium } = require(playwrightCorePath);
     const chromePath = resolveChrome();
+
+    if (await isPortInUse()) {
+      throw new Error(`端口 ${PORT} 已被其他进程占用；请释放端口或设置 G3_PORT 后重跑（不会误杀占用进程）。`);
+    }
 
     logFd = fs.openSync(SERVER_LOG, "w");
     server = spawn(

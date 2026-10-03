@@ -1,5 +1,5 @@
 ---
-version: 3
+version: 4
 slug: "src-components-guide-child-evidence-book-tsx"
 primary_target: "src/components/guide/child-evidence-book.tsx"
 related_targets: ["src/components/guide/child-evidence-book.module.css","src/components/guide/__fixtures__/child-evidence-book-fixture.ts","scripts/check-child-evidence-book-fixtures.ts","scripts/check-child-evidence-book-browser.cjs","scripts/__fixtures__/guide-preview-page.tsx"]
@@ -59,12 +59,14 @@ interface ChildEvidenceBookProps {
 node scripts/check-child-evidence-book-browser.cjs <证据输出目录>
 ```
 - 装置：`scripts/check-child-evidence-book-browser.cjs`（runner）+ `scripts/__fixtures__/guide-preview-page.tsx`（预览模板，非路由）。
-- 流程：把模板复制为临时 `src/app/guide-preview/page.tsx`（已存在则拒绝、绝不覆盖）→ 启动 `next dev`（默认端口 3100，可用 `G3_PORT` 覆盖）→ 运行 114 项断言 → `taskkill` 结束服务 → 只删除本次创建的临时路由与空目录，并移除 `.next` 中引用 `guide-preview` 的生成类型，保证验收后 `pnpm ts-check` 可直接复跑。
+- 流程：把模板复制为临时 `src/app/guide-preview/page.tsx`（已存在则拒绝、绝不覆盖）→ 启动 `next dev`（默认端口 3210，可用 `G3_PORT` 覆盖；启动前检测端口占用并立即报错，不误杀他人进程）→ 运行 127 项断言 → `taskkill` 结束服务 → 只删除本次创建的临时路由与空目录，并移除 `.next` 中引用 `guide-preview` 的生成类型，保证验收后 `pnpm ts-check` 可直接复跑。
 - 依赖解析：playwright-core 依次取 `G3_PLAYWRIGHT_CORE` → 项目 node_modules → 临时目录 `pnpm add playwright-core --prefer-offline`；浏览器依次取 `G3_CHROME` → 常见 Chrome/Edge 路径 → `channel: chrome`。
+- 预览逻辑：每次筛选都从完整初始 fixture 重新计算展示子集（`buildFixtureView`），不在已缩小的 `book.goals` 上继续过滤、不修改原 fixture；清除目标/领域/年龄后恢复对应全部内容，保留其他生效筛选与当前期间。预览页有常驻免责声明：“不代表 G5 读模型或真实期间统计；期间选择不会重算证据”，并由断言固定。
 - 不保留生产可访问 mock 路由；不写数据库、不调用模型。
 
 ## Finish evidence（fixture 组件验收，非业务闭环）
-- R2 复测：浏览器 **114/114** 通过；离线 fixture 检查 **63/63** 通过。截图与 results.json：`C:\Users\nanpr\AppData\Local\Temp\opencode\g3-evidence-r2\`（rich 三断点、rich-1440-expanded、unavailable-1440、large-1440、rich-390-longtext）。
-- 新增反例断言：保健参考收起/展开均无表现确认徽章与达成式反馈（含具体分组“可查阅的参考资料”、标签“资料已核对/教师核对关联/单次资料”、`data-status` 审计保留）；partial+links=[] 不断言“没有记录”、提示改“未计入当前状态”；partial 仅失效关联仍在审计区；custom→all_history / custom→semester 被拒后编辑区仍可达且日期可编辑、成功切换与外部恢复范围一致；非法日期不发回调；同源多片段全部显示且无重复 key 警告。
+- QA1 复测：浏览器 **127/127** 通过；离线 fixture 检查 **63/63** 通过。截图与 results.json：`C:\Users\nanpr\AppData\Local\Temp\opencode\g3-evidence-qa1\`（rich 三断点、rich-1440-expanded、unavailable-1440、large-1440、rich-390-longtext）。主组件自 R2 起冻结，QA1 只改验收装置。
+- QA1 新增内容断言（不只回调/控件/横幅）：完整 6 目标/12 条目基线；领域语言 2 目标/4 条目 → 切回全部恢复 6/12；年龄 4～5 共 6 条 → 切回全部恢复 12；目标限定 1 目标/2 条目 → 解除恢复 6/12；组合筛选（领域+年龄+目标）逐项解除后按 2/2 → 6/6 → 6/12 恢复；只读探针确认原 fixture 未被修改（6/12）；免责声明常驻。临时路由、服务与 `.next` 生成类型全部清理（验收后 `pnpm ts-check` 直接通过）。
+- R2 反例断言保留：保健参考收起/展开均无表现确认徽章与达成式反馈（含具体分组“可查阅的参考资料”、标签“资料已核对/教师核对关联/单次资料”、`data-status` 审计保留）；partial+links=[] 不断言“没有记录”、提示改“未计入当前状态”；partial 仅失效关联仍在审计区；custom→all_history / custom→semester 被拒后编辑区仍可达且日期可编辑、成功切换与外部恢复范围一致；非法日期不发回调；同源多片段全部显示且无重复 key 警告。
 - Impeccable detector（primary/advisory 分开）：**primary 0 anti-patterns**；advisory 21 条（组件样式 18 条为非首页设计值未写入 DESIGN.md 的已知项，预览模板 3 条为验收装置内联色）——均不属反模式，不为消除 advisory 改动既有画风。
 - NOT_RUN（未执行，不得当作通过）：G5 读模型与 API 未接入（无真实 DTO 数据链路）；真实 StepFun/Coze 调用与实库迁移/写入；正式详情页集成与正式路由历史返回（组件无内部路由状态，返回等价于外部 scope 变更，已用外部切换覆盖）；正式业务全链路验收。浏览器验收仅为 fixture 组件验收。
