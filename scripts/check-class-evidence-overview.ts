@@ -1,6 +1,7 @@
 import {
   CLASS_FIXTURE_HISTORY_SCOPE,
   CLASS_FIXTURE_SEMESTER_SCOPE,
+  CLASS_REFERENCE_FIXTURE_OVERRIDES,
   ITEM_UI_HEALTH_POSTURE_45,
   ITEM_UI_LANGUAGE_SPEAK_34,
   ITEM_UI_SCIENCE_EXPLORE_56,
@@ -136,7 +137,72 @@ check(
   mixed?.children.some((child) => child.reliability === "unavailable") === true &&
     mixed?.children.some((child) => child.reliability === "partial") === true,
 );
+check(
+  "混合条目：partial+no_records 与 partial+已核验表现共存",
+  mixed?.children.some((child) => child.reliability === "partial" && child.status === "no_records") === true &&
+    mixed?.children.some((child) => child.reliability === "partial" && child.status !== "no_records") === true,
+);
 check("混合条目：占比 null（下限）", mixed?.confirmed_ratio === null, String(mixed?.confirmed_ratio));
+
+const healthReference = findItem(main, ITEM_UI_HEALTH_POSTURE_45);
+check(
+  "保健参考主场景含待核对建议且不计入状态",
+  healthReference?.children.some(
+    (child) => child.pending_suggestion_count === 1 && child.status === "no_records",
+  ) === true,
+);
+
+const REFERENCE_SCENARIOS: Array<[
+  keyof typeof CLASS_REFERENCE_FIXTURE_OVERRIDES,
+  (item: ClassGuideItemView) => boolean,
+  string,
+]> = [
+  [
+    "unavailable",
+    (item) =>
+      item.reliability === "unavailable" &&
+      item.confirmed_ratio === null &&
+      item.children.every((child) => child.reliability === "unavailable"),
+    "参考不可读：条目/幼儿 unavailable 且占比 null",
+  ],
+  [
+    "partial",
+    (item) =>
+      item.reliability === "partial" &&
+      item.confirmed_ratio === null &&
+      item.children.some((child) => child.reliability === "partial") &&
+      item.children.some((child) => child.reliability === "unavailable"),
+    "参考 partial：含核验受限与不可读取幼儿且占比 null",
+  ],
+  [
+    "pending",
+    (item) =>
+      item.reliability === "reliable" &&
+      item.confirmed_ratio === null &&
+      item.counts.confirmed_observed === 0 &&
+      item.children.some((child) => child.pending_suggestion_count === 1 && child.status === "no_records"),
+    "参考待核对：仅待核对建议且不计入状态",
+  ],
+];
+
+for (const [key, predicate, name] of REFERENCE_SCENARIOS) {
+  const overview = buildClassEvidenceOverview({
+    domain_code: "health",
+    age_band: "4-5",
+    distributions: CLASS_REFERENCE_FIXTURE_OVERRIDES[key],
+  });
+  const item = findItem(overview, ITEM_UI_HEALTH_POSTURE_45);
+  check(name, Boolean(item) && predicate(item!), JSON.stringify(item && { reliability: item.reliability, counts: item.counts, ratio: item.confirmed_ratio }));
+  const items = overview.goals.flatMap((group) => group.items);
+  check(
+    `${key}: 覆盖场景分母与三类之和一致`,
+    items.every(
+      (entry) =>
+        entry.total === overview.roster.child_count &&
+        entry.counts.confirmed_observed + entry.counts.has_clues + entry.counts.no_records === entry.total,
+    ),
+  );
+}
 
 const science = findItem(main, ITEM_UI_SCIENCE_EXPLORE_56);
 check(

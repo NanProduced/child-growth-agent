@@ -192,11 +192,10 @@ function ItemDistribution({ item }: { item: ClassGuideItemView }) {
       </div>
     );
   }
-  const lowerBound = item.reliability === "partial";
   const total = item.counts.confirmed_observed + item.counts.has_clues + item.counts.no_records;
   return (
-    <div className={cx("dist")} data-testid="item-distribution" data-lower-bound={lowerBound}>
-      <div className={cx("bar", lowerBound && "bar-lower")} aria-hidden="true">
+    <div className={cx("dist")} data-testid="item-distribution">
+      <div className={cx("bar")} aria-hidden="true">
         {STATUS_ORDER.map((status) => {
           const count = item.counts[status];
           if (count <= 0) return null;
@@ -219,24 +218,63 @@ function ItemDistribution({ item }: { item: ClassGuideItemView }) {
           </li>
         ))}
       </ul>
-      {lowerBound ? <p className={cx("dist-lower")}>部分记录未通过核对，以上人数为可核验下限。</p> : null}
     </div>
   );
 }
 
+/** partial：不画完整三类分布，只展示可核验依据摘要与核验限制 */
+function PartialVerifiedSummary({ item }: { item: ClassGuideItemView }) {
+  return (
+    <div className={cx("dist-verified")} data-testid="partial-verified-summary">
+      <p className={cx("verified-total")}>
+        在班名单 <strong className={cx("legend-count")}>{item.total}</strong> 人
+      </p>
+      <ul className={cx("verified-list")}>
+        <li className={cx("legend-item")} data-status="confirmed_observed">
+          <span className={cx("legend-dot", STATUS_CLASS.confirmed_observed)} aria-hidden="true" />
+          已确认观察到 <strong className={cx("legend-count")}>{item.counts.confirmed_observed}</strong> 人
+        </li>
+        <li className={cx("legend-item")} data-status="has_clues">
+          <span className={cx("legend-dot", STATUS_CLASS.has_clues)} aria-hidden="true" />
+          已有相关线索 <strong className={cx("legend-count")}>{item.counts.has_clues}</strong> 人
+        </li>
+      </ul>
+      <p className={cx("verified-note")}>
+        以上为服务端提供的可确认下限；其余幼儿是否暂无相关记录，因部分记录未通过核对或无法读取，暂无法确认。
+      </p>
+    </div>
+  );
+}
+
+function referenceReliabilityNote(reliability: EvidenceReliability): string | null {
+  if (reliability === "unavailable") {
+    return "该条目的相关资料暂时无法读取，不能按「暂无相关资料」理解；仍保留当前名单与个人证据入口。";
+  }
+  if (reliability === "partial") {
+    return "部分资料未通过核对或无法读取，以下只反映已读取并核对的资料范围。";
+  }
+  return null;
+}
+
 function ItemStats({ item, scope }: { item: ClassGuideItemView; scope: EvidenceScope }) {
   if (isReferenceItem(item)) {
+    const caveat = referenceReliabilityNote(item.reliability);
     return (
-      <div className={cx("dist-reference")} data-testid="reference-note">
+      <div className={cx("dist-reference")} data-testid="reference-note" data-reliability={item.reliability}>
         <strong>{EVIDENCE_TYPE_LABELS[item.item.product_rules.evidence_type]}</strong>
         <span>{referenceNote(item.item)}</span>
+        {caveat ? (
+          <span className={cx("reference-caveat")} data-testid="reference-caveat">
+            {caveat}
+          </span>
+        ) : null}
       </div>
     );
   }
   const ratio = ratioState(item, scope);
   return (
     <>
-      <ItemDistribution item={item} />
+      {item.reliability === "partial" ? <PartialVerifiedSummary item={item} /> : <ItemDistribution item={item} />}
       <p className={cx("ratio")} data-testid="item-ratio" data-available={ratio.available}>
         {ratio.text}
       </p>
@@ -244,7 +282,7 @@ function ItemStats({ item, scope }: { item: ClassGuideItemView; scope: EvidenceS
   );
 }
 
-type ChildRowVariant = "status" | "restricted" | "reference";
+type ChildRowVariant = "status" | "restricted" | "reference" | "pending";
 
 function ChildRow({
   entry,
@@ -299,9 +337,16 @@ function ChildRow({
             有相关观察记录
           </span>
         ) : null}
+        {variant === "pending" ? (
+          <span className={cx("child-pending-chip")} data-testid="child-pending-chip">
+            AI 关联待核对
+          </span>
+        ) : null}
       </div>
       <p className={cx("child-meta")}>
-        {variant === "reference" ? (
+        {variant === "pending" ? (
+          <span>待核对建议 {entry.pending_suggestion_count} 条 · 尚未成为已核验资料（不计入人数）</span>
+        ) : variant === "reference" ? (
           entry.confirmed_link_count > 0 ? (
             <span>相关记录 {entry.confirmed_link_count} 条</span>
           ) : (
@@ -406,7 +451,12 @@ function ItemRow({
   const panelId = `class-evidence-panel-${item.item.id}`;
   const pendingCount = item.children.reduce((sum, entry) => sum + entry.pending_suggestion_count, 0);
   const reference = isReferenceItem(item);
-  const relatedChildren = item.children.filter((entry) => entry.status !== "no_records");
+  const referenceRelated = item.children.filter(
+    (entry) => entry.status !== "no_records" && !isRestrictedChild(entry),
+  );
+  const referencePending = item.children.filter(
+    (entry) => entry.pending_suggestion_count > 0 && entry.status === "no_records" && !isRestrictedChild(entry),
+  );
   const normalGroups = STATUS_ORDER.map((status) => ({
     status,
     entries: item.children.filter((entry) => !isRestrictedChild(entry) && entry.status === status),
@@ -470,11 +520,6 @@ function ItemRow({
       <div className={cx("item-body")}>
         <div className={cx("item-text-block")}>
           <p className={cx("item-text")}>{item.item.text}</p>
-          {item.reliability === "partial" && !reference ? (
-            <p className={cx("reliability-note")} data-reliability={item.reliability}>
-              部分相关记录未通过核对或无法读取，当前人数是可确认的下限。
-            </p>
-          ) : null}
         </div>
         <div className={cx("item-stats")}>
           <ItemStats item={item} scope={scope} />
@@ -484,29 +529,99 @@ function ItemRow({
       {expanded ? (
         <div className={cx("panel")} id={panelId}>
           {reference ? (
-            <>
-              <p className={cx("panel-hint")}>
-                以下为有相关观察记录的幼儿，只作查阅入口；本条目不参与行为统计，也不判定发展状态。
-              </p>
-              {relatedChildren.length > 0 ? (
+            item.reliability === "unavailable" ? (
+              <>
+                <p className={cx("panel-warning")} data-testid="reference-unavailable">
+                  该条目的相关资料整体暂时无法读取，不能按「暂无相关资料」理解。以下保留当前名单与个人证据入口。
+                </p>
                 <section
-                  className={cx("reference-records")}
-                  data-testid="reference-records"
-                  aria-label="有相关观察记录的幼儿"
+                  className={cx("restricted-group")}
+                  data-testid="restricted-group"
+                  data-group="restricted"
+                  aria-label="相关资料暂不可读取的幼儿"
                 >
                   <h4 className={cx("status-group-title")}>
-                    有相关观察记录的幼儿
-                    <span className={cx("status-group-count")}>{relatedChildren.length} 人</span>
+                    <span className={cx("restricted-dot")} aria-hidden="true" />
+                    相关资料暂不可读取
+                    <span className={cx("status-group-count")}>{item.children.length} 人</span>
                   </h4>
                   <p className={cx("panel-hint")}>
-                    进入个人证据册可核对来源、观察日期与发生班级；此处不代表能力评价。
+                    以下幼儿的资料整体不可读取，不能按「暂无相关资料」理解；可进入个人证据查看可读取范围。
                   </p>
-                  <ul className={cx("child-list")}>{relatedChildren.map((entry) => renderChild(entry, "reference"))}</ul>
+                  <ul className={cx("child-list")}>{item.children.map((entry) => renderChild(entry, "restricted"))}</ul>
                 </section>
-              ) : (
-                <p className={cx("panel-empty")}>当前还没有可供查阅的相关观察记录。</p>
-              )}
-            </>
+              </>
+            ) : (
+              <>
+                <p className={cx("panel-hint")}>
+                  以下只描述已读取并核对过的资料范围，不代表不存在其他资料；本条目不参与行为统计，也不判定发展状态。
+                </p>
+                {referenceRelated.length > 0 ? (
+                  <section
+                    className={cx("reference-records")}
+                    data-testid="reference-records"
+                    aria-label="已核验的相关观察记录"
+                  >
+                    <h4 className={cx("status-group-title")}>
+                      已核验的相关观察记录
+                      <span className={cx("status-group-count")}>{referenceRelated.length} 人</span>
+                    </h4>
+                    <p className={cx("panel-hint")}>
+                      进入个人证据册可核对来源、观察日期与发生班级；此处不代表能力评价。
+                    </p>
+                    <ul className={cx("child-list")}>
+                      {referenceRelated.map((entry) => renderChild(entry, "reference"))}
+                    </ul>
+                  </section>
+                ) : null}
+                {restrictedEntries.length > 0 ? (
+                  <section
+                    className={cx("restricted-group")}
+                    data-testid="restricted-group"
+                    data-group="restricted"
+                    aria-label="核验受限的幼儿"
+                  >
+                    <h4 className={cx("status-group-title")}>
+                      <span className={cx("restricted-dot")} aria-hidden="true" />
+                      核验受限，未计入已核验资料
+                      <span className={cx("status-group-count")}>{restrictedEntries.length} 人</span>
+                    </h4>
+                    <p className={cx("panel-hint")}>
+                      以下幼儿的记录不可读取或核验受限，可能有未纳入的资料；不按「暂无相关资料」理解。
+                    </p>
+                    <ul className={cx("child-list")}>
+                      {restrictedEntries.map((entry) => renderChild(entry, "restricted"))}
+                    </ul>
+                  </section>
+                ) : null}
+                {referencePending.length > 0 ? (
+                  <section
+                    className={cx("pending-group")}
+                    data-testid="reference-pending"
+                    aria-label="AI 关联待核对建议"
+                  >
+                    <h4 className={cx("status-group-title")}>
+                      <span className={cx("pending-dot")} aria-hidden="true" />
+                      AI 关联待核对
+                      <span className={cx("status-group-count")}>
+                        {referencePending.reduce((sum, entry) => sum + entry.pending_suggestion_count, 0)} 条（不计入已核验资料）
+                      </span>
+                    </h4>
+                    <p className={cx("panel-hint")}>
+                      待核对建议只是工作流状态，尚未成为已核验资料，也不计入任何人数。
+                    </p>
+                    <ul className={cx("child-list")}>
+                      {referencePending.map((entry) => renderChild(entry, "pending"))}
+                    </ul>
+                  </section>
+                ) : null}
+                {referenceRelated.length === 0 && restrictedEntries.length === 0 && referencePending.length === 0 ? (
+                  <p className={cx("panel-empty")} data-testid="reference-empty">
+                    已读取范围内还没有可供查阅的相关观察记录。
+                  </p>
+                ) : null}
+              </>
+            )
           ) : item.reliability === "unavailable" ? (
             <>
               <p className={cx("panel-warning")}>
@@ -535,6 +650,11 @@ function ItemRow({
               <p className={cx("panel-hint")}>
                 班级页只按幼儿汇总人数，不展开来源；进入个人证据册可核对每条来源、观察日期与发生班级。
               </p>
+              {item.reliability === "partial" ? (
+                <p className={cx("panel-hint")} data-testid="partial-list-limit">
+                  部分记录未通过核对或无法读取：普通名单只覆盖已读取记录，其余幼儿见下方“核验受限”名单。
+                </p>
+              ) : null}
               {normalGroups.map((group) => (
                 <section
                   key={group.status}
@@ -546,6 +666,7 @@ function ItemRow({
                   <h4 className={cx("status-group-title")}>
                     <span className={cx("legend-dot", STATUS_CLASS[group.status])} aria-hidden="true" />
                     {GUIDE_ITEM_EVIDENCE_STATUS_LABELS[group.status]}
+                    {item.reliability === "partial" && group.status === "no_records" ? "（已读取范围）" : ""}
                     <span className={cx("status-group-count")}>{group.entries.length} 人</span>
                   </h4>
                   <ul className={cx("child-list")}>{group.entries.map((entry) => renderChild(entry, "status"))}</ul>

@@ -347,7 +347,7 @@ export const CLASS_EVIDENCE_CATALOG: GuideCatalog = {
 
 /* ------------------------------------------------------------------ 条目分布（20 人 roster） */
 
-interface DistributionInput {
+export interface DistributionInput {
   counts: GuideStatusCounts;
   /** 第 1 位幼儿跨两条证据，用于验证按幼儿去重后仍只计 1 人 */
   dedup_first?: boolean;
@@ -364,7 +364,7 @@ interface DistributionInput {
 const DISTRIBUTIONS: Record<string, DistributionInput> = {
   [ITEM_UI_HEALTH_SELF_CARE_34]: { counts: { no_records: 5, has_clues: 3, confirmed_observed: 12 } },
   [ITEM_UI_HEALTH_SELF_CARE_56]: { counts: { no_records: 12, has_clues: 6, confirmed_observed: 2 } },
-  [ITEM_UI_HEALTH_POSTURE_45]: { counts: { no_records: 10, has_clues: 2, confirmed_observed: 8 } },
+  [ITEM_UI_HEALTH_POSTURE_45]: { counts: { no_records: 10, has_clues: 2, confirmed_observed: 8 }, pending_index: 19 },
   [ITEM_UI_LANGUAGE_SPEAK_34]: {
     counts: { no_records: 10, has_clues: 4, confirmed_observed: 6 },
     dedup_first: true,
@@ -373,7 +373,7 @@ const DISTRIBUTIONS: Record<string, DistributionInput> = {
   [ITEM_UI_LANGUAGE_TELL_45]: { counts: { no_records: 20, has_clues: 0, confirmed_observed: 0 } },
   [ITEM_UI_SOCIAL_PEER_45]: {
     counts: { no_records: 15, has_clues: 2, confirmed_observed: 3 },
-    partial_indices: [2],
+    partial_indices: [2, 11],
     unavailable_indices: [10],
   },
   [ITEM_UI_SCIENCE_EXPLORE_56]: {
@@ -452,10 +452,39 @@ export interface ClassOverviewFixtureOptions {
   age_band?: GuideAgeBand | null;
   goal_id?: string | null;
   scope?: EvidenceScope;
+  /** 场景专用分布覆盖；默认不改变主 fixture */
+  distributions?: Record<string, DistributionInput>;
 }
 
-function toClassItem(catalogItem: GuidePerformanceItem, scope: EvidenceScope): ClassGuideItemView {
-  const input = DISTRIBUTIONS[catalogItem.id] ?? { counts: { no_records: 20, has_clues: 0, confirmed_observed: 0 } };
+/** 保健参考条目的可靠性场景覆盖（供 UI 验收单独构建，不进入生产读取链路） */
+export const CLASS_REFERENCE_FIXTURE_OVERRIDES: Record<string, Record<string, DistributionInput>> = {
+  unavailable: {
+    [ITEM_UI_HEALTH_POSTURE_45]: {
+      counts: { no_records: 20, has_clues: 0, confirmed_observed: 0 },
+      unavailable: true,
+    },
+  },
+  partial: {
+    [ITEM_UI_HEALTH_POSTURE_45]: {
+      counts: { no_records: 17, has_clues: 1, confirmed_observed: 2 },
+      partial_indices: [2],
+      unavailable_indices: [5],
+    },
+  },
+  pending: {
+    [ITEM_UI_HEALTH_POSTURE_45]: {
+      counts: { no_records: 20, has_clues: 0, confirmed_observed: 0 },
+      pending_index: 19,
+    },
+  },
+};
+
+function toClassItem(
+  catalogItem: GuidePerformanceItem,
+  scope: EvidenceScope,
+  distributions: Record<string, DistributionInput>,
+): ClassGuideItemView {
+  const input = distributions[catalogItem.id] ?? { counts: { no_records: 20, has_clues: 0, confirmed_observed: 0 } };
   const children = buildChildren(input, scope);
   const total = ROSTER_CHILDREN.length;
   const reliability: EvidenceReliability = input.unavailable
@@ -484,6 +513,7 @@ export function buildClassEvidenceOverview(
   const domainCode = options.domain_code ?? null;
   const ageBand = options.age_band ?? null;
   const goalId = options.goal_id ?? null;
+  const distributions = { ...DISTRIBUTIONS, ...(options.distributions ?? {}) };
 
   const goals = DOMAIN_DEFS.filter((entry) => domainCode === null || entry.code === domainCode).flatMap(
     (entry) =>
@@ -500,7 +530,7 @@ export function buildClassEvidenceOverview(
             },
             items: entryGoal.items
               .filter((entryItem) => ageBand === null || entryItem.age_band === ageBand)
-              .map((entryItem) => toClassItem(entryItem, scope)),
+              .map((entryItem) => toClassItem(entryItem, scope, distributions)),
           })),
       ),
   ).filter((entry) => entry.items.length > 0);
