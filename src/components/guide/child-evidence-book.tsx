@@ -1,16 +1,18 @@
 "use client";
 
 import { useEffect, useId, useMemo, useState } from "react";
-import { ChevronDown, PenLine } from "lucide-react";
+import { ChevronDown, CircleAlert, PenLine } from "lucide-react";
 
-import { classLabel, formatDateCn, formatDateTimeCn } from "@/lib/format";
+import { classLabel, formatDateCn, formatDateTimeCn, parseIsoDateStrict } from "@/lib/format";
 import { CLASS_STAGE_LABELS } from "@/lib/types";
 import {
   GUIDE_AGE_BAND_LABELS,
   type GuideAgeBand,
+  type GuideCatalog,
   type GuideEvidenceLinkOrigin,
   type GuideEvidenceLinkStatus,
   type GuideEvidenceSupportKind,
+  type GuideGoal,
   type GuideItemEvidenceType,
   type GuidePerformanceItem,
   type SemesterPeriod,
@@ -34,6 +36,7 @@ import styles from "./child-evidence-book.module.css";
 /**
  * G3 个人证据册：按《指南》综合目标分组回看儿童观察证据。
  * - 只读展示服务端 DTO（ChildEvidenceBook）；不另算状态、不显示百分比或完成度；
+ * - 期间控件以 book.scope 为准；自定义日期只是草稿，明确标注是否已应用；
  * - 筛选与期间只通过 typed callback 发出意图，由 G6 接入正式路由与取数；
  * - “记录相关观察”只带出儿童与条目，不预填内容。
  */
@@ -48,7 +51,7 @@ export interface ChildEvidenceBookProps {
   /** G2 显式学期配置（G6 传入）；缺省时仍可查看当前范围、全部历史与自定义日期 */
   semesters?: SemesterPeriod[];
   onScopeChange?: (scope: EvidenceScopeIntent) => void;
-  /** 领域 / 指南参考年龄段筛选；null 表示不过滤，goal_id 原样透传 */
+  /** 领域 / 指南参考年龄段筛选；null 表示不过滤；切领域（含“全部”）一律清空 goal_id */
   onFiltersChange?: (filters: EvidenceViewFilters) => void;
   onRecordObservation?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
   className?: string;
@@ -79,6 +82,12 @@ const SUPPORT_LABELS: Record<GuideEvidenceSupportKind, string> = {
   single_event: "单次表现",
   sustained: "持续表现",
   clue_only: "仅线索",
+};
+
+const HEALTH_SUPPORT_LABELS: Record<GuideEvidenceSupportKind, string> = {
+  single_event: "单次资料",
+  sustained: "连续资料",
+  clue_only: "参考线索",
 };
 
 const EVIDENCE_TYPE_LABELS: Record<GuideItemEvidenceType, string> = {
@@ -119,6 +128,11 @@ const AGE_BAND_OPTIONS: Array<{ value: GuideAgeBand | null; label: string }> = [
   { value: "5-6", label: GUIDE_AGE_BAND_LABELS["5-6"] },
 ];
 
+const RELIABILITY_NOTICE: Record<"partial" | "unavailable", string> = {
+  partial: "以下呈现只依据已核验的资料；另有部分资料未通过核对，未纳入本次呈现，可能还有未显示的相关证据。",
+  unavailable: "该条目的相关记录暂时无法读取，不能按「暂无相关记录」理解，也不代表没有相关观察。",
+};
+
 type ScopeSelectValue = "all_history" | "custom_range" | `semester:${string}`;
 
 function scopeSelectValue(scope: EvidenceScope): ScopeSelectValue {
@@ -141,11 +155,18 @@ function classContextLabel(snapshot: EvidenceBasisView["class_context"]): string
 
 function quoteSourceLabel(source: EvidenceBasisView): string {
   if (source.quote_source === "raw_text") return "原始观察原文";
-  return source.quote_field === "highlights" ? "教师确认稿 · 亮点列表" : "教师确认稿 · 金句";
+  return source.quote_field === "highlights" ? "教师确认稿 · 证据片段" : "教师确认稿 · 原文引用";
+}
+
+function supportLabel(support: GuideEvidenceSupportKind, evidenceType: GuideItemEvidenceType): string {
+  return evidenceType === "health_reference" ? HEALTH_SUPPORT_LABELS[support] : SUPPORT_LABELS[support];
 }
 
 function itemRuleLine(item: GuidePerformanceItem): string {
   const age = GUIDE_AGE_BAND_LABELS[item.age_band];
+  if (item.product_rules.evidence_type === "health_reference") {
+    return `资料参考：指南参考 ${age} · 保健参考；只作保育资料参考，不套用行为表现确认与成人帮助规则。`;
+  }
   const type = EVIDENCE_TYPE_LABELS[item.product_rules.evidence_type];
   const help =
     item.product_rules.adult_help === "allowed"
@@ -154,9 +175,25 @@ function itemRuleLine(item: GuidePerformanceItem): string {
   return `条目规则：指南参考 ${age} · ${type} · ${help}`;
 }
 
+function findGoalContext(
+  catalog: GuideCatalog,
+  goalId: string,
+): { domainName: string; subDomainName: string; goal: GuideGoal } | null {
+  for (const domain of catalog.domains) {
+    for (const subDomain of domain.sub_domains) {
+      for (const goal of subDomain.goals) {
+        if (goal.id === goalId) {
+          return { domainName: domain.name, subDomainName: subDomain.name, goal };
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function BasisRow({ source }: { source: EvidenceBasisView }) {
   return (
-    <li className={cx("basis-row")}>
+    <li className={cx("basis-row")} data-testid="basis-row">
       <p className={cx("basis-meta")}>
         <span>{formatDateCn(source.observed_at)}</span>
         <span aria-hidden="true"> · </span>
@@ -175,7 +212,7 @@ function BasisRow({ source }: { source: EvidenceBasisView }) {
   );
 }
 
-function LinkBlock({ link }: { link: EvidenceLinkView }) {
+function LinkBlock({ link, evidenceType }: { link: EvidenceLinkView; evidenceType: GuideItemEvidenceType }) {
   return (
     <li className={cx("link-block")} data-testid="evidence-link" data-counts={link.counts_toward_status}>
       <div className={cx("link-head")}>
@@ -183,7 +220,9 @@ function LinkBlock({ link }: { link: EvidenceLinkView }) {
           {GUIDE_EVIDENCE_LINK_STATUS_LABELS[link.status]}
         </span>
         <span className={cx("link-meta")}>{ORIGIN_LABELS[link.origin]}</span>
-        {link.support ? <span className={cx("link-meta")}>{SUPPORT_LABELS[link.support]}</span> : null}
+        {link.support ? (
+          <span className={cx("link-meta")}>{supportLabel(link.support, evidenceType)}</span>
+        ) : null}
         {!link.counts_toward_status && link.excluded_reason ? (
           <span className={cx("link-excluded")}>
             未计入当前状态：{EXCLUSION_REASON_LABELS[link.excluded_reason]}
@@ -214,8 +253,8 @@ function LinkBlock({ link }: { link: EvidenceLinkView }) {
         </p>
       ) : null}
       <ul className={cx("basis-list")}>
-        {link.basis.map((source) => (
-          <BasisRow key={`${link.link_id}-${source.observation_id}`} source={source} />
+        {link.basis.map((source, index) => (
+          <BasisRow key={`${link.link_id}-${source.observation_id}-${index}`} source={source} />
         ))}
       </ul>
     </li>
@@ -236,6 +275,7 @@ function EvidenceItemRow({
   onRecordObservation?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
 }) {
   const panelId = `evidence-panel-${item.item.id}`;
+  const unreadable = item.reliability === "unavailable";
   const countingObservationIds = new Set(
     item.links
       .filter((link) => link.counts_toward_status)
@@ -254,21 +294,39 @@ function EvidenceItemRow({
       data-status={item.status}
       data-reliability={item.reliability}
     >
-      <div className={cx("item-top")}>
-        <span className={cx("item-status", STATUS_CLASS[item.status])}>
-          {GUIDE_ITEM_EVIDENCE_STATUS_LABELS[item.status]}
-        </span>
+      {item.reliability !== "reliable" ? (
+        <p className={cx("reliability-note")} data-reliability={item.reliability} data-testid="reliability-note">
+          {RELIABILITY_NOTICE[item.reliability]}
+        </p>
+      ) : null}
+
+      <div className={cx("item-top")} data-testid="item-top">
+        {unreadable ? (
+          <span className={cx("item-unreadable")} data-testid="item-unreadable">
+            <CircleAlert className={cx("unreadable-icon")} aria-hidden="true" />
+            资料暂不可读
+          </span>
+        ) : (
+          <span
+            className={cx("item-status", STATUS_CLASS[item.status])}
+            data-testid="item-status"
+          >
+            {GUIDE_ITEM_EVIDENCE_STATUS_LABELS[item.status]}
+          </span>
+        )}
         <span className={cx("item-chip")}>指南参考 · {GUIDE_AGE_BAND_LABELS[item.item.age_band]}</span>
         {item.item.product_rules.evidence_type === "health_reference" ? (
           <span className={cx("item-chip")}>保健参考</span>
         ) : null}
-        <span className={cx("item-meta")}>
-          {evidenceCount > 0
-            ? `相关证据 ${evidenceCount} 条${
-                item.latest_observed_at ? ` · 最近 ${formatDateCn(item.latest_observed_at)}` : ""
-              }`
-            : "还没有计入状态的观察证据"}
-        </span>
+        {!unreadable ? (
+          <span className={cx("item-meta")}>
+            {evidenceCount > 0
+              ? `相关证据 ${evidenceCount} 条${
+                  item.latest_observed_at ? ` · 最近 ${formatDateCn(item.latest_observed_at)}` : ""
+                }`
+              : "还没有计入状态的观察证据"}
+          </span>
+        ) : null}
         {pendingCount > 0 ? <span className={cx("item-pending")}>AI 待核对 {pendingCount} 条</span> : null}
         <button
           type="button"
@@ -283,15 +341,9 @@ function EvidenceItemRow({
         </button>
       </div>
 
-      {item.reliability !== "reliable" ? (
-        <p className={cx("reliability-note")} data-reliability={item.reliability}>
-          {item.reliability === "partial"
-            ? "部分相关证据未通过核对或不在统计期间，当前状态是可确认的下限。"
-            : "该条目的相关记录暂时无法读取，不能按「暂无相关记录」理解。"}
-        </p>
-      ) : null}
-
-      <p className={cx("item-text")}>{item.item.text}</p>
+      <p className={cx("item-text")} data-testid="item-text">
+        {item.item.text}
+      </p>
 
       {expanded ? (
         <div className={cx("item-panel")} id={panelId}>
@@ -301,7 +353,7 @@ function EvidenceItemRow({
               <h4 className={cx("source-group-title")}>计入当前状态的依据</h4>
               <ul className={cx("link-list")}>
                 {formalLinks.map((link) => (
-                  <LinkBlock key={link.link_id} link={link} />
+                  <LinkBlock key={link.link_id} link={link} evidenceType={item.item.product_rules.evidence_type} />
                 ))}
               </ul>
             </section>
@@ -311,14 +363,16 @@ function EvidenceItemRow({
               <h4 className={cx("source-group-title")}>流程与审计记录（不计入状态）</h4>
               <ul className={cx("link-list")}>
                 {auditLinks.map((link) => (
-                  <LinkBlock key={link.link_id} link={link} />
+                  <LinkBlock key={link.link_id} link={link} evidenceType={item.item.product_rules.evidence_type} />
                 ))}
               </ul>
             </section>
           ) : null}
           {item.links.length === 0 ? (
             <p className={cx("source-empty")}>
-              还没有与该条目相关的观察记录。记录一次相关观察后，这里会出现可核对的事实片段。
+              {unreadable
+                ? "相关记录暂时无法读取，无法核对这个条目是否有观察证据。"
+                : "还没有与该条目相关的观察记录。记录一次相关观察后，这里会出现可核对的事实片段。"}
             </p>
           ) : null}
           {onRecordObservation ? (
@@ -353,16 +407,20 @@ export function ChildEvidenceBook({
   const domainGroupId = useId();
   const ageGroupId = useId();
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [customOpen, setCustomOpen] = useState(book.scope.kind === "custom_range");
-  const [customFrom, setCustomFrom] = useState(book.scope.kind === "custom_range" ? (book.scope.start_date ?? "") : "");
-  const [customTo, setCustomTo] = useState(book.scope.kind === "custom_range" ? (book.scope.end_date ?? "") : "");
+  const [draft, setDraft] = useState(() => ({
+    open: book.scope.kind === "custom_range",
+    from: book.scope.kind === "custom_range" ? (book.scope.start_date ?? "") : "",
+    to: book.scope.kind === "custom_range" ? (book.scope.end_date ?? "") : "",
+  }));
   const [rangeError, setRangeError] = useState<string | null>(null);
 
   useEffect(() => {
     if (book.scope.kind !== "custom_range") return;
-    setCustomOpen(true);
-    setCustomFrom(book.scope.start_date ?? "");
-    setCustomTo(book.scope.end_date ?? "");
+    setDraft({
+      open: true,
+      from: book.scope.start_date ?? "",
+      to: book.scope.end_date ?? "",
+    });
   }, [book.scope.kind, book.scope.start_date, book.scope.end_date]);
 
   const semesterOptions = useMemo(() => {
@@ -379,7 +437,21 @@ export function ChildEvidenceBook({
     return options;
   }, [semesters, book.scope]);
 
-  const selectValue: ScopeSelectValue = customOpen ? "custom_range" : scopeSelectValue(book.scope);
+  const domainLabelBySubDomainId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const domain of book.catalog.domains) {
+      for (const subDomain of domain.sub_domains) {
+        map.set(subDomain.id, `${domain.name} · ${subDomain.name}`);
+      }
+    }
+    return map;
+  }, [book.catalog]);
+
+  const goalContext = book.filters.goal_id ? findGoalContext(book.catalog, book.filters.goal_id) : null;
+  const draftApplied =
+    book.scope.kind === "custom_range" &&
+    draft.from === (book.scope.start_date ?? "") &&
+    draft.to === (book.scope.end_date ?? "");
 
   function toggleItem(itemId: string) {
     setExpandedIds((previous) => {
@@ -392,10 +464,10 @@ export function ChildEvidenceBook({
 
   function handleScopeSelect(value: string) {
     if (value === "custom_range") {
-      setCustomOpen(true);
+      setDraft((previous) => ({ ...previous, open: true }));
       return;
     }
-    setCustomOpen(false);
+    setDraft((previous) => ({ ...previous, open: false }));
     setRangeError(null);
     if (value === "all_history") {
       onScopeChange?.({ kind: "all_history" });
@@ -407,16 +479,22 @@ export function ChildEvidenceBook({
   }
 
   function applyCustomRange() {
-    if (!customFrom || !customTo) {
+    if (!draft.from || !draft.to) {
       setRangeError("请选择开始和结束日期。");
       return;
     }
-    if (customFrom > customTo) {
+    const parsedFrom = parseIsoDateStrict(draft.from);
+    const parsedTo = parseIsoDateStrict(draft.to);
+    if (!parsedFrom || !parsedTo) {
+      setRangeError("日期不存在，请重新选择。");
+      return;
+    }
+    if (parsedFrom.getTime() > parsedTo.getTime()) {
       setRangeError("开始日期不能晚于结束日期。");
       return;
     }
     setRangeError(null);
-    onScopeChange?.({ kind: "custom_range", from: customFrom, to: customTo });
+    onScopeChange?.({ kind: "custom_range", from: draft.from, to: draft.to });
   }
 
   const identityClass = classLabel(book.child.stage, book.child.class_name);
@@ -459,7 +537,7 @@ export function ChildEvidenceBook({
           <select
             id={scopeSelectId}
             className={cx("select")}
-            value={selectValue}
+            value={scopeSelectValue(book.scope)}
             onChange={(event) => handleScopeSelect(event.target.value)}
             disabled={!onScopeChange}
             data-testid="scope-select"
@@ -473,29 +551,39 @@ export function ChildEvidenceBook({
             <option value="custom_range">自定义日期…</option>
           </select>
           <p className={cx("control-hint")}>按观察发生日期筛选，含首尾两天；个人历史回看不排除任何学段。</p>
-          {customOpen ? (
-            <div className={cx("custom-range")}>
-              <label className={cx("date-field")}>
-                从
-                <input
-                  type="date"
-                  value={customFrom}
-                  onChange={(event) => setCustomFrom(event.target.value)}
-                  data-testid="range-from"
-                />
-              </label>
-              <label className={cx("date-field")}>
-                到
-                <input
-                  type="date"
-                  value={customTo}
-                  onChange={(event) => setCustomTo(event.target.value)}
-                  data-testid="range-to"
-                />
-              </label>
-              <button type="button" className={cx("apply-button")} onClick={applyCustomRange} disabled={!onScopeChange}>
-                应用日期
-              </button>
+          {draft.open ? (
+            <div className={cx("custom-range")} data-testid="custom-range-draft" data-applied={draftApplied}>
+              <p className={cx("draft-status")} data-testid="draft-status">
+                自定义日期{draftApplied ? "（已应用）" : "（尚未应用）"}
+              </p>
+              <div className={cx("date-row")}>
+                <label className={cx("date-field")}>
+                  从
+                  <input
+                    type="date"
+                    value={draft.from}
+                    onChange={(event) => setDraft((previous) => ({ ...previous, from: event.target.value }))}
+                    data-testid="range-from"
+                  />
+                </label>
+                <label className={cx("date-field")}>
+                  到
+                  <input
+                    type="date"
+                    value={draft.to}
+                    onChange={(event) => setDraft((previous) => ({ ...previous, to: event.target.value }))}
+                    data-testid="range-to"
+                  />
+                </label>
+                <button
+                  type="button"
+                  className={cx("apply-button")}
+                  onClick={applyCustomRange}
+                  disabled={!onScopeChange}
+                >
+                  应用日期
+                </button>
+              </div>
               {rangeError ? (
                 <p className={cx("range-error")} role="alert">
                   {rangeError}
@@ -515,7 +603,7 @@ export function ChildEvidenceBook({
               className={cx("segment")}
               aria-pressed={book.filters.domain_code === null}
               disabled={!onFiltersChange}
-              onClick={() => onFiltersChange?.({ ...book.filters, domain_code: null })}
+              onClick={() => onFiltersChange?.({ ...book.filters, domain_code: null, goal_id: null })}
               data-testid="domain-tab"
               data-domain="all"
             >
@@ -562,6 +650,26 @@ export function ChildEvidenceBook({
         </div>
       </div>
 
+      {book.filters.goal_id ? (
+        <div className={cx("goal-scope")} data-testid="goal-scope-banner">
+          <p className={cx("goal-scope-text")}>
+            当前只查看目标：
+            {goalContext
+              ? `${goalContext.domainName} · ${goalContext.subDomainName} · ${goalContext.goal.index} ${goalContext.goal.title}`
+              : book.filters.goal_id}
+          </p>
+          <button
+            type="button"
+            className={cx("goal-scope-release")}
+            disabled={!onFiltersChange}
+            onClick={() => onFiltersChange?.({ ...book.filters, goal_id: null })}
+            data-testid="goal-scope-release"
+          >
+            查看全部目标
+          </button>
+        </div>
+      ) : null}
+
       {book.goals.length === 0 ? (
         <p className={cx("book-empty")}>当前筛选下没有可展示的表现条目。</p>
       ) : (
@@ -569,6 +677,11 @@ export function ChildEvidenceBook({
           {book.goals.map(({ goal, items }) => (
             <section key={goal.id} className={cx("goal-group")} aria-labelledby={`goal-${goal.id}`}>
               <h3 className={cx("goal-title")} id={`goal-${goal.id}`}>
+                {book.filters.domain_code === null ? (
+                  <span className={cx("goal-domain")}>
+                    {domainLabelBySubDomainId.get(goal.sub_domain_id) ?? "未定位领域"}
+                  </span>
+                ) : null}
                 <span className={cx("goal-index")}>{goal.index}</span>
                 {goal.title}
               </h3>

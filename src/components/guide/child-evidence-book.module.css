@@ -189,11 +189,27 @@
 }
 
 .custom-range {
+  display: grid;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.draft-status {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--guide-amber);
+}
+
+.custom-range[data-applied='true'] .draft-status {
+  color: var(--guide-green-deep);
+}
+
+.date-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: end;
-  margin-top: 2px;
 }
 
 .date-field {
@@ -239,6 +255,41 @@
   color: var(--guide-coral);
 }
 
+.goal-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--guide-blue-tint);
+  border: 1px solid var(--guide-blue-edge);
+  border-radius: 10px;
+}
+
+.goal-scope-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.goal-scope-release {
+  min-height: 44px;
+  padding: 0 14px;
+  color: var(--guide-blue);
+  background: var(--card);
+  border: 1px solid var(--guide-blue-edge);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.goal-scope-release:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .goals {
   display: grid;
   gap: 24px;
@@ -259,6 +310,17 @@
   font-size: 15px;
   font-weight: 600;
   line-height: 1.6;
+}
+
+.goal-domain {
+  padding: 2px 8px;
+  color: var(--guide-muted);
+  background: oklch(0.98 0.006 88);
+  border: 1px solid var(--guide-line);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .goal-index {
@@ -319,6 +381,25 @@
   color: var(--guide-muted);
   background: oklch(0.965 0.006 88);
   border-color: var(--guide-line);
+}
+
+.item-unreadable {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 4px 10px;
+  color: var(--guide-coral);
+  background: var(--guide-coral-tint);
+  border: 1px solid var(--guide-coral-edge);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.unreadable-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .item-chip {
@@ -623,6 +704,10 @@
   .record-button:hover:not(:disabled),
   .apply-button:hover:not(:disabled) {
     background: oklch(0.41 0.13 150);
+  }
+
+  .goal-scope-release:hover:not(:disabled) {
+    border-color: var(--guide-blue);
   }
 }
 

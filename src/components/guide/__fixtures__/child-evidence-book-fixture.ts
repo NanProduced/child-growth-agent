@@ -356,6 +356,16 @@ const MIDDLE_CLASS: ObservationClassContextSnapshot = {
   enrollment_id: "fixture-ui-enrollment-2",
 };
 
+const LARGE_CLASS: ObservationClassContextSnapshot = {
+  class_id: "fixture-ui-class-large-1",
+  class_name: "示例大二班",
+  stage: "large",
+  school_year: "2026-2027",
+  captured_at: "2026-09-01T00:00:00.000Z",
+  source: "enrollment_lookup",
+  enrollment_id: "fixture-ui-enrollment-3",
+};
+
 function basis(input: {
   observationId: string;
   observedAt: string;
@@ -527,13 +537,13 @@ const RICH_LINKS: Record<string, EvidenceLinkView[]> = {
       basis: [
         basis({
           observationId: "obs.ui.language.1.3-4.a",
-          observedAt: "2025-10-08",
-          quote: "晨谈时，杉杉举手说「我昨天和小猫玩了，它喜欢喝牛奶」，并等同伴说完才接着说。",
-          classContext: SMALL_CLASS,
+          observedAt: "2026-09-05",
+          quote: "晨谈时，小雨举手说「我昨天和小猫玩了，它喜欢喝牛奶」，并等同伴说完才接着说。",
+          classContext: MIDDLE_CLASS,
         }),
       ],
       countsTowardStatus: true,
-      decidedAt: "2025-10-08T05:00:00.000Z",
+      decidedAt: "2026-09-05T05:00:00.000Z",
     }),
     link({
       id: "link.ui.language.1.3-4.withdrawn",
@@ -544,7 +554,7 @@ const RICH_LINKS: Record<string, EvidenceLinkView[]> = {
         basis({
           observationId: "obs.ui.language.1.3-4.b",
           observedAt: "2025-11-02",
-          quote: "在提醒下和同伴打了招呼。",
+          quote: "在提醒下，小雨和同伴打了招呼。",
           classContext: SMALL_CLASS,
         }),
       ],
@@ -563,11 +573,18 @@ const RICH_LINKS: Record<string, EvidenceLinkView[]> = {
       support: "clue_only",
       adultHelpUsed: true,
       teacherNote: "帮助方式：教师重复问题并等待幼儿回应。",
+      /* 同一观察的两个不同片段：验证 React key 不与 observation_id 冲突 */
       basis: [
         basis({
           observationId: "obs.ui.language.1.4-5.a",
           observedAt: "2026-09-10",
           quote: "晨谈时，小雨听完问题后想了想说「是不是周末下雨了？」",
+          classContext: MIDDLE_CLASS,
+        }),
+        basis({
+          observationId: "obs.ui.language.1.4-5.a",
+          observedAt: "2026-09-10",
+          quote: "随后她又补充说「我妈妈说下雨要带伞」。",
           classContext: MIDDLE_CLASS,
         }),
       ],
@@ -625,7 +642,7 @@ const RICH_LINKS: Record<string, EvidenceLinkView[]> = {
         basis({
           observationId: "obs.ui.social.1.3-4.a",
           observedAt: "2026-09-14",
-          quote: "主动把积木分给了同桌。",
+          quote: "小雨主动把积木分给了同桌。",
           classContext: MIDDLE_CLASS,
           valid: false,
           invalidReason: "quote_not_found",
@@ -792,8 +809,8 @@ const LARGE_LINKS: Record<string, EvidenceLinkView[]> = {
         basis({
           observationId: "obs.ui.large.language.1.1.a",
           observedAt: "2026-09-25",
-          quote: "小雨在小组分享时完整讲述了自己搭建的作品。",
-          classContext: MIDDLE_CLASS,
+          quote: "禾禾在小组分享时完整讲述了自己搭建的作品。",
+          classContext: LARGE_CLASS,
         }),
       ],
       countsTowardStatus: true,
@@ -810,8 +827,8 @@ const LARGE_LINKS: Record<string, EvidenceLinkView[]> = {
         basis({
           observationId: "obs.ui.large.social.2.1.a",
           observedAt: "2026-09-26",
-          quote: "小雨在同伴邀请后加入了角色游戏。",
-          classContext: MIDDLE_CLASS,
+          quote: "禾禾在同伴邀请后加入了角色游戏。",
+          classContext: LARGE_CLASS,
         }),
       ],
       countsTowardStatus: true,
@@ -829,8 +846,8 @@ const LARGE_LINKS: Record<string, EvidenceLinkView[]> = {
         basis({
           observationId: "obs.ui.large.arts.1.1.a",
           observedAt: "2026-09-27",
-          quote: "小雨在音乐区跟着节奏拍手。",
-          classContext: MIDDLE_CLASS,
+          quote: "禾禾在音乐区跟着节奏拍手。",
+          classContext: LARGE_CLASS,
         }),
       ],
       countsTowardStatus: false,
