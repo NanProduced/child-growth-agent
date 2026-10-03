@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseIsoDateStrict } from "./format";
 import { CLASS_STAGES, FIVE_DOMAINS } from "./types";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -142,9 +143,14 @@ export const enrollChildSchema = z.object({
 
 export const createObservationSchema = z.object({
   child_id: z.string().regex(UUID_RE, "幼儿标识不合法"),
-  observed_at: z.string().regex(DATE_RE, "观察日期格式应为 YYYY-MM-DD"),
+  observed_at: z
+    .string()
+    .regex(DATE_RE, "观察日期格式应为 YYYY-MM-DD")
+    .refine((value) => parseIsoDateStrict(value) !== null, "观察日期不是真实存在的日历日期"),
   context: z.string().max(200).nullish(),
   raw_text: z.string().min(10, "观察原文至少 10 个字").max(5000, "观察原文最长 5000 字"),
+  /** 分班历史无法确定发生时班级时，教师在此确认当时班级 id；快照由服务端核实生成 */
+  confirmed_class_id: z.string().regex(UUID_RE, "班级标识不合法").optional(),
 });
 
 export const followUpDecisionSchema = z.discriminatedUnion("decision", [

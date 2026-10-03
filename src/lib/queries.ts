@@ -5,6 +5,9 @@ import {
   withTransaction,
 } from "@/storage/database/pg-client";
 import { ObservationStateConflictError, StaleEvidenceError } from "./evidence-snapshot";
+import { isoDateInShanghai } from "./format";
+import type { ObservationClassContextSnapshot } from "./guide/types";
+import { CLASS_STAGES } from "./types";
 import type {
   ActivitySupport,
   AgentContext,
@@ -58,6 +61,30 @@ export function mapClass(row: Row): SchoolClass {
   };
 }
 
+/**
+ * 严格解析班级行：id / name / school_year 必须为非空字符串，stage 必须是三个真实学段之一。
+ * 绝不用“默认小班”兜底；无法核实返回 null。写入边界（发生时班级快照、教师确认）必须用它，
+ * mapClass 只服务展示路径。
+ */
+export function parseReliableClass(row: Row): SchoolClass | null {
+  const id = str(row.id);
+  const name = str(row.name);
+  const stage = str(row.stage);
+  const schoolYear = str(row.school_year);
+  if (!id || !name || !schoolYear) return null;
+  if (!(CLASS_STAGES as readonly string[]).includes(stage)) return null;
+  return {
+    id,
+    name,
+    stage: stage as ClassStage,
+    school_year: schoolYear,
+    is_active: Boolean(row.is_active),
+    is_demo: Boolean(row.is_demo),
+    created_at: str(row.created_at),
+    updated_at: strOrNull(row.updated_at),
+  };
+}
+
 export function mapChild(row: Row): Child {
   const currentClass = mapClassOrNull(row.current_class);
   return {
@@ -95,6 +122,9 @@ export function mapObservation(row: Row): Observation {
     ai_organized_at: strOrNull(row.ai_organized_at),
     confirmed_content: (row.confirmed_content ?? null) as ObservationDraft | null,
     confirmed_at: strOrNull(row.confirmed_at),
+    class_context_snapshot: (row.class_context_snapshot ?? null) as ObservationClassContextSnapshot | null,
+    // 原始透传：NULL 是正常未关联；损坏/未知结构原样保留，由 G5 显式识别，不在此归为 NULL
+    guide_evidence: row.guide_evidence ?? null,
     is_demo: Boolean(row.is_demo),
     created_at: str(row.created_at),
     updated_at: strOrNull(row.updated_at),
@@ -176,6 +206,27 @@ export async function createClass(input: {
   return mapClass(row.data);
 }
 
+/**
+ * 已有分班或观察历史的班级被直接修改学段/学年“升班”时抛出；
+ * 由 API 路由映射为 409，提示建立新学年班级并转班。
+ */
+export class ClassHistoryProtectedError extends Error {
+  constructor() {
+    super(
+      "该班级已有分班或观察记录，不能直接修改学段或学年。升班请建立新学年的班级并把幼儿转过去；班级名称与停用仍可修改。"
+    );
+    this.name = "ClassHistoryProtectedError";
+  }
+}
+
+/**
+ * 更新班级。学段/学年变化在共同写入边界上做原子保护：
+ * - 先对 classes 行 FOR UPDATE（与分班/观察插入时 FK 取得的 KEY SHARE 互斥，消除
+ *   “检查之后、写入分班/观察之后再改学段”的竞争窗口）；
+ * - 行锁后重新判别是否真的改变，并检查是否已有分班或观察历史；
+ * - 事务只覆盖这一次更新，不引入新的锁顺序（children→observations 既有顺序不变）。
+ * 无学段/学年变化的改名、停用走普通更新，不额外加锁。
+ */
 export async function updateClass(
   id: string,
   patch: { name?: string; stage?: ClassStage; school_year?: string; is_active?: boolean }
@@ -192,11 +243,37 @@ export async function updateClass(
   if (patch.is_active !== undefined) set("is_active", patch.is_active);
   if (sets.length === 0) return getClass(id);
   sets.push("updated_at = now()");
-  const row = await queryOne<{ data: Row }>(
-    `UPDATE classes SET ${sets.join(", ")} WHERE id = $1 RETURNING to_jsonb(classes.*) AS data`,
-    params
-  );
-  return row ? mapClass(row.data) : null;
+  const updateSql = `UPDATE classes SET ${sets.join(", ")} WHERE id = $1 RETURNING to_jsonb(classes.*) AS data`;
+
+  const changesStageOrYear = patch.stage !== undefined || patch.school_year !== undefined;
+  if (!changesStageOrYear) {
+    const row = await queryOne<{ data: Row }>(updateSql, params);
+    return row ? mapClass(row.data) : null;
+  }
+
+  return withTransaction(async (client) => {
+    const locked = await client.query<{ stage: string; school_year: string }>(
+      "SELECT stage, school_year FROM classes WHERE id = $1 FOR UPDATE",
+      [id]
+    );
+    if (locked.rowCount === 0) return null;
+    const current = locked.rows[0];
+    const stageChanged = patch.stage !== undefined && patch.stage !== current.stage;
+    const yearChanged =
+      patch.school_year !== undefined && patch.school_year !== current.school_year;
+    if (stageChanged || yearChanged) {
+      const history = await client.query<{ has_history: boolean }>(
+        `SELECT (
+           EXISTS (SELECT 1 FROM child_class_enrollments WHERE class_id = $1)
+           OR EXISTS (SELECT 1 FROM observations WHERE class_id = $1)
+         ) AS has_history`,
+        [id]
+      );
+      if (history.rows[0]?.has_history) throw new ClassHistoryProtectedError();
+    }
+    const updated = await client.query<{ data: Row }>(updateSql, params);
+    return updated.rowCount === 0 ? null : mapClass(updated.rows[0].data);
+  });
 }
 
 /** 儿童当前（未结束）班级 id；无归属返回 null */
@@ -229,27 +306,37 @@ export async function enrollChildInClass(input: {
   class_id: string;
   start_date?: string;
 }): Promise<{ closed: number; opened: number }> {
-  const startDate = input.start_date ?? new Date().toISOString().slice(0, 10);
-  const row = await queryOne<{ closed: number; opened: number }>(
-    `WITH closed AS (
-       UPDATE child_class_enrollments
-          SET end_date = GREATEST(start_date, ($2::date - 1))
-        WHERE child_id = $1::text AND end_date IS NULL
-        RETURNING id
-     ), opened AS (
-       INSERT INTO child_class_enrollments (child_id, class_id, start_date)
-       VALUES ($1::text, $3::text, $2::date)
-       RETURNING id
-     ), synced AS (
-       UPDATE children
-          SET class_name = (SELECT name FROM classes WHERE id = $3::text), updated_at = now()
-        WHERE id = $1::text
-     )
-     SELECT (SELECT count(*) FROM closed)::int AS closed,
-            (SELECT count(*) FROM opened)::int AS opened`,
-    [input.child_id, startDate, input.class_id]
-  );
-  return { closed: row?.closed ?? 0, opened: row?.opened ?? 0 };
+  // 默认分班日期按服务端统一口径取亚洲/上海日历日，避免 UTC 跨日导致归属日期错位
+  const startDate = input.start_date ?? isoDateInShanghai();
+  // 与观察保存共用“先锁 children 行”的顺序：保存边界读归属集合时会 FOR SHARE 同一行，
+  // 从而串行化“读集合→写观察”与“结束旧归属→新增归属”，消除新增重叠记录的窗口。
+  return withTransaction(async (client) => {
+    const locked = await client.query("SELECT id FROM children WHERE id = $1 FOR UPDATE", [
+      input.child_id,
+    ]);
+    if (locked.rowCount === 0) throw new Error("幼儿档案不存在");
+    const result = await client.query<{ closed: number; opened: number }>(
+      `WITH closed AS (
+         UPDATE child_class_enrollments
+            SET end_date = GREATEST(start_date, ($2::date - 1))
+          WHERE child_id = $1::text AND end_date IS NULL
+          RETURNING id
+       ), opened AS (
+         INSERT INTO child_class_enrollments (child_id, class_id, start_date)
+         VALUES ($1::text, $3::text, $2::date)
+         RETURNING id
+       ), synced AS (
+         UPDATE children
+            SET class_name = (SELECT name FROM classes WHERE id = $3::text), updated_at = now()
+          WHERE id = $1::text
+       )
+       SELECT (SELECT count(*) FROM closed)::int AS closed,
+              (SELECT count(*) FROM opened)::int AS opened`,
+      [input.child_id, startDate, input.class_id]
+    );
+    const row = result.rows[0];
+    return { closed: row?.closed ?? 0, opened: row?.opened ?? 0 };
+  });
 }
 
 export async function listChildren(): Promise<Child[]> {
@@ -286,6 +373,8 @@ export async function createChild(input: {
   avatar_emoji?: string;
   note?: string;
 }): Promise<Child> {
+  // 首次分班日期与转班、观察默认日期同一口径：亚洲/上海日历日，不用数据库 CURRENT_DATE
+  const enrollmentStart = isoDateInShanghai();
   const row = await queryOne<{ data: Row }>(
     `WITH klass AS (
        SELECT id, name FROM classes WHERE id = $4
@@ -295,7 +384,7 @@ export async function createChild(input: {
        RETURNING children.*
      ), new_enrollment AS (
        INSERT INTO child_class_enrollments (child_id, class_id, start_date)
-       SELECT new_child.id, klass.id, CURRENT_DATE FROM new_child CROSS JOIN klass
+       SELECT new_child.id, klass.id, $7::date FROM new_child CROSS JOIN klass
        RETURNING id
      )
      SELECT to_jsonb(new_child.*) AS data FROM new_child`,
@@ -306,6 +395,7 @@ export async function createChild(input: {
       input.class_id,
       input.avatar_emoji ?? null,
       input.note ?? null,
+      enrollmentStart,
     ]
   );
   if (!row) throw new Error("新增幼儿失败：班级不存在或写入后未能读取记录");
@@ -486,34 +576,152 @@ export async function getObservation(id: string): Promise<Observation | null> {
 }
 
 /**
- * 保存观察原文：class_id 必须由调用方取自儿童当前班级（发生时快照），
- * 转班后旧观察仍保留原班级语境；raw_text 保存后不再改写。
+ * 观察发生时班级前提：创建接口读取班级/归属后交给保存边界复核。
+ * 前提变化（改名、学段、学年或归属区间失效）→ 拒绝写入，要求重新核对。
+ */
+export interface ObservationClassPremise {
+  class_id: string;
+  class_name: string;
+  stage: ClassStage;
+  school_year: string;
+  /** 分班历史解析来源的归属记录 id；教师确认时为 null */
+  enrollment_id: string | null;
+  observed_at: string;
+}
+
+/** 快照前提在保存时已变化：明确冲突，由路由映射 409，不静默写入旧快照 */
+export class ObservationContextConflictError extends Error {
+  constructor(
+    message = "发生时班级资料在核对后已变化，请重新核对这条观察的班级后再保存。"
+  ) {
+    super(message);
+    this.name = "ObservationContextConflictError";
+  }
+}
+
+/**
+ * 观察日期覆盖的归属集合与异常归属检查：解析与保存边界共用同一 SQL，避免语义漂移。
+ * 保存时以同一查询重新判定“当前仍唯一且无异常”，而不是只看旧 enrollment_id 是否覆盖日期。
+ */
+export const ENROLLMENT_MATCHES_SQL = `SELECT to_jsonb(e.*) AS enrollment_data, to_jsonb(k.*) AS class_data
+   FROM child_class_enrollments e
+   JOIN classes k ON k.id = e.class_id
+  WHERE e.child_id = $1
+    AND e.start_date <= $2::date
+    AND (e.end_date IS NULL OR e.end_date >= $2::date)
+  ORDER BY e.start_date ASC, e.id ASC`;
+
+export const BROKEN_ENROLLMENTS_SQL = `SELECT count(*)::int AS count
+   FROM child_class_enrollments
+  WHERE child_id = $1
+    AND end_date IS NOT NULL
+    AND end_date < start_date`;
+
+/**
+ * 保存观察原文：class_id 与 class_context_snapshot 由创建接口按“发生时班级”解析后传入
+ * （分班历史唯一命中或教师确认），转班、改名后快照不变；raw_text 保存后不再改写。
+ * guide_evidence 保持 NULL（未关联是正常状态，由 G5 后续读写）。
+ *
+ * 共同保存边界（短事务，锁顺序 children → classes → observations，与既有确认链路一致）：
+ * 1. 先锁 children 行 FOR SHARE：与分班/转班写入的 children 行锁串行化，
+ *    封住“读归属集合→写观察”之间新增重叠归属的窗口；
+ * 2. 锁 classes 行 FOR SHARE（与 updateClass 的 FOR UPDATE 互斥），按 premise 复核资料；
+ * 3. 分班历史路径用同一 SQL 复核当前归属集合：仍唯一、无异常、且仍是前提对应的归属。
+ * 任一项变化抛 ObservationContextConflictError（路由 409），不依赖 INSERT 外键检查，
+ * 不静默换班、不伪装 teacher_confirmed。模型调用不在此事务内。
  */
 export async function createObservation(input: {
   child_id: string;
-  class_id: string;
   observed_at: string;
   context: string | null;
   raw_text: string;
   is_demo: boolean;
+  class_context_snapshot: ObservationClassContextSnapshot;
+  premise: ObservationClassPremise;
 }): Promise<Observation> {
-  const row = await queryOne<{ id: string }>(
-    `INSERT INTO observations (child_id, class_id, observed_at, context, raw_text, is_demo)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING id`,
-    [
-      input.child_id,
-      input.class_id,
-      input.observed_at,
-      input.context,
-      input.raw_text,
-      input.is_demo,
-    ]
-  );
-  if (!row) throw new Error("保存观察记录失败：写入后未能读取记录");
-  const created = await getObservation(str(row.id));
-  if (!created) throw new Error("保存观察记录失败：写入后未能读取记录");
-  return created;
+  const snapshot = input.class_context_snapshot;
+  if (snapshot.class_id !== input.premise.class_id) {
+    throw new ObservationContextConflictError("发生时班级前提与快照不一致，请重新核对后再保存。");
+  }
+  return withTransaction(async (client) => {
+    const childLocked = await client.query(
+      "SELECT id FROM children WHERE id = $1 FOR SHARE",
+      [input.child_id]
+    );
+    if (childLocked.rowCount === 0) {
+      throw new ObservationContextConflictError("幼儿档案不存在，请重新核对后再保存。");
+    }
+
+    const locked = await client.query<{ data: Row }>(
+      "SELECT to_jsonb(classes.*) AS data FROM classes WHERE id = $1 FOR SHARE",
+      [input.premise.class_id]
+    );
+    if (locked.rowCount === 0) {
+      throw new ObservationContextConflictError("发生时班级不存在或已被删除，请重新核对后再保存。");
+    }
+    const current = parseReliableClass(locked.rows[0].data);
+    if (!current) {
+      throw new ObservationContextConflictError("发生时班级资料无法核实，请重新核对后再保存。");
+    }
+    if (
+      current.name !== input.premise.class_name ||
+      current.stage !== input.premise.stage ||
+      current.school_year !== input.premise.school_year
+    ) {
+      throw new ObservationContextConflictError();
+    }
+
+    if (input.premise.enrollment_id) {
+      const broken = await client.query<{ count: number }>(BROKEN_ENROLLMENTS_SQL, [
+        input.child_id,
+      ]);
+      if ((broken.rows[0]?.count ?? 0) > 0) {
+        throw new ObservationContextConflictError(
+          "这名幼儿的分班历史在核对后出现异常记录，请重新核对后再保存。"
+        );
+      }
+      const matches = await client.query<{ enrollment_data: Row; class_data: Row }>(
+        ENROLLMENT_MATCHES_SQL,
+        [input.child_id, input.observed_at]
+      );
+      if (matches.rowCount !== 1) {
+        throw new ObservationContextConflictError(
+          "这条观察日期的分班归属在核对后不再唯一，请重新核对这条观察的班级后再保存。"
+        );
+      }
+      const matched = matches.rows[0];
+      if (str(matched.enrollment_data.id) !== input.premise.enrollment_id) {
+        throw new ObservationContextConflictError(
+          "这条观察的分班归属在核对后已变化，请重新核对后再保存。"
+        );
+      }
+      if (str(matched.enrollment_data.class_id) !== input.premise.class_id) {
+        throw new ObservationContextConflictError(
+          "这条观察的分班归属在核对后已变化，请重新核对后再保存。"
+        );
+      }
+    }
+
+    const inserted = await client.query<{ data: Row }>(
+      `INSERT INTO observations
+         (child_id, class_id, observed_at, context, raw_text, is_demo, class_context_snapshot)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+       RETURNING to_jsonb(observations.*) AS data`,
+      [
+        input.child_id,
+        snapshot.class_id,
+        input.observed_at,
+        input.context,
+        input.raw_text,
+        input.is_demo,
+        JSON.stringify(snapshot),
+      ]
+    );
+    if (inserted.rowCount === 0) {
+      throw new Error("保存观察记录失败：写入后未能读取记录");
+    }
+    return mapObservation(inserted.rows[0].data);
+  });
 }
 
 /**
