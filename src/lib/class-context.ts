@@ -1,7 +1,10 @@
 import type { ObservationClassContextSnapshot } from "@/lib/guide/types";
 import { parseIsoDateStrict } from "@/lib/format";
-import { mapClass } from "@/lib/queries";
-import type { ClassStage, SchoolClass } from "@/lib/types";
+import {
+  CLASS_STAGES,
+  type ClassStage,
+  type SchoolClass,
+} from "@/lib/types";
 import { query, queryOne } from "@/storage/database/pg-client";
 
 /**
@@ -11,20 +14,26 @@ import { query, queryOne } from "@/storage/database/pg-client";
  * - 按 observed_at 查当时的分班历史（start_date ≤ observed_at ≤ end_date，含首尾），
  *   不套用儿童当前班级；
  * - 恰好命中一条有效归属 → enrollment_lookup；
- * - 无归属、同日/重叠归属、分班历史异常 → 不猜默认班级，要求教师确认当时班级（teacher_confirmed）；
+ * - 无归属、同日/重叠归属、分班历史异常、班级资料无法核实 → 不猜默认班级，
+ *   要求教师确认当时班级（teacher_confirmed）；
  * - 快照的班级名称/阶段/学年一律由服务端按 classes 行核实写入，不信任客户端提交的快照内容；
+ * - 班级资料校验必须发生在解析与教师确认的共同来源边界：空/缺失/非法 stage 不得
+ *   经过任何“默认小班”映射进入快照（reliable class 边界，而不是最后补一层检查）；
  * - 旧记录快照保持 NULL=历史未知，不用动态 classes.stage 回填。
  */
 
 export type ClassContextConfirmationReason =
   | "no_attribution"
   | "overlapping_attribution"
-  | "unreliable_history";
+  | "unreliable_history"
+  | "unreliable_class_record";
 
 export const CLASS_CONTEXT_REASON_MESSAGES: Record<ClassContextConfirmationReason, string> = {
   no_attribution: "分班历史中没有覆盖这条观察日期的班级归属，请选择当时幼儿所在的班级。",
   overlapping_attribution: "这条观察日期同时落在多条分班记录中，无法自动确定当时班级，请选择。",
   unreliable_history: "这名幼儿的分班历史存在异常记录，无法自动确定当时班级，请选择。",
+  unreliable_class_record:
+    "分班历史指向的班级资料无法核实（班级名称、学段或学年缺失/异常），请选择当时所在班级或先补全班级资料。",
 };
 
 /** 重叠命中时的候选归属（供教师确认参考；教师也可选择其他班级） */
@@ -60,11 +69,58 @@ const str = (value: unknown): string => (typeof value === "string" ? value : "")
 const strOrNull = (value: unknown): string | null =>
   typeof value === "string" ? value : null;
 
-function mapCandidate(row: {
-  enrollment_data: Row;
-  class_data: Row;
-}): ClassContextCandidate {
-  const klass = mapClass(row.class_data);
+/**
+ * 严格解析班级行：id / name / school_year 必须为非空字符串，stage 必须是三个真实学段之一。
+ * 绝不用“默认小班”兜底；无法核实返回 null，调用方必须转为需核对/不可靠状态。
+ */
+export function parseReliableClass(row: Row): SchoolClass | null {
+  const id = str(row.id);
+  const name = str(row.name);
+  const stage = str(row.stage);
+  const schoolYear = str(row.school_year);
+  if (!id || !name || !schoolYear) return null;
+  if (!(CLASS_STAGES as readonly string[]).includes(stage)) return null;
+  return {
+    id,
+    name,
+    stage: stage as ClassStage,
+    school_year: schoolYear,
+    is_active: Boolean(row.is_active),
+    is_demo: Boolean(row.is_demo),
+    created_at: str(row.created_at),
+    updated_at: strOrNull(row.updated_at),
+  };
+}
+
+/** 运行时校验一个已构造的 SchoolClass 是否可核实（供快照构造器与教师确认共用） */
+export function isReliableClass(klass: SchoolClass): boolean {
+  return Boolean(
+    klass.id &&
+      klass.name &&
+      klass.school_year &&
+      (CLASS_STAGES as readonly string[]).includes(klass.stage),
+  );
+}
+
+/** 从数据库读取并严格核实的班级；资料无效时返回 null（不返回默认小班） */
+export async function getReliableClass(classId: string): Promise<SchoolClass | null> {
+  const row = await queryOne<{ data: Row }>(
+    "SELECT to_jsonb(classes.*) AS data FROM classes WHERE id = $1",
+    [classId],
+  );
+  return row ? parseReliableClass(row.data) : null;
+}
+
+function assertReliableSnapshotInput(klass: SchoolClass): void {
+  if (!isReliableClass(klass)) {
+    throw new Error("班级资料无法核实（名称、学段或学年缺失/异常），不写入发生时班级快照");
+  }
+}
+
+function mapCandidate(
+  row: { enrollment_data: Row; class_data: Row },
+  klass: SchoolClass,
+): ClassContextCandidate {
   const enrollment = row.enrollment_data;
   return {
     enrollment_id: str(enrollment.id),
@@ -120,12 +176,24 @@ export async function resolveClassContextAt(
     [childId, observedAt],
   );
 
+  // 共同来源边界：先核实全部命中的班级资料，任何一条无法核实都不生成快照
+  const parsed = rows.map((row) => parseReliableClass(row.class_data));
+  if (parsed.some((klass) => klass === null)) {
+    return {
+      status: "needs_confirmation",
+      reason: "unreliable_class_record",
+      enrollment_id: null,
+      class: null,
+      candidates: [],
+    };
+  }
+
   if (rows.length === 1) {
     return {
       status: "resolved",
       reason: null,
       enrollment_id: str(rows[0].enrollment_data.id),
-      class: mapClass(rows[0].class_data),
+      class: parsed[0] as SchoolClass,
       candidates: [],
     };
   }
@@ -145,7 +213,7 @@ export async function resolveClassContextAt(
     reason: "overlapping_attribution",
     enrollment_id: null,
     class: null,
-    candidates: rows.map(mapCandidate),
+    candidates: rows.map((row, index) => mapCandidate(row, parsed[index] as SchoolClass)),
   };
 }
 
@@ -155,6 +223,7 @@ export function buildEnrollmentSnapshot(
   enrollmentId: string,
   capturedAt: string = new Date().toISOString(),
 ): ObservationClassContextSnapshot {
+  assertReliableSnapshotInput(klass);
   return {
     class_id: klass.id,
     class_name: klass.name,
@@ -172,6 +241,7 @@ export function buildTeacherConfirmedSnapshot(
   klass: SchoolClass,
   confirmedAt: string = new Date().toISOString(),
 ): ObservationClassContextSnapshot {
+  assertReliableSnapshotInput(klass);
   return {
     class_id: klass.id,
     class_name: klass.name,

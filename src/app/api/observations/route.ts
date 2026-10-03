@@ -4,9 +4,10 @@ import {
   CLASS_CONTEXT_REASON_MESSAGES,
   buildEnrollmentSnapshot,
   buildTeacherConfirmedSnapshot,
+  getReliableClass,
   resolveClassContextAt,
 } from "@/lib/class-context";
-import { getChild, getClass, listObservations, createObservation } from "@/lib/queries";
+import { getChild, listObservations, createObservation } from "@/lib/queries";
 import type { ObservationClassContextSnapshot } from "@/lib/guide/types";
 import { OBSERVATION_STATUSES, type ObservationStatus } from "@/lib/types";
 import { createObservationSchema } from "@/lib/validation";
@@ -59,10 +60,18 @@ export async function POST(request: NextRequest) {
     // 发生时班级：按 observed_at 查分班历史，不直接套用儿童当前班级
     let snapshot: ObservationClassContextSnapshot;
     if (parsed.data.confirmed_class_id) {
-      // 教师确认：只接受班级 id；名称/阶段/学年由服务端按 classes 行核实，不信任客户端快照
-      const confirmed = await getClass(parsed.data.confirmed_class_id);
+      // 教师确认：只接受班级 id；名称/阶段/学年由服务端严格核实，不信任客户端快照。
+      // 班级资料无法核实（名称/学段/学年缺失或非法）时拒绝写入，不生成默认小班快照。
+      const confirmed = await getReliableClass(parsed.data.confirmed_class_id);
       if (!confirmed) {
-        return NextResponse.json({ message: "确认的班级不存在" }, { status: 400 });
+        return NextResponse.json(
+          {
+            error: "class_context_unreliable",
+            message:
+              "未找到该班级，或班级资料无法核实（班级名称、学段或学年缺失/异常），不能写入发生时班级快照。请先补全班级资料或选择其他班级。",
+          },
+          { status: 400 }
+        );
       }
       snapshot = buildTeacherConfirmedSnapshot(confirmed);
     } else {

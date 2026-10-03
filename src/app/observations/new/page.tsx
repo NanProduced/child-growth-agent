@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Baby, Loader2, LogIn, PenLine, Send, UserPlus } from 'lucide-react';
@@ -27,21 +27,34 @@ import {
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
-import type { ClassContextConfirmationReason } from '@/lib/class-context';
-import { classLabel, parseIsoDateStrict, todayStr } from '@/lib/format';
+import {
+  fetchClassContextState,
+  isAbortError,
+  isClassContextConfirmationReason,
+  isReliableClassShape,
+  type ClassContextLookupState,
+} from '@/lib/class-context-client';
+import { classLabel, isoDateInShanghai, parseIsoDateStrict } from '@/lib/format';
 import type { Child, SchoolClass } from '@/lib/types';
 
-type ClassContextState =
+type ClassContextViewState =
   | { status: 'idle' }
   | { status: 'checking' }
-  | { status: 'resolved'; class: SchoolClass }
-  | { status: 'needs_confirmation'; reason: ClassContextConfirmationReason; message: string };
+  | ClassContextLookupState
+  | { status: 'error'; message: string };
 
-interface ClassContextResponse {
-  status?: 'resolved' | 'needs_confirmation';
-  reason?: ClassContextConfirmationReason | null;
-  message?: string;
-  class?: SchoolClass | null;
+interface ConfirmedSelection {
+  class_id: string;
+  child_id: string;
+  observed_at: string;
+}
+
+interface ClassContextResponseBody {
+  status?: unknown;
+  reason?: unknown;
+  message?: unknown;
+  error?: string;
+  observation?: { id: string };
 }
 
 export default function NewObservationPage() {
@@ -49,19 +62,26 @@ export default function NewObservationPage() {
   const { loading: authLoading, configured, isTeacher } = useTeacher();
   const [children, setChildren] = useState<Child[]>([]);
   const [classes, setClasses] = useState<SchoolClass[]>([]);
+  const [classesLoading, setClassesLoading] = useState(false);
+  const [classesError, setClassesError] = useState<string | null>(null);
+  const [classesNonce, setClassesNonce] = useState(0);
   const [loadingChildren, setLoadingChildren] = useState(true);
 
   const [childId, setChildId] = useState('');
   const [observedAt, setObservedAt] = useState('');
   const [context, setContext] = useState('');
   const [rawText, setRawText] = useState('');
-  const [classContext, setClassContext] = useState<ClassContextState>({ status: 'idle' });
-  const [confirmedClassId, setConfirmedClassId] = useState('');
+  const [classContext, setClassContext] = useState<ClassContextViewState>({ status: 'idle' });
+  const [confirmedSelection, setConfirmedSelection] = useState<ConfirmedSelection | null>(null);
+  const [lookupNonce, setLookupNonce] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
-  // 默认日期仅客户端挂载后写入，保证服务端渲染与水合一致
+  // 当前有效的查询键：旧请求/旧响应不得覆盖新儿童或新日期的状态
+  const lookupKeyRef = useRef<string | null>(null);
+
+  // 默认日期仅客户端挂载后写入，且统一按亚洲/上海日历日，保证服务端渲染与水合一致
   useEffect(() => {
-    setObservedAt(todayStr());
+    setObservedAt(isoDateInShanghai());
   }, []);
 
   useEffect(() => {
@@ -86,57 +106,81 @@ export default function NewObservationPage() {
     };
   }, []);
 
-  // 教师确认“当时班级”时的候选列表：包含已停用班级（历史班级可能已停用）
+  // 教师确认“当时班级”的候选列表：包含已停用班级（历史班级可能已停用）；
+  // 只展示资料可核实的班级，并显式提供加载失败提示与重试。
   useEffect(() => {
     let alive = true;
+    setClassesLoading(true);
+    setClassesError(null);
     fetch('/api/classes')
-      .then((r) => r.json())
-      .then((data: { classes?: SchoolClass[] }) => {
-        if (alive) setClasses(data.classes ?? []);
+      .then(async (r) => {
+        const data = (await r.json().catch(() => null)) as { classes?: unknown } | null;
+        if (!r.ok) {
+          throw new Error(`班级列表加载失败（${r.status}），请重试。`);
+        }
+        if (!data || !Array.isArray(data.classes)) {
+          throw new Error('班级列表返回了无法解析的数据，请重试。');
+        }
+        return data.classes.filter((item): item is SchoolClass => isReliableClassShape(item));
       })
-      .catch(() => undefined);
+      .then((list) => {
+        if (alive) setClasses(list);
+      })
+      .catch((error: unknown) => {
+        if (alive) {
+          setClassesError(error instanceof Error ? error.message : '班级列表加载失败，请重试。');
+        }
+      })
+      .finally(() => {
+        if (alive) setClassesLoading(false);
+      });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [classesNonce]);
 
-  // 幼儿或日期变化时，按分班历史核对发生班级；不可靠时要求教师确认，不默认套用当前班级
+  // 幼儿或日期变化时，按分班历史核对发生班级。
+  // 只接受明确合法的 resolved / needs_confirmation；无效 JSON、解析失败等进入错误态并可重试。
   useEffect(() => {
-    if (!childId || !observedAt || !parseIsoDateStrict(observedAt)) {
+    const validDate = observedAt.length > 0 && parseIsoDateStrict(observedAt) !== null;
+    const key = childId && validDate ? `${childId}|${observedAt}` : null;
+    lookupKeyRef.current = key;
+    // 切换对象/日期后旧的人工选择立即失效
+    setConfirmedSelection(null);
+    if (!key) {
       setClassContext({ status: 'idle' });
-      setConfirmedClassId('');
       return;
     }
     const controller = new AbortController();
     setClassContext({ status: 'checking' });
-    setConfirmedClassId('');
-    fetch(
-      `/api/children/${childId}/class-context?observed_at=${encodeURIComponent(observedAt)}`,
-      { signal: controller.signal }
-    )
-      .then(async (res) => {
-        const data = (await res.json().catch(() => ({}))) as ClassContextResponse;
-        if (!res.ok) throw new Error(data.message ?? '核对发生时班级失败');
-        if (data.status === 'resolved' && data.class) {
-          setClassContext({ status: 'resolved', class: data.class });
-          return;
-        }
-        setClassContext({
-          status: 'needs_confirmation',
-          reason: data.reason ?? 'no_attribution',
-          message: data.message ?? '无法自动确定这条观察发生时的班级，请选择。',
-        });
+    fetchClassContextState({ childId, observedAt, signal: controller.signal })
+      .then((state) => {
+        if (lookupKeyRef.current !== key) return;
+        setClassContext(state);
       })
-      .catch((e: unknown) => {
-        if (e instanceof DOMException && e.name === 'AbortError') return;
-        setClassContext({ status: 'idle' });
-        toast.error(e instanceof Error ? e.message : '核对发生时班级失败');
+      .catch((error: unknown) => {
+        if (lookupKeyRef.current !== key) return;
+        if (isAbortError(error)) return;
+        setClassContext({
+          status: 'error',
+          message: error instanceof Error ? error.message : '核对发生时班级失败，请重试。',
+        });
       });
     return () => controller.abort();
-  }, [childId, observedAt]);
+  }, [childId, observedAt, lookupNonce]);
 
   const selectedChild = children.find((c) => c.id === childId) ?? null;
   const needsClassConfirmation = classContext.status === 'needs_confirmation';
+  // 提交只携带“当前需要人工确认且绑定当前儿童+日期”的选择
+  const boundSelection =
+    confirmedSelection &&
+    confirmedSelection.child_id === childId &&
+    confirmedSelection.observed_at === observedAt
+      ? confirmedSelection
+      : null;
+
+  const retryLookup = useCallback(() => setLookupNonce((n) => n + 1), []);
+  const retryClasses = useCallback(() => setClassesNonce((n) => n + 1), []);
 
   async function handleSubmit() {
     if (!childId) {
@@ -155,7 +199,7 @@ export default function NewObservationPage() {
       toast.error('正在核对这条观察发生时的班级，请稍候');
       return;
     }
-    if (needsClassConfirmation && !confirmedClassId) {
+    if (needsClassConfirmation && !boundSelection) {
       toast.error('请选择这条观察发生时的班级');
       return;
     }
@@ -169,23 +213,25 @@ export default function NewObservationPage() {
           observed_at: observedAt,
           context: context.trim() || null,
           raw_text: rawText.trim(),
-          ...(confirmedClassId ? { confirmed_class_id: confirmedClassId } : {}),
+          ...(boundSelection ? { confirmed_class_id: boundSelection.class_id } : {}),
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as ClassContextResponse & {
-        error?: string;
-        observation?: { id: string };
-      };
+      const data = (await res.json().catch(() => ({}))) as ClassContextResponseBody;
       if (!res.ok || !data.observation) {
         if (data.error === 'class_context_confirmation_required') {
           setClassContext({
             status: 'needs_confirmation',
-            reason: data.reason ?? 'no_attribution',
-            message: data.message ?? '无法自动确定这条观察发生时的班级，请选择。',
+            reason: isClassContextConfirmationReason(data.reason) ? data.reason : 'no_attribution',
+            message:
+              typeof data.message === 'string' && data.message
+                ? data.message
+                : '无法自动确定这条观察发生时的班级，请选择。',
           });
-          setConfirmedClassId('');
+          setConfirmedSelection(null);
         }
-        throw new Error(data.message ?? '保存失败，请稍后再试');
+        throw new Error(
+          typeof data.message === 'string' && data.message ? data.message : '保存失败，请稍后再试',
+        );
       }
       toast.success('观察已保存，原文将不可修改');
       router.push(`/observations/${data.observation.id}/review`);
@@ -309,25 +355,70 @@ export default function NewObservationPage() {
             ) : classContext.status === 'needs_confirmation' ? (
               <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50/70 px-3 py-3">
                 <p className="text-xs leading-5 text-amber-900">{classContext.message}</p>
-                <div className="space-y-1.5">
-                  <Label htmlFor="class-context">当时所在班级 *</Label>
-                  <Select value={confirmedClassId} onValueChange={setConfirmedClassId}>
-                    <SelectTrigger id="class-context" className="w-full">
-                      <SelectValue placeholder="选择当时所在班级" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {classes.map((c) => (
-                        <SelectItem key={c.id} value={c.id}>
-                          {classLabel(c.stage, c.name) ?? c.name} · {c.school_year}
-                          {c.is_active ? '' : '（已停用）'}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                {classesError ? (
+                  <div className="space-y-2">
+                    <p className="text-xs leading-5 text-amber-900">{classesError}</p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="min-h-9"
+                      onClick={retryClasses}
+                    >
+                      重新加载班级
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="class-context">当时所在班级 *</Label>
+                    <Select
+                      value={boundSelection?.class_id ?? ''}
+                      onValueChange={(value) =>
+                        setConfirmedSelection({
+                          class_id: value,
+                          child_id: childId,
+                          observed_at: observedAt,
+                        })
+                      }
+                      disabled={classesLoading}
+                    >
+                      <SelectTrigger id="class-context" className="w-full">
+                        <SelectValue
+                          placeholder={classesLoading ? '班级加载中…' : '选择当时所在班级'}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {classes.map((c) => (
+                          <SelectItem key={c.id} value={c.id}>
+                            {classLabel(c.stage, c.name) ?? c.name} · {c.school_year}
+                            {c.is_active ? '' : '（已停用）'}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {!classesLoading && classes.length === 0 ? (
+                      <p className="text-xs leading-5 text-amber-900">
+                        没有可核实的班级可选，请先建立或补全班级资料。
+                      </p>
+                    ) : null}
+                  </div>
+                )}
                 <p className="text-xs leading-5 text-amber-800/80">
                   只用于记录这条观察的班级语境，不会改变幼儿当前分班。
                 </p>
+              </div>
+            ) : classContext.status === 'error' ? (
+              <div className="space-y-2 rounded-lg border border-rose-200 bg-rose-50/70 px-3 py-3">
+                <p className="text-xs leading-5 text-rose-800">{classContext.message}</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="min-h-9"
+                  onClick={retryLookup}
+                >
+                  重新核对
+                </Button>
               </div>
             ) : (
               <div className="rounded-lg border bg-slate-50/70 px-3 py-2.5 text-xs leading-5 text-slate-500">

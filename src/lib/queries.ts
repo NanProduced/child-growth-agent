@@ -181,6 +181,27 @@ export async function createClass(input: {
   return mapClass(row.data);
 }
 
+/**
+ * 已有分班或观察历史的班级被直接修改学段/学年“升班”时抛出；
+ * 由 API 路由映射为 409，提示建立新学年班级并转班。
+ */
+export class ClassHistoryProtectedError extends Error {
+  constructor() {
+    super(
+      "该班级已有分班或观察记录，不能直接修改学段或学年。升班请建立新学年的班级并把幼儿转过去；班级名称与停用仍可修改。"
+    );
+    this.name = "ClassHistoryProtectedError";
+  }
+}
+
+/**
+ * 更新班级。学段/学年变化在共同写入边界上做原子保护：
+ * - 先对 classes 行 FOR UPDATE（与分班/观察插入时 FK 取得的 KEY SHARE 互斥，消除
+ *   “检查之后、写入分班/观察之后再改学段”的竞争窗口）；
+ * - 行锁后重新判别是否真的改变，并检查是否已有分班或观察历史；
+ * - 事务只覆盖这一次更新，不引入新的锁顺序（children→observations 既有顺序不变）。
+ * 无学段/学年变化的改名、停用走普通更新，不额外加锁。
+ */
 export async function updateClass(
   id: string,
   patch: { name?: string; stage?: ClassStage; school_year?: string; is_active?: boolean }
@@ -197,11 +218,37 @@ export async function updateClass(
   if (patch.is_active !== undefined) set("is_active", patch.is_active);
   if (sets.length === 0) return getClass(id);
   sets.push("updated_at = now()");
-  const row = await queryOne<{ data: Row }>(
-    `UPDATE classes SET ${sets.join(", ")} WHERE id = $1 RETURNING to_jsonb(classes.*) AS data`,
-    params
-  );
-  return row ? mapClass(row.data) : null;
+  const updateSql = `UPDATE classes SET ${sets.join(", ")} WHERE id = $1 RETURNING to_jsonb(classes.*) AS data`;
+
+  const changesStageOrYear = patch.stage !== undefined || patch.school_year !== undefined;
+  if (!changesStageOrYear) {
+    const row = await queryOne<{ data: Row }>(updateSql, params);
+    return row ? mapClass(row.data) : null;
+  }
+
+  return withTransaction(async (client) => {
+    const locked = await client.query<{ stage: string; school_year: string }>(
+      "SELECT stage, school_year FROM classes WHERE id = $1 FOR UPDATE",
+      [id]
+    );
+    if (locked.rowCount === 0) return null;
+    const current = locked.rows[0];
+    const stageChanged = patch.stage !== undefined && patch.stage !== current.stage;
+    const yearChanged =
+      patch.school_year !== undefined && patch.school_year !== current.school_year;
+    if (stageChanged || yearChanged) {
+      const history = await client.query<{ has_history: boolean }>(
+        `SELECT (
+           EXISTS (SELECT 1 FROM child_class_enrollments WHERE class_id = $1)
+           OR EXISTS (SELECT 1 FROM observations WHERE class_id = $1)
+         ) AS has_history`,
+        [id]
+      );
+      if (history.rows[0]?.has_history) throw new ClassHistoryProtectedError();
+    }
+    const updated = await client.query<{ data: Row }>(updateSql, params);
+    return updated.rowCount === 0 ? null : mapClass(updated.rows[0].data);
+  });
 }
 
 /** 儿童当前（未结束）班级 id；无归属返回 null */

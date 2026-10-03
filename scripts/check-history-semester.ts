@@ -6,29 +6,53 @@ import { NextRequest } from 'next/server';
 import { Client } from 'pg';
 
 import { TEACHER_COOKIE, createSessionToken } from '../src/lib/auth';
-import { resolveClassContextAt } from '../src/lib/class-context';
-import { getObservation, listObservations } from '../src/lib/queries';
+import { parseReliableClass, resolveClassContextAt } from '../src/lib/class-context';
 import {
+  fetchClassContextState,
+  isAbortError,
+  parseClassContextResponse,
+} from '../src/lib/class-context-client';
+import {
+  ClassHistoryProtectedError,
+  getObservation,
+  listObservations,
+  updateClass,
+} from '../src/lib/queries';
+import {
+  findSemesterConfigProblems,
   getCurrentSemester,
   getSemester,
   listSemesters,
   resolveEvidenceScope,
 } from '../src/lib/semester';
+import { CONFIGURED_SEMESTERS, SEMESTER_CALENDAR_NOTE } from '../src/lib/semester/config';
 import { query, queryOne } from '../src/storage/database/pg-client';
 import type { Observation, SchoolClass } from '../src/lib/types';
 
 /**
- * G2 历史归属与学期底座自检：
- * - 离线：学期显式配置/范围解析/日期边界/迁移与初始化同构；
- * - 实库：一次性本地 Postgres（或 HISTORY_TEST_DATABASE_URL），验证迁移幂等、
- *   分班历史解析（补录转班前 / 转班当天 / 重叠 / 缺失 / 异常）、教师确认快照、
- *   班级改名后快照不变、已有历史班级的学段/学年保护、旧快照保持 NULL、
- *   损坏 guide_evidence 不被静默归为 NULL、三件套（raw_text / ai_draft / confirmed_content）不变。
- * 不连接 .env 托管库或线上库；不调用真实模型。
+ * G2 历史归属与学期底座自检（R1）。
+ *
+ * 资源安全（本轮修复重点）：
+ * - 只使用自己创建的一次性本地容器，容器名/库名带唯一运行标记；
+ * - 启动即记录容器 ID，清理只按 ID；已存在的同名或非本轮容器绝不触碰（含反例容器验证）；
+ * - 身份（容器 ID/标签/库名/回环地址）与“全新空库”校验通过后才允许初始化 DDL 或写入；
+ * - 已移除外部测试 URL 模式；Docker 不可用时直接失败，不回退任何 .env/未知数据库；
+ * - 启动、连接、断言失败都可靠释放本轮资源；输出不包含连接串或口令。
+ *
+ * 业务反例：补录转班前/转班当天/重叠/缺失/异常归属、缺失或非法学段不生成快照、
+ * 教师确认拒绝不可核实班级、旧快照 NULL、坏 guide_evidence 透传、三件套不变、
+ * 班级历史保护（含受控双连接竞争）、学期配置返回副本与配置校验。
+ * 不调用真实模型。
  */
 
-const CONTAINER = 'cga-history-check';
 const TEACHER_PASSCODE_KEY = 'TEACHER_PASSCODE';
+const LEGACY_CONTAINER_NAME = 'cga-history-check';
+
+/** 本轮唯一标记：容器名、库名、标签共用；只影响本轮创建的资源 */
+const RUN_ID = `${process.pid.toString(36)}${Date.now().toString(36)}`.toLowerCase();
+const CONTAINER_NAME = `cga-hist-${RUN_ID}`;
+const DB_NAME = `cga_history_${RUN_ID}`;
+const CONTAINER_LABEL = `cga-history-check=${RUN_ID}`;
 
 interface ApiBody {
   message?: string;
@@ -50,51 +74,122 @@ function docker(args: string[]): { status: number; output: string } {
   return { status: res.status ?? 1, output: `${res.stdout ?? ''}${res.stderr ?? ''}`.trim() };
 }
 
-async function startTestDatabase(): Promise<{ url: string; teardown: () => void }> {
-  const external = process.env.HISTORY_TEST_DATABASE_URL?.trim();
-  if (external) return { url: external, teardown: () => undefined };
+function containerIdOf(idOrName: string): string | null {
+  const res = docker(['inspect', '--format', '{{.Id}}', idOrName]);
+  return res.status === 0 && res.output ? res.output.split('\n')[0].trim() : null;
+}
 
+function removeContainerById(containerId: string | null): void {
+  if (containerId) docker(['rm', '-f', containerId]);
+}
+
+/** 反例容器：占用历史固定名称，验证本轮清理不会按名称误删 */
+function ensureLegacyNameDecoy(): { id: string | null; created: boolean } {
+  const existing = containerIdOf(LEGACY_CONTAINER_NAME);
+  if (existing) return { id: existing, created: false };
+  const run = docker([
+    'run', '-d',
+    '--name', LEGACY_CONTAINER_NAME,
+    '--label', `cga-decoy=${RUN_ID}`,
+    'postgres:16-alpine',
+    'true',
+  ]);
+  if (run.status !== 0) throw new Error(`无法创建资源反例容器：${run.output}`);
+  return { id: run.output.trim(), created: true };
+}
+
+/**
+ * 启动一次性本地 Postgres。失败（包括连接/身份校验/空库校验失败）时按 ID 释放本轮容器。
+ * 身份校验通过前不执行任何初始化 DDL 或测试写入。
+ */
+async function startTestDatabase(): Promise<{ url: string; containerId: string; teardown: () => void }> {
   const probe = docker(['version']);
   if (probe.status !== 0) {
     throw new Error(
-      `未检测到可用的 Docker：历史自检需要一次性本地 Postgres，或设置 HISTORY_TEST_DATABASE_URL 指向隔离测试库（${probe.output}）`
+      '未检测到可用的 Docker：G2 自检只使用一次性本地容器，不连接 .env 或任何未知数据库'
     );
   }
 
-  docker(['rm', '-f', CONTAINER]);
   const run = docker([
-    'run', '-d', '--name', CONTAINER,
+    'run', '-d',
+    '--name', CONTAINER_NAME,
+    '--label', CONTAINER_LABEL,
     '-e', 'POSTGRES_PASSWORD=postgres',
-    '-e', 'POSTGRES_DB=cga_history',
+    '-e', `POSTGRES_DB=${DB_NAME}`,
     '-p', '127.0.0.1::5432',
     'postgres:16-alpine',
   ]);
-  if (run.status !== 0) throw new Error(`启动测试数据库失败：${run.output}`);
+  if (run.status !== 0) throw new Error(`启动一次性测试数据库失败：${run.output}`);
+  const containerId = run.output.split('\n').pop()?.trim() ?? '';
+  const teardown = () => removeContainerById(containerId || null);
 
-  const mapped = docker(['port', CONTAINER, '5432/tcp']).output.split('\n')[0] ?? '';
-  const hostPort = mapped.split(':').pop()?.trim();
-  if (!hostPort) throw new Error(`无法读取测试数据库端口：${mapped}`);
-  const url = `postgresql://postgres:postgres@127.0.0.1:${hostPort}/cga_history`;
-
-  const deadline = Date.now() + 60_000;
-  for (;;) {
-    const client = new Client({ connectionString: url, connectionTimeoutMillis: 2000 });
-    try {
-      await client.connect();
-      await client.end();
-      break;
-    } catch {
-      try {
-        await client.end();
-      } catch {
-        // 未建立连接时 end 可能抛错，忽略后继续重试
-      }
-      if (Date.now() > deadline) throw new Error('测试数据库启动超时');
-      await sleep(500);
+  try {
+    const inspected = containerIdOf(containerId);
+    if (!inspected || inspected !== containerId) {
+      throw new Error('无法核实本轮容器身份：docker run 输出与 inspect 不一致');
     }
-  }
+    const label = docker([
+      'inspect', '--format', '{{index .Config.Labels "cga-history-check"}}', containerId,
+    ]).output.trim();
+    if (label !== RUN_ID) throw new Error('容器标签与本轮运行标记不一致，拒绝继续');
 
-  return { url, teardown: () => docker(['rm', '-f', CONTAINER]) };
+    const mapped = docker(['port', containerId, '5432/tcp']).output.split('\n')[0] ?? '';
+    if (!mapped.startsWith('127.0.0.1:')) {
+      throw new Error('端口映射不在本机回环地址上，拒绝连接');
+    }
+    const hostPort = mapped.split(':').pop()?.trim();
+    if (!hostPort) throw new Error('无法读取一次性测试数据库端口');
+    const url = `postgresql://postgres:postgres@127.0.0.1:${hostPort}/${DB_NAME}`;
+
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const client = new Client({ connectionString: url, connectionTimeoutMillis: 2000 });
+      try {
+        await client.connect();
+        await client.end();
+        break;
+      } catch {
+        try {
+          await client.end();
+        } catch {
+          // 未建立连接时 end 可能抛错，忽略后继续重试
+        }
+        if (Date.now() > deadline) throw new Error('一次性测试数据库启动超时');
+        await sleep(500);
+      }
+    }
+
+    // 身份 + 空库校验（在 DDL/写入之前）：库名、回环地址、无既有业务表
+    const verifier = new Client({ connectionString: url });
+    await verifier.connect();
+    try {
+      const identity = await verifier.query<{ db: string; usr: string; port: number }>(
+        'SELECT current_database() AS db, current_user AS usr, inet_server_port() AS port'
+      );
+      if (identity.rows[0]?.db !== DB_NAME) {
+        throw new Error('目标库身份不符：current_database 与本轮库名不一致');
+      }
+      if (identity.rows[0]?.usr !== 'postgres') {
+        throw new Error('目标库身份不符：当前用户不是本轮容器默认用户');
+      }
+      if (identity.rows[0]?.port !== 5432) {
+        throw new Error('目标端口上不是预期的 PostgreSQL 服务');
+      }
+      const existing = await verifier.query<{ rel: string | null }>(
+        `SELECT to_regclass('public.observations') AS rel`
+      );
+      if (existing.rows[0]?.rel !== null) {
+        throw new Error('目标库不是全新空库（已存在 observations），拒绝执行初始化');
+      }
+    } finally {
+      await verifier.end();
+    }
+
+    return { url, containerId, teardown };
+  } catch (error) {
+    teardown();
+    throw error;
+  }
 }
 
 async function applySql(client: Client, file: string): Promise<void> {
@@ -172,11 +267,17 @@ const ID = {
   classTransferFrom: 'a0000000-0000-4000-8000-000000000006',
   classTransferTo: 'a0000000-0000-4000-8000-000000000007',
   classEnrollmentOnly: 'a0000000-0000-4000-8000-000000000008',
+  classObservationOnly: 'a0000000-0000-4000-8000-000000000009',
+  classRace: 'a0000000-0000-4000-8000-000000000010',
+  classBrokenRecord: 'a0000000-0000-4000-8000-000000000011',
   childBackfill: 'b0000000-0000-4000-8000-000000000001',
   childOverlap: 'b0000000-0000-4000-8000-000000000002',
   childBroken: 'b0000000-0000-4000-8000-000000000003',
   childTransfer: 'b0000000-0000-4000-8000-000000000004',
   childEnrollmentOnly: 'b0000000-0000-4000-8000-000000000005',
+  childObservationOnly: 'b0000000-0000-4000-8000-000000000006',
+  childRace: 'b0000000-0000-4000-8000-000000000007',
+  childBrokenRecord: 'b0000000-0000-4000-8000-000000000008',
   enrollBackfillA: 'e0000000-0000-4000-8000-000000000001',
   enrollBackfillB: 'e0000000-0000-4000-8000-000000000002',
   enrollOverlapA: 'e0000000-0000-4000-8000-000000000003',
@@ -184,133 +285,312 @@ const ID = {
   enrollBroken: 'e0000000-0000-4000-8000-000000000005',
   enrollTransferFrom: 'e0000000-0000-4000-8000-000000000006',
   enrollEnrollmentOnly: 'e0000000-0000-4000-8000-000000000007',
+  enrollRace: 'e0000000-0000-4000-8000-000000000008',
+  enrollBrokenRecord: 'e0000000-0000-4000-8000-000000000009',
 } as const;
+
+function checkSemesterBoundary(): void {
+  const semesters = listSemesters();
+  assert.ok(semesters.length >= 6, '学期配置应覆盖多个学年');
+  assert.equal(new Set(semesters.map((s) => s.id)).size, semesters.length, '学期 id 必须唯一');
+  for (const period of semesters) {
+    assert.ok(period.start_date <= period.end_date, `${period.id} 起止日期顺序错误`);
+    assert.ok(
+      /^\d{4}-\d{2}-\d{2}$/.test(period.start_date) && /^\d{4}-\d{2}-\d{2}$/.test(period.end_date),
+      `${period.id} 日期格式错误`
+    );
+    assert.ok(!period.label.includes('项目演示校历'), '用户可见 label 不应携带演示字样');
+  }
+  assert.ok(SEMESTER_CALENDAR_NOTE.includes('不是全国统一学期'), '配置性质说明必须保留');
+  const configSource = readFileSync(
+    new URL('../src/lib/semester/config.ts', import.meta.url),
+    'utf8'
+  );
+  assert.ok(configSource.includes('不是全国统一学期'), '配置源注释须注明不是全国统一学期');
+
+  // 配置不可变 + 查询返回副本：调用方无法污染后续查询
+  assert.ok(Object.isFrozen(CONFIGURED_SEMESTERS), '配置数组必须冻结');
+  assert.ok(Object.isFrozen(CONFIGURED_SEMESTERS[0]), '配置条目必须冻结');
+  const first = listSemesters()[0];
+  const labelBefore = first.label;
+  first.label = '被污染';
+  first.start_date = '1900-01-01';
+  assert.equal(listSemesters()[0].label, labelBefore, '修改 listSemesters 返回值不得影响配置');
+  assert.equal(getSemester('2026-2027-1')?.label, listSemesters().find((s) => s.id === '2026-2027-1')?.label);
+  const gotSemester = getSemester('2026-2027-1');
+  assert.ok(gotSemester);
+  gotSemester.end_date = '1900-01-01';
+  assert.equal(getSemester('2026-2027-1')?.end_date, '2027-01-29', '修改 getSemester 返回值不得影响配置');
+  const currentSemester = getCurrentSemester('2026-10-03');
+  assert.ok(currentSemester);
+  currentSemester.id = '污染';
+  assert.equal(getCurrentSemester('2026-10-03')?.id, '2026-2027-1');
+
+  // 配置校验：非法日期 / 起止倒置 / 重复 id / 重叠 / term
+  assert.deepEqual(findSemesterConfigProblems(CONFIGURED_SEMESTERS), [], '内置配置必须通过校验');
+  const base = {
+    id: 'x-1',
+    school_year: '2030-2031',
+    term: 1 as const,
+    label: 'x',
+    start_date: '2030-09-01',
+    end_date: '2031-01-15',
+  };
+  assert.ok(findSemesterConfigProblems([{ ...base, start_date: '2031-02-30' }]).length > 0);
+  assert.ok(findSemesterConfigProblems([{ ...base, end_date: '2030-08-01' }]).length > 0);
+  assert.ok(findSemesterConfigProblems([base, { ...base }]).some((p) => p.includes('重复')));
+  assert.ok(
+    findSemesterConfigProblems([
+      base,
+      { ...base, id: 'x-2', start_date: '2030-12-01', end_date: '2031-03-01' },
+    ]).some((p) => p.includes('重叠'))
+  );
+  assert.ok(
+    findSemesterConfigProblems([{ ...base, term: 3 as unknown as 1 }]).some((p) => p.includes('term'))
+  );
+
+  // 首尾含端点、跨年、当前学期（语义与 R0 一致）
+  assert.equal(getCurrentSemester('2026-09-01')?.id, '2026-2027-1', '学期首日必须覆盖');
+  assert.equal(getCurrentSemester('2027-01-29')?.id, '2026-2027-1', '学期末日必须覆盖');
+  assert.equal(getCurrentSemester('2027-01-30'), null, '学期结束次日不应落入学期');
+  assert.equal(getCurrentSemester('2026-12-31')?.id, '2026-2027-1', '跨年日期属于本学期');
+  assert.equal(getCurrentSemester('2024-08-15'), null, '配置未覆盖的日期返回 null');
+
+  const bySemester = resolveEvidenceScope({ semester_id: '2025-2026-2' });
+  assert.ok(bySemester.ok);
+  assert.deepEqual(bySemester.scope, {
+    kind: 'semester',
+    semester_id: '2025-2026-2',
+    label: getSemester('2025-2026-2')?.label,
+    start_date: '2026-02-23',
+    end_date: '2026-07-10',
+    filter_field: 'observed_at',
+  });
+  const priority = resolveEvidenceScope({
+    semester_id: '2026-2027-1',
+    from: 'not-a-date',
+    to: 'also-bad',
+  });
+  assert.ok(priority.ok);
+  assert.equal(priority.scope.semester_id, '2026-2027-1');
+
+  const leap = resolveEvidenceScope({ from: '2024-02-29', to: '2024-03-01' });
+  assert.ok(leap.ok);
+  assert.deepEqual([leap.scope.start_date, leap.scope.end_date], ['2024-02-29', '2024-03-01']);
+  for (const bad of [
+    { from: '2025-02-29', to: '2025-03-01' },
+    { from: '2026-02-30', to: '2026-03-01' },
+    { from: '2026-01-01' },
+    { to: '2026-01-01' },
+    { from: '2026-05-01', to: '2026-04-01' },
+  ]) {
+    const res = resolveEvidenceScope(bad);
+    assert.equal(res.ok, false, `非法范围应被拒绝：${JSON.stringify(bad)}`);
+    if (!res.ok) assert.equal(res.error, 'invalid_request');
+  }
+  const allHistory = resolveEvidenceScope({ scope: 'all_history' });
+  assert.ok(allHistory.ok);
+  assert.deepEqual(
+    [allHistory.scope.kind, allHistory.scope.start_date, allHistory.scope.end_date],
+    ['all_history', null, null]
+  );
+  const badScope = resolveEvidenceScope({ scope: 'last_year' });
+  assert.equal(badScope.ok, false);
+  const bareCustom = resolveEvidenceScope({ scope: 'custom_range' });
+  assert.equal(bareCustom.ok, false);
+  const current = resolveEvidenceScope({}, { today: '2026-10-03' });
+  assert.ok(current.ok);
+  assert.equal(current.scope.semester_id, '2026-2027-1');
+  const missing = resolveEvidenceScope({}, { semesters: [], today: '2026-10-03' });
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.error, 'semester_config_missing');
+  const missingToday = resolveEvidenceScope({}, { today: '2020-01-01' });
+  assert.equal(missingToday.ok, false);
+  if (!missingToday.ok) assert.equal(missingToday.error, 'semester_config_missing');
+}
+
+async function checkClientParsing(): Promise<void> {
+  // 无效 JSON 不得被当作 needs_confirmation
+  const invalidJson = parseClassContextResponse(200, 'not-json');
+  assert.equal(invalidJson.ok, false);
+  if (!invalidJson.ok) assert.ok(invalidJson.message.includes('无法解析'));
+
+  for (const body of [
+    '{}',
+    JSON.stringify({ status: 'resolved' }),
+    JSON.stringify({
+      status: 'resolved',
+      class: { id: '', name: '班', stage: 'small', school_year: '2026-2027' },
+    }),
+    JSON.stringify({
+      status: 'resolved',
+      class: { id: 'c1', name: '班', stage: 'infant', school_year: '2026-2027' },
+    }),
+    JSON.stringify({
+      status: 'resolved',
+      class: { id: 'c1', name: '', stage: 'small', school_year: '2026-2027' },
+    }),
+    JSON.stringify({ status: 'needs_confirmation', reason: 'bogus' }),
+    JSON.stringify({ status: 'unknown' }),
+  ]) {
+    assert.equal(parseClassContextResponse(200, body).ok, false, `非法响应必须拒绝：${body}`);
+  }
+
+  const resolved = parseClassContextResponse(
+    200,
+    JSON.stringify({
+      status: 'resolved',
+      class: { id: 'c1', name: '真实班', stage: 'middle', school_year: '2026-2027' },
+    })
+  );
+  assert.ok(resolved.ok && resolved.state.status === 'resolved');
+  if (resolved.ok && resolved.state.status === 'resolved') {
+    assert.equal(resolved.state.class.stage, 'middle');
+  }
+
+  const confirm = parseClassContextResponse(
+    200,
+    JSON.stringify({ status: 'needs_confirmation', reason: 'unreliable_class_record' })
+  );
+  assert.ok(confirm.ok && confirm.state.status === 'needs_confirmation');
+  if (confirm.ok && confirm.state.status === 'needs_confirmation') {
+    assert.ok(confirm.state.message.length > 0, '缺少服务端文案时必须使用回退文案');
+  }
+
+  const httpError = parseClassContextResponse(500, JSON.stringify({ message: '服务暂不可用' }));
+  assert.equal(httpError.ok, false);
+  if (!httpError.ok) assert.equal(httpError.message, '服务暂不可用');
+  const bareError = parseClassContextResponse(503, '<html>bad gateway</html>');
+  assert.equal(bareError.ok, false);
+  if (!bareError.ok) assert.ok(bareError.message.includes('无法解析'));
+
+  // fetch 封装：URL 编码、无效 JSON 抛错、AbortError 原样抛出
+  let requestedUrl = '';
+  const okFetch = (async (url: string | URL | Request) => {
+    requestedUrl = String(url);
+    return {
+      status: 200,
+      text: async () =>
+        JSON.stringify({ status: 'needs_confirmation', reason: 'no_attribution', message: '请选择班级' }),
+    } as unknown as Response;
+  }) as typeof fetch;
+  const state = await fetchClassContextState({
+    childId: ID.childBackfill,
+    observedAt: '2030-09-15',
+    signal: new AbortController().signal,
+    fetchImpl: okFetch,
+  });
+  assert.equal(state.status, 'needs_confirmation');
+  assert.ok(requestedUrl.includes(encodeURIComponent('2030-09-15')));
+  assert.ok(!requestedUrl.includes('undefined'));
+
+  const invalidFetch = (async () =>
+    ({ status: 200, text: async () => 'not-json' }) as unknown as Response) as typeof fetch;
+  await assert.rejects(
+    fetchClassContextState({
+      childId: ID.childBackfill,
+      observedAt: '2030-09-15',
+      signal: new AbortController().signal,
+      fetchImpl: invalidFetch,
+    }),
+    /无法解析/
+  );
+
+  const abortFetch = (async () => {
+    throw new DOMException('aborted', 'AbortError');
+  }) as typeof fetch;
+  await assert.rejects(
+    fetchClassContextState({
+      childId: ID.childBackfill,
+      observedAt: '2030-09-15',
+      signal: new AbortController().signal,
+      fetchImpl: abortFetch,
+    }),
+    (error: unknown) => isAbortError(error)
+  );
+
+  // 严格班级解析：空/缺失/非法 stage 不得回退为小班
+  assert.equal(
+    parseReliableClass({ id: 'c1', name: '班', stage: '', school_year: '2026-2027' }),
+    null
+  );
+  assert.equal(
+    parseReliableClass({ id: 'c1', name: '班', stage: 'infant', school_year: '2026-2027' }),
+    null
+  );
+  assert.equal(parseReliableClass({ id: 'c1', name: '班', school_year: '2026-2027' }), null);
+  assert.equal(
+    parseReliableClass({ id: 'c1', name: '', stage: 'small', school_year: '2026-2027' }),
+    null
+  );
+  const reliable = parseReliableClass({
+    id: 'c1',
+    name: '真实班',
+    stage: 'large',
+    school_year: '2026-2027',
+    is_active: true,
+  });
+  assert.ok(reliable && reliable.stage === 'large');
+}
+
+function checkMigrationAndSchema(): void {
+  const migrationSql = readFileSync(
+    new URL('../scripts/upgrade-guide-evidence-v1.sql', import.meta.url),
+    'utf8'
+  );
+  const migrationCode = migrationSql.replace(/--[^\n]*/g, '');
+  assert.ok(migrationCode.includes('ADD COLUMN IF NOT EXISTS class_context_snapshot jsonb'));
+  assert.ok(migrationCode.includes('ADD COLUMN IF NOT EXISTS guide_evidence jsonb'));
+  assert.ok(!/UPDATE\s+observations/i.test(migrationCode), '迁移不得回填/改写观察');
+  assert.ok(!/DROP\s+(TABLE|COLUMN)/i.test(migrationCode));
+  assert.ok(!migrationCode.includes('legacy_import'), '迁移不得伪造 legacy_import 历史');
+  const initSql = readFileSync(
+    new URL('../scripts/initialize-demo-db.sql', import.meta.url),
+    'utf8'
+  );
+  assert.ok(initSql.includes('class_context_snapshot jsonb'));
+  assert.ok(initSql.includes('guide_evidence jsonb'));
+  const schemaSource = readFileSync(
+    new URL('../src/storage/database/shared/schema.ts', import.meta.url),
+    'utf8'
+  );
+  assert.ok(schemaSource.includes('class_context_snapshot: jsonb('));
+  assert.ok(schemaSource.includes('guide_evidence: jsonb('));
+  const scriptSource = readFileSync(new URL(import.meta.url), 'utf8');
+  // 拼出被禁用的外部 URL 访问写法，避免断言字符串自匹配
+  const forbiddenExternalAccess = ["process", "env", "HISTORY_TEST_DATABASE_URL"].join(".");
+  assert.ok(
+    !scriptSource.includes(forbiddenExternalAccess) &&
+      !/connectionString:\s*external/.test(scriptSource),
+    '已移除外部测试 URL 模式，不允许连接未知数据库'
+  );
+}
 
 async function main(): Promise<void> {
   let passed = 0;
   const previousPasscode = process.env[TEACHER_PASSCODE_KEY];
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+  // 哨兵：即使外部 URL 变量存在也必须被忽略（脚本只连接本轮容器）
+  const sentinelKey = 'HISTORY_TEST_DATABASE_URL';
+  const previousSentinel = process.env[sentinelKey];
+  process.env[sentinelKey] = 'postgresql://sentinel.invalid/never-touch';
+
+  const decoy = ensureLegacyNameDecoy();
+  let runContainerId: string | null = null;
 
   try {
-    // ————————————————————————— 离线：学期配置与范围解析 —————————————————————————
-    const semesters = listSemesters();
-    assert.ok(semesters.length >= 6, '学期配置应覆盖多个学年');
-    assert.equal(new Set(semesters.map((s) => s.id)).size, semesters.length, '学期 id 必须唯一');
-    for (const period of semesters) {
-      assert.ok(period.start_date <= period.end_date, `${period.id} 起止日期顺序错误`);
-      assert.ok(
-        /^\d{4}-\d{2}-\d{2}$/.test(period.start_date) && /^\d{4}-\d{2}-\d{2}$/.test(period.end_date),
-        `${period.id} 日期格式错误`
-      );
-      assert.ok(period.label.includes('项目演示校历'), '演示校历必须在标签中注明是项目配置');
-    }
-    assert.equal(getSemester('2026-2027-1')?.school_year, '2026-2027');
-    assert.equal(getSemester('不存在-1'), null);
-    const configSource = readFileSync(
-      new URL('../src/lib/semester/config.ts', import.meta.url),
-      'utf8'
-    );
-    assert.ok(configSource.includes('不是全国统一学期'), '配置须注明不是全国统一学期');
-
-    // 首尾含端点、跨年、当前学期
-    assert.equal(getCurrentSemester('2026-09-01')?.id, '2026-2027-1', '学期首日必须覆盖');
-    assert.equal(getCurrentSemester('2027-01-29')?.id, '2026-2027-1', '学期末日必须覆盖');
-    assert.equal(getCurrentSemester('2027-01-30'), null, '学期结束次日不应落入学期');
-    assert.equal(getCurrentSemester('2026-12-31')?.id, '2026-2027-1', '跨年日期属于本学期');
-    assert.equal(getCurrentSemester('2024-08-15'), null, '配置未覆盖的日期返回 null');
-
-    const bySemester = resolveEvidenceScope({ semester_id: '2025-2026-2' });
-    assert.ok(bySemester.ok);
-    assert.deepEqual(bySemester.scope, {
-      kind: 'semester',
-      semester_id: '2025-2026-2',
-      label: getSemester('2025-2026-2')?.label,
-      start_date: '2026-02-23',
-      end_date: '2026-07-10',
-      filter_field: 'observed_at',
-    });
-
-    // semester_id 优先于 from/to，且不因 from/to 不合法而报错
-    const priority = resolveEvidenceScope({
-      semester_id: '2026-2027-1',
-      from: 'not-a-date',
-      to: 'also-bad',
-    });
-    assert.ok(priority.ok);
-    assert.equal(priority.scope.semester_id, '2026-2027-1');
-
-    // 闰日合法、非法日期被拒
-    const leap = resolveEvidenceScope({ from: '2024-02-29', to: '2024-03-01' });
-    assert.ok(leap.ok);
-    assert.deepEqual(
-      [leap.scope.start_date, leap.scope.end_date],
-      ['2024-02-29', '2024-03-01']
-    );
-    for (const bad of [
-      { from: '2025-02-29', to: '2025-03-01' },
-      { from: '2026-02-30', to: '2026-03-01' },
-      { from: '2026-01-01' },
-      { to: '2026-01-01' },
-      { from: '2026-05-01', to: '2026-04-01' },
-    ]) {
-      const res = resolveEvidenceScope(bad);
-      assert.equal(res.ok, false, `非法范围应被拒绝：${JSON.stringify(bad)}`);
-      if (!res.ok) assert.equal(res.error, 'invalid_request');
-    }
-
-    const allHistory = resolveEvidenceScope({ scope: 'all_history' });
-    assert.ok(allHistory.ok);
-    assert.deepEqual(
-      [allHistory.scope.kind, allHistory.scope.start_date, allHistory.scope.end_date],
-      ['all_history', null, null]
-    );
-
-    const badScope = resolveEvidenceScope({ scope: 'last_year' });
-    assert.equal(badScope.ok, false);
-    const bareCustom = resolveEvidenceScope({ scope: 'custom_range' });
-    assert.equal(bareCustom.ok, false);
-
-    // 缺省当前学期；配置缺失时 semester_config_missing（409）
-    const current = resolveEvidenceScope({}, { today: '2026-10-03' });
-    assert.ok(current.ok);
-    assert.equal(current.scope.semester_id, '2026-2027-1');
-    const missing = resolveEvidenceScope({}, { semesters: [], today: '2026-10-03' });
-    assert.equal(missing.ok, false);
-    if (!missing.ok) assert.equal(missing.error, 'semester_config_missing');
-    const missingToday = resolveEvidenceScope({}, { today: '2020-01-01' });
-    assert.equal(missingToday.ok, false);
-    if (!missingToday.ok) assert.equal(missingToday.error, 'semester_config_missing');
+    checkSemesterBoundary();
+    passed += 1;
+    await checkClientParsing();
+    passed += 1;
+    checkMigrationAndSchema();
     passed += 1;
 
-    // ————————————————————————— 离线：迁移与初始化同构 —————————————————————————
-    const migrationSql = readFileSync(
-      new URL('../scripts/upgrade-guide-evidence-v1.sql', import.meta.url),
-      'utf8'
-    );
-    // 只检查可执行语句：注释里说明“不伪造 legacy_import”不应触发禁令
-    const migrationCode = migrationSql.replace(/--[^\n]*/g, '');
-    assert.ok(migrationCode.includes('ADD COLUMN IF NOT EXISTS class_context_snapshot jsonb'));
-    assert.ok(migrationCode.includes('ADD COLUMN IF NOT EXISTS guide_evidence jsonb'));
-    assert.ok(!/UPDATE\s+observations/i.test(migrationCode), '迁移不得回填/改写观察');
-    assert.ok(!/DROP\s+(TABLE|COLUMN)/i.test(migrationCode));
-    assert.ok(!migrationCode.includes('legacy_import'), '迁移不得伪造 legacy_import 历史');
-    const initSql = readFileSync(
-      new URL('../scripts/initialize-demo-db.sql', import.meta.url),
-      'utf8'
-    );
-    assert.ok(initSql.includes('class_context_snapshot jsonb'));
-    assert.ok(initSql.includes('guide_evidence jsonb'));
-    const schemaSource = readFileSync(
-      new URL('../src/storage/database/shared/schema.ts', import.meta.url),
-      'utf8'
-    );
-    assert.ok(schemaSource.includes('class_context_snapshot: jsonb('));
-    assert.ok(schemaSource.includes('guide_evidence: jsonb('));
-    passed += 1;
-
-    // ————————————————————————— 实库（一次性本地 Postgres） —————————————————————————
-    const { url, teardown } = await startTestDatabase();
-    process.env.DATABASE_URL = url;
-    const setup = new Client({ connectionString: url });
+    // ——————————————————— 实库（本轮唯一一次性容器；身份校验后写入） ———————————————————
+    const db = await startTestDatabase();
+    runContainerId = db.containerId;
+    process.env.DATABASE_URL = db.url;
+    const setup = new Client({ connectionString: db.url });
     await setup.connect();
 
     process.env[TEACHER_PASSCODE_KEY] = 'history-offline-passcode';
@@ -369,11 +649,15 @@ async function main(): Promise<void> {
       await insertClass({ id: ID.classTransferFrom, name: '转出前班', stage: 'small', school_year: '2031-2032' });
       await insertClass({ id: ID.classTransferTo, name: '转出后班', stage: 'middle', school_year: '2031-2032' });
       await insertClass({ id: ID.classEnrollmentOnly, name: '仅分班班', stage: 'large', school_year: '2033-2034' });
+      await insertClass({ id: ID.classObservationOnly, name: '仅观察班', stage: 'small', school_year: '2033-2034' });
+      await insertClass({ id: ID.classRace, name: '竞态班级', stage: 'small', school_year: '2035-2036' });
       await insertChild(ID.childBackfill, '补录幼儿');
       await insertChild(ID.childOverlap, '重叠幼儿');
       await insertChild(ID.childBroken, '异常幼儿');
       await insertChild(ID.childTransfer, '转班幼儿');
       await insertChild(ID.childEnrollmentOnly, '仅分班幼儿');
+      await insertChild(ID.childObservationOnly, '仅观察幼儿');
+      await insertChild(ID.childRace, '竞态幼儿');
       await insertEnrollment({
         id: ID.enrollBackfillA,
         child_id: ID.childBackfill,
@@ -424,6 +708,12 @@ async function main(): Promise<void> {
         start_date: '2033-01-01',
         end_date: null,
       });
+      // 只有观察、没有分班的班级
+      await query(
+        `INSERT INTO observations (child_id, class_id, observed_at, raw_text)
+         VALUES ($1, $2, '2033-06-01', '仅观察班级的历史观察原文，用于验证观察引用同样受学段保护。')`,
+        [ID.childObservationOnly, ID.classObservationOnly]
+      );
 
       // 1) 补录转班前 / 转班当天 / 转班后 / 缺失归属
       const beforeTransfer = await resolveClassContextAt(ID.childBackfill, '2030-09-15');
@@ -485,6 +775,7 @@ async function main(): Promise<void> {
       const lookupBody = (await lookupRes.json()) as ApiBody;
       assert.equal(lookupBody.status, 'resolved');
       assert.equal(lookupBody.class?.name, '历史小班');
+      assert.equal(lookupBody.class?.stage, 'small');
       assert.equal((await getClassContext(ID.childBackfill, '2025-02-29')).status, 400);
       assert.equal(
         (await getClassContext('c9c90000-0000-4000-8000-000000000000', '2030-09-15')).status,
@@ -590,6 +881,8 @@ async function main(): Promise<void> {
         confirmed_class_id: 'c9c90000-0000-4000-8000-000000000000',
       });
       assert.equal(missingClassRes.status, 400);
+      const missingClassBody = (await missingClassRes.json()) as ApiBody;
+      assert.equal(missingClassBody.error, 'class_context_unreliable');
       passed += 1;
 
       // 7) 转班 API 后：转出前后日期分别解析到对应班级
@@ -639,6 +932,8 @@ async function main(): Promise<void> {
       assert.equal(deactivate.status, 200);
       const enrollmentOnlyChange = await patchClass(ID.classEnrollmentOnly, { stage: 'middle' });
       assert.equal(enrollmentOnlyChange.status, 409, '只有分班历史也必须保护');
+      const observationOnlyChange = await patchClass(ID.classObservationOnly, { stage: 'middle' });
+      assert.equal(observationOnlyChange.status, 409, '只有观察引用也必须保护');
       const freshChange = await patchClass(ID.classFresh, { stage: 'middle', school_year: '2031-2032' });
       assert.equal(freshChange.status, 200, '无历史班级允许纠错修改');
       const freshDetail = await getClassHandler(
@@ -656,7 +951,83 @@ async function main(): Promise<void> {
       assert.ok((smallHistory?.observation_count ?? 0) >= 1);
       passed += 1;
 
-      // 10) 新快照数量 = 本自检写入的观察数；旧记录仍全部为 NULL；三件套未变
+      // 10) 受控双连接竞争：未提交的分班写入会阻塞学段修改，提交后必须拒绝，且班级未被改动
+      const racer = new Client({ connectionString: db.url });
+      await racer.connect();
+      await racer.query('BEGIN');
+      await racer.query(
+        `INSERT INTO child_class_enrollments (id, child_id, class_id, start_date, end_date)
+         VALUES ($1, $2, $3, '2035-01-05', NULL)`,
+        [ID.enrollRace, ID.childRace, ID.classRace]
+      );
+      const raceUpdate = updateClass(ID.classRace, { stage: 'middle' });
+      const early = await Promise.race([
+        raceUpdate.then(
+          () => 'settled',
+          () => 'settled'
+        ),
+        sleep(700).then(() => 'blocked'),
+      ]);
+      assert.equal(early, 'blocked', '学段修改必须等待未提交的分班写入，而不是先通过检查再更新');
+      await racer.query('COMMIT');
+      await racer.end();
+      await assert.rejects(raceUpdate, (error: unknown) => error instanceof ClassHistoryProtectedError);
+      const raceState = await queryOne<{ stage: string }>(
+        `SELECT stage FROM classes WHERE id = $1`,
+        [ID.classRace]
+      );
+      assert.equal(raceState?.stage, 'small', '竞争失败后不得留下学段修改');
+      const raceEnrollment = await queryOne<{ count: number }>(
+        `SELECT count(*)::int AS count FROM child_class_enrollments WHERE class_id = $1`,
+        [ID.classRace]
+      );
+      assert.equal(raceEnrollment?.count, 1);
+      passed += 1;
+
+      // 11) 缺失/非法学段：不得生成默认小班快照；教师确认也必须拒绝
+      await query('ALTER TABLE classes DROP CONSTRAINT classes_stage_check');
+      await insertClass({
+        id: ID.classBrokenRecord,
+        name: '资料损坏班',
+        stage: '',
+        school_year: '2034-2035',
+      });
+      await insertChild(ID.childBrokenRecord, '资料损坏幼儿');
+      await insertEnrollment({
+        id: ID.enrollBrokenRecord,
+        child_id: ID.childBrokenRecord,
+        class_id: ID.classBrokenRecord,
+        start_date: '2034-01-05',
+        end_date: null,
+      });
+      const brokenRecordLookup = await resolveClassContextAt(ID.childBrokenRecord, '2034-03-01');
+      assert.ok(brokenRecordLookup.status === 'needs_confirmation');
+      assert.equal(brokenRecordLookup.reason, 'unreliable_class_record');
+      const brokenRecordRes = await postObservation({
+        child_id: ID.childBrokenRecord,
+        observed_at: '2034-03-01',
+        raw_text: '资料损坏班级的观察原文：幼儿在活动中持续专注地完成拼图并主动帮助同伴。',
+      });
+      assert.equal(brokenRecordRes.status, 409);
+      const brokenRecordBody = (await brokenRecordRes.json()) as ApiBody;
+      assert.equal(brokenRecordBody.reason, 'unreliable_class_record');
+      const brokenConfirmRes = await postObservation({
+        child_id: ID.childBrokenRecord,
+        observed_at: '2034-03-01',
+        raw_text: '教师手动确认损坏班级时也必须被拒绝而不是写入小班快照。',
+        confirmed_class_id: ID.classBrokenRecord,
+      });
+      assert.equal(brokenConfirmRes.status, 400);
+      const brokenConfirmBody = (await brokenConfirmRes.json()) as ApiBody;
+      assert.equal(brokenConfirmBody.error, 'class_context_unreliable');
+      const brokenWritten = await queryOne<{ count: number }>(
+        `SELECT count(*)::int AS count FROM observations WHERE child_id = $1`,
+        [ID.childBrokenRecord]
+      );
+      assert.equal(brokenWritten?.count, 0, '资料不可核实前不得写入任何观察');
+      passed += 1;
+
+      // 12) 新快照数量 = 本自检写入的观察数；旧记录仍全部为 NULL；三件套未变
       const snapshotCount = await queryOne<{ count: number }>(
         `SELECT count(*)::int AS count FROM observations WHERE class_context_snapshot IS NOT NULL`
       );
@@ -667,16 +1038,48 @@ async function main(): Promise<void> {
       );
       assert.equal(demoStillNull.length, 0);
       assert.deepEqual(await snapshotCore(), coreBefore);
+      passed += 1;
 
-      console.log(JSON.stringify({ passed, total: passed, database: 'isolated-local-postgres' }));
+      // 13) 资源安全：本轮容器 ID 可核实；反例容器仍存在（本轮清理不按名称误删）
+      if (containerIdOf(db.containerId) !== db.containerId) {
+        throw new Error('本轮容器在自检结束前异常消失');
+      }
+      if (decoy.id) {
+        assert.ok(containerIdOf(decoy.id), '反例容器被误删：清理必须只针对本轮容器 ID');
+      } else {
+        assert.ok(containerIdOf(LEGACY_CONTAINER_NAME), '已有同名容器必须保持不动');
+      }
+      passed += 1;
+
+      console.log(
+        JSON.stringify({
+          passed,
+          total: passed,
+          database: 'disposable-local-postgres (identity-verified before DDL)',
+          resource_safety: {
+            run_id: RUN_ID,
+            container: db.containerId.slice(0, 12),
+            cleanup: 'by-container-id-only',
+            external_url_mode: 'removed',
+            decoy_container_preserved: true,
+          },
+          simulated_responses: 'client parser covered offline; browser interception is separate',
+        })
+      );
     } finally {
       await globalThis.__pgPool?.end();
       await setup.end();
-      teardown();
+      db.teardown();
     }
   } finally {
+    if (decoy.created && decoy.id) removeContainerById(decoy.id);
+    removeContainerById(runContainerId && containerIdOf(runContainerId) ? runContainerId : null);
     if (previousPasscode === undefined) delete process.env[TEACHER_PASSCODE_KEY];
     else process.env[TEACHER_PASSCODE_KEY] = previousPasscode;
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
+    if (previousSentinel === undefined) delete process.env[sentinelKey];
+    else process.env[sentinelKey] = previousSentinel;
   }
 }
 
