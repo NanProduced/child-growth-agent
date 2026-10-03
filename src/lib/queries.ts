@@ -4,10 +4,32 @@ import {
   queryOne,
   withTransaction,
 } from "@/storage/database/pg-client";
+import { randomUUID } from "node:crypto";
 import { ObservationStateConflictError, StaleEvidenceError } from "./evidence-snapshot";
 import { isoDateInShanghai } from "./format";
-import type { ObservationClassContextSnapshot } from "./guide/types";
+import {
+  GuideEvidenceConflictError,
+  GuideEvidenceNotFoundError,
+  applyGuideDecisions,
+  applyGuideTerminalOperation,
+  type ApplyDecisionsContext,
+  type DecisionSourceObservation,
+} from "./guide/decisions";
+import { guideItemById } from "./guide/item-index";
+import {
+  buildMutationLinkViews,
+  parseGuideEvidence,
+  type EvidenceObservation,
+} from "./guide/runtime";
+import {
+  GUIDE_CATALOG_VERSION,
+  type GuideEvidenceLink,
+  type ObservationClassContextSnapshot,
+} from "./guide/types";
+import type { ValidatedGuideSuggestion } from "./guide/suggest";
+import type { GuideEvidenceDecisionParsed, GuideEvidenceMutationParsed } from "./validation";
 import { CLASS_STAGES } from "./types";
+import type { EvidenceLinkView } from "./guide/view-types";
 import type {
   ActivitySupport,
   AgentContext,
@@ -834,16 +856,51 @@ export type ConfirmObservationPremise = {
   aiDraft: ObservationDraft | null;
 };
 
+/** 归档时同事务应用的指南证据决定（G5）；expectedRevision 为读取时的容器修订号 */
+export type GuideConfirmPlan = {
+  expectedRevision: number;
+  decisions: GuideEvidenceDecisionParsed[];
+};
+
+/** 事务内读取该儿童全部观察（供依据核对与来源快照生成；不复用列表 LIMIT） */
+async function loadChildObservationsWithClient(
+  client: TransactionClient,
+  childId: string,
+): Promise<Observation[]> {
+  const rows = await client.query<{ data: Row }>(
+    `${OBSERVATION_SELECT} WHERE o.child_id = $1 ORDER BY o.observed_at ASC, o.created_at ASC`,
+    [childId],
+  );
+  return rows.rows.map((row) => mapObservation(row.data));
+}
+
+function toDecisionSource(observation: Observation): DecisionSourceObservation {
+  return {
+    id: observation.id,
+    child_id: observation.child_id,
+    observed_at: observation.observed_at,
+    raw_text: observation.raw_text,
+    status: observation.status,
+    confirmed_content: observation.confirmed_content,
+    confirmed_at: observation.confirmed_at,
+    class_context_snapshot: observation.class_context_snapshot ?? null,
+  };
+}
+
 /**
  * 教师确认：与其他档案保存共享同一儿童行锁。
  * 事务内先锁 children 行，再核对观察当前状态与前提快照，最后写入 confirmed_content；
  * 成功后的模型生成必须在事务提交之后执行（由调用方负责）。
+ *
+ * G5 扩展：携带 guide 时，指南证据决定在同一事务内应用（全有或全无）；
+ * 当前观察作为依据时，以本次即将归档的 confirmed_content 与实际 confirmed_at 生成快照。
  */
 export async function confirmObservation(
   id: string,
   childId: string,
   confirmed_content: ObservationDraft,
   premise: ConfirmObservationPremise,
+  guide?: GuideConfirmPlan,
 ): Promise<Observation> {
   const now = new Date().toISOString();
   return withTransaction(async (client) => {
@@ -867,6 +924,62 @@ export async function confirmObservation(
         "记录在核对后已被更新，请刷新最新记录后重新确认。",
       );
     }
+
+    let guideJson: string | null = null;
+    if (guide) {
+      const guideRow = await client.query<{ guide_evidence: unknown }>(
+        "SELECT guide_evidence FROM observations WHERE id = $1",
+        [id],
+      );
+      const parsed = parseGuideEvidence(guideRow.rows[0]?.guide_evidence ?? null);
+      if (parsed.kind === "unreadable") {
+        throw new GuideEvidenceConflictError(
+          "该观察的指南证据结构无法读取，不能在同一事务中应用关联决定。",
+        );
+      }
+      if (parsed.revision !== guide.expectedRevision) {
+        throw new GuideEvidenceConflictError(
+          "指南证据已在其他操作中更新（revision 过期），请刷新后重新确认。",
+        );
+      }
+      const sources = await loadChildObservationsWithClient(client, childId);
+      const sourceById = new Map(sources.map((source) => [source.id, toDecisionSource(source)]));
+      const currentSource = sourceById.get(id);
+      sourceById.set(id, {
+        id,
+        child_id: childId,
+        observed_at: currentSource?.observed_at ?? "",
+        raw_text: currentSource?.raw_text ?? "",
+        status: "confirmed",
+        confirmed_content,
+        confirmed_at: now,
+        class_context_snapshot: currentSource?.class_context_snapshot ?? null,
+      });
+      const ctx: ApplyDecisionsContext = {
+        childId,
+        itemById: guideItemById,
+        sourceById,
+        now,
+      };
+      const applied = applyGuideDecisions(parsed, guide.decisions, ctx);
+      if (applied.changed && applied.container) {
+        guideJson = JSON.stringify(applied.container);
+      }
+    }
+
+    if (guideJson !== null) {
+      const updated = await client.query<{ data: Row }>(
+        `UPDATE observations
+         SET confirmed_content = $2::jsonb, confirmed_at = $3, status = 'confirmed',
+             guide_evidence = $4::jsonb, updated_at = $3
+         WHERE id = $1
+         RETURNING to_jsonb(observations.*) AS data`,
+        [id, JSON.stringify(confirmed_content), now, guideJson],
+      );
+      if (updated.rowCount === 0) throw new Error("确认归档失败：记录不存在");
+      return mapObservation(updated.rows[0].data);
+    }
+
     const updated = await client.query<{ data: Row }>(
       `UPDATE observations
        SET confirmed_content = $2::jsonb, confirmed_at = $3, status = 'confirmed', updated_at = $3
@@ -876,5 +989,309 @@ export async function confirmObservation(
     );
     if (updated.rowCount === 0) throw new Error("确认归档失败：记录不存在");
     return mapObservation(updated.rows[0].data);
+  });
+}
+
+/* ------------------------- 指南证据读写（G5） ------------------------- */
+
+/** 读模型专用：取目标儿童全部观察，不使用列表默认 LIMIT（统计不得被截断） */
+export async function listObservationsForChildren(childIds: string[]): Promise<Observation[]> {
+  if (childIds.length === 0) return [];
+  const rows = await query<{ data: Row }>(
+    `${OBSERVATION_SELECT} WHERE o.child_id = ANY($1::text[])
+      ORDER BY o.observed_at ASC, o.created_at ASC`,
+    [childIds],
+  );
+  return rows.map((row) => mapObservation(row.data));
+}
+
+export interface GuideMutationResult {
+  observation: Observation;
+  revision: number;
+  links: EvidenceLinkView[];
+}
+
+async function lockObservationForGuide(
+  client: TransactionClient,
+  observationId: string,
+): Promise<Observation> {
+  const childRow = await client.query<{ child_id: string }>(
+    "SELECT child_id FROM observations WHERE id = $1",
+    [observationId],
+  );
+  if (childRow.rowCount === 0) {
+    throw new GuideEvidenceNotFoundError("观察记录不存在", undefined);
+  }
+  const childId = childRow.rows[0].child_id;
+  await lockChild(client, childId);
+  const locked = await client.query<{ data: Row }>(
+    "SELECT to_jsonb(o.*) AS data FROM observations o WHERE o.id = $1 FOR UPDATE",
+    [observationId],
+  );
+  if (locked.rowCount === 0) {
+    throw new GuideEvidenceNotFoundError("观察记录不存在", undefined);
+  }
+  return mapObservation(locked.rows[0].data);
+}
+
+async function applyGuideUpdate(
+  client: TransactionClient,
+  observation: Observation,
+  container: unknown,
+  now: string,
+): Promise<Observation> {
+  const oldJson = observation.guide_evidence ?? null;
+  const updated = await client.query<{ data: Row }>(
+    `UPDATE observations
+        SET guide_evidence = $2::jsonb, updated_at = $3
+      WHERE id = $1
+        AND guide_evidence IS NOT DISTINCT FROM $4::jsonb
+      RETURNING to_jsonb(observations.*) AS data`,
+    [
+      observation.id,
+      JSON.stringify(container),
+      now,
+      oldJson === null ? null : JSON.stringify(oldJson),
+    ],
+  );
+  if (updated.rowCount === 0) {
+    throw new GuideEvidenceConflictError("指南证据在写入前已被其他操作更新，请刷新后重试。");
+  }
+  return mapObservation(updated.rows[0].data);
+}
+
+function mutationResult(
+  observation: Observation,
+  revision: number,
+  links: EvidenceLinkView[],
+): GuideMutationResult {
+  return { observation, revision, links };
+}
+
+async function buildMutationViews(
+  client: TransactionClient,
+  childId: string,
+  links: Parameters<typeof buildMutationLinkViews>[0],
+): Promise<EvidenceLinkView[]> {
+  const sources = await loadChildObservationsWithClient(client, childId);
+  const observationById = new Map<string, EvidenceObservation>(
+    sources.map((source) => [source.id, source]),
+  );
+  return buildMutationLinkViews(links, childId, observationById, guideItemById);
+}
+
+/** 确认归档后构建响应 links（读模型之外的一次只读查询，不参与事务） */
+export async function buildGuideResponseLinks(
+  observation: Observation,
+): Promise<{ revision: number; links: EvidenceLinkView[] }> {
+  const parsed = parseGuideEvidence(observation.guide_evidence);
+  if (parsed.kind !== "ok") return { revision: 0, links: [] };
+  const sources = await listObservationsForChildren([observation.child_id]);
+  const observationById = new Map<string, EvidenceObservation>(
+    sources.map((source) => [source.id, source]),
+  );
+  return {
+    revision: parsed.revision,
+    links: buildMutationLinkViews(
+      parsed.links.map((link) => link.raw as unknown as GuideEvidenceLink),
+      observation.child_id,
+      observationById,
+      guideItemById,
+    ),
+  };
+}
+
+/**
+ * 独立证据操作（confirm / reject / withdraw）的事务内实现：
+ * 先锁儿童行、再锁观察行（children → observations），全部决定先校验后应用；
+ * 任一条失败整个事务回滚（不写入任何决定）。
+ * 测试可用受控双连接交错直接调用本函数验证真实竞争结果。
+ */
+export async function applyGuideEvidenceMutationWithClient(
+  client: TransactionClient,
+  observationId: string,
+  mutation: Extract<GuideEvidenceMutationParsed, { action: "confirm" | "reject" | "withdraw" }>,
+): Promise<GuideMutationResult> {
+  const now = new Date().toISOString();
+  const observation = await lockObservationForGuide(client, observationId);
+  const parsed = parseGuideEvidence(observation.guide_evidence);
+  const parsedRevision = parsed.kind === "unreadable" ? 0 : parsed.revision;
+  const sources = await loadChildObservationsWithClient(client, observation.child_id);
+  const sourceById = new Map(sources.map((source) => [source.id, toDecisionSource(source)]));
+  const ctx: ApplyDecisionsContext = {
+    childId: observation.child_id,
+    itemById: guideItemById,
+    sourceById,
+    now,
+  };
+  const result =
+    mutation.action === "confirm"
+      ? applyGuideDecisions(parsed, mutation.decisions, ctx)
+      : applyGuideTerminalOperation(
+          parsed,
+          mutation.action,
+          mutation.link_id,
+          mutation.reason,
+          ctx,
+        );
+
+  if (mutation.expected_guide_revision !== parsedRevision && result.changed) {
+    throw new GuideEvidenceConflictError(
+      "指南证据已被其他操作更新（revision 过期），请刷新后重试。",
+    );
+  }
+  if (!result.changed || !result.container) {
+    const links = await buildMutationViews(client, observation.child_id, result.links);
+    return mutationResult(observation, parsedRevision, links);
+  }
+  const updated = await applyGuideUpdate(client, observation, result.container, now);
+  const links = await buildMutationViews(client, observation.child_id, result.links);
+  return mutationResult(updated, result.revision, links);
+}
+
+export async function applyGuideEvidenceMutation(
+  observationId: string,
+  mutation: Extract<GuideEvidenceMutationParsed, { action: "confirm" | "reject" | "withdraw" }>,
+): Promise<GuideMutationResult> {
+  return withTransaction((client) =>
+    applyGuideEvidenceMutationWithClient(client, observationId, mutation),
+  );
+}
+
+export interface GuideSuggestionPersistInput {
+  expectedRevision: number;
+  expectedStatus: ObservationStatus;
+  expectedRawText: string;
+  expectedAiDraft: ObservationDraft | null;
+  expectedConfirmedContent: ObservationDraft | null;
+  ok: boolean;
+  model: string | null;
+  error?: string;
+  suggestions: ValidatedGuideSuggestion[];
+}
+
+/**
+ * 保存 AI 建议结果（成功追加 ai_suggested；失败记录 last_attempt{ok:false}）。
+ * 写入前重核生成前提：观察状态/原文/草稿/确认稿与容器 revision 全部一致；
+ * 已有任何关联（含拒绝/撤回历史）的条目不再追加；冲突返回 409，不自动重放。
+ */
+export async function saveGuideEvidenceSuggestionResult(
+  observationId: string,
+  input: GuideSuggestionPersistInput,
+): Promise<GuideMutationResult> {
+  const now = new Date().toISOString();
+  return withTransaction(async (client) => {
+    const observation = await lockObservationForGuide(client, observationId);
+    if (
+      observation.status !== input.expectedStatus ||
+      observation.raw_text !== input.expectedRawText ||
+      canonicalJson(observation.ai_draft ?? null) !== canonicalJson(input.expectedAiDraft ?? null) ||
+      canonicalJson(observation.confirmed_content ?? null) !==
+        canonicalJson(input.expectedConfirmedContent ?? null)
+    ) {
+      throw new GuideEvidenceConflictError(
+        "观察在 AI 关联期间已被更新或归档，迟到的建议不会覆盖当前记录。",
+      );
+    }
+    const parsed = parseGuideEvidence(observation.guide_evidence);
+    if (parsed.kind === "unreadable") {
+      if (!input.ok) {
+        return mutationResult(observation, 0, []);
+      }
+      throw new GuideEvidenceConflictError(
+        "该观察的指南证据结构无法读取，不能追加 AI 建议；请先人工核对原始数据。",
+      );
+    }
+    if (parsed.revision !== input.expectedRevision) {
+      throw new GuideEvidenceConflictError(
+        "指南证据已被其他操作更新（revision 过期），迟到的 AI 建议不会覆盖当前状态。",
+      );
+    }
+
+    if (!input.ok) {
+      const container = {
+        ...(parsed.kind === "ok" ? parsed.raw : {}),
+        revision: parsed.revision + 1,
+        links: parsed.kind === "ok" ? parsed.raw.links : [],
+        last_attempt: {
+          at: now,
+          model: input.model ?? "unknown",
+          ok: false,
+          suggested_count: 0,
+          error: input.error ?? "AI 关联失败",
+        },
+      };
+      const updated = await applyGuideUpdate(client, observation, container, now);
+      const links = await buildMutationViews(
+        client,
+        observation.child_id,
+        parsed.kind === "ok"
+          ? parsed.links.map((link) => link.raw as unknown as GuideEvidenceLink)
+          : [],
+      );
+      return mutationResult(updated, parsed.revision + 1, links);
+    }
+
+    const existingItemIds = new Set(
+      (parsed.kind === "ok" ? parsed.links : []).map((link) => link.item_id),
+    );
+    const fresh = input.suggestions.filter((suggestion) => !existingItemIds.has(suggestion.item_id));
+    if (fresh.length === 0) {
+      const links = await buildMutationViews(
+        client,
+        observation.child_id,
+        parsed.kind === "ok"
+          ? parsed.links.map((link) => link.raw as unknown as GuideEvidenceLink)
+          : [],
+      );
+      return mutationResult(observation, parsed.revision, links);
+    }
+    const newLinks = fresh.map((suggestion) => ({
+      id: randomUUID(),
+      item_id: suggestion.item_id,
+      catalog_version: GUIDE_CATALOG_VERSION,
+      origin: "ai" as const,
+      status: "ai_suggested" as const,
+      support: null,
+      adult_help_used: false,
+      basis: [
+        {
+          observation_id: suggestion.source_observation_id,
+          observed_at: suggestion.observed_at,
+          quote: suggestion.quote,
+          quote_source: suggestion.quote_source,
+          quote_field: suggestion.quote_field,
+          class_context: suggestion.class_context,
+          source_confirmed_at: suggestion.source_confirmed_at,
+        },
+      ],
+      ai_reason: suggestion.reason,
+      teacher_note: null,
+      revision: 1,
+      created_at: now,
+      decided_at: null,
+      withdrawn_at: null,
+      withdrawn_reason: null,
+    }));
+    const container = {
+      ...(parsed.kind === "ok" ? parsed.raw : {}),
+      revision: parsed.revision + 1,
+      links: [...(parsed.kind === "ok" ? (parsed.raw.links as unknown[]) : []), ...newLinks],
+      last_attempt: {
+        at: now,
+        model: input.model ?? "unknown",
+        ok: true,
+        suggested_count: newLinks.length,
+      },
+    };
+    const updated = await applyGuideUpdate(client, observation, container, now);
+    const allLinks = [
+      ...(parsed.kind === "ok"
+        ? parsed.links.map((link) => link.raw as unknown as GuideEvidenceLink)
+        : []),
+      ...newLinks,
+    ];
+    const links = await buildMutationViews(client, observation.child_id, allLinks);
+    return mutationResult(updated, parsed.revision + 1, links);
   });
 }

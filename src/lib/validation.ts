@@ -1,5 +1,10 @@
 import { z } from "zod";
 import { parseIsoDateStrict } from "./format";
+import {
+  GUIDE_EVIDENCE_QUOTE_FIELDS,
+  GUIDE_EVIDENCE_QUOTE_SOURCES,
+  GUIDE_EVIDENCE_SUPPORT_KINDS,
+} from "./guide/types";
 import { CLASS_STAGES, FIVE_DOMAINS } from "./types";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -232,11 +237,95 @@ export const activitySupportSchema = activitySupportDraftSchema
   })
   .strict();
 
+/* ------------------------- 指南证据关联（G5） ------------------------- */
+
+const evidenceDate = z
+  .string()
+  .regex(DATE_RE, "日期格式应为 YYYY-MM-DD")
+  .refine((value) => parseIsoDateStrict(value) !== null, "日期不是真实存在的日历日期");
+
+/** 依据输入：只提交来源定位与片段；observed_at / 班级快照 / 版本一律由服务端读取生成 */
+export const guideEvidenceBasisInputSchema = z.object({
+  observation_id: z.string().min(1).max(64),
+  quote: z.string().min(1).max(500),
+  quote_source: z.enum(GUIDE_EVIDENCE_QUOTE_SOURCES),
+  quote_field: z.enum(GUIDE_EVIDENCE_QUOTE_FIELDS).nullish(),
+});
+
+export const guideEvidencePeriodNoteSchema = z.object({
+  period_start: evidenceDate,
+  period_end: evidenceDate,
+  description: z.string().min(10, "连续观察纪要说明至少 10 字").max(500),
+});
+
+const guideDecisionCommon = {
+  support: z.enum(GUIDE_EVIDENCE_SUPPORT_KINDS),
+  basis: z.array(guideEvidenceBasisInputSchema).min(1, "教师决定至少需要一条依据").max(10),
+  sustained_note: guideEvidencePeriodNoteSchema.nullish(),
+  adult_help_used: z.boolean().optional(),
+  teacher_note: z.string().max(500).optional(),
+};
+
+export const guideEvidenceLinkDecisionSchema = z
+  .object({
+    link_id: z.string().min(1).max(64),
+    ...guideDecisionCommon,
+  })
+  .strict();
+
+export const guideEvidenceManualDecisionSchema = z
+  .object({
+    item_id: z.string().min(1).max(200),
+    ...guideDecisionCommon,
+  })
+  .strict();
+
+export const guideEvidenceDecisionSchema = z.union([
+  guideEvidenceLinkDecisionSchema,
+  guideEvidenceManualDecisionSchema,
+]);
+
+export const guideEvidenceMutationSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("suggest") }),
+  z.object({
+    action: z.literal("confirm"),
+    expected_guide_revision: z.number().int().min(0),
+    decisions: z.array(guideEvidenceDecisionSchema).min(1).max(20),
+  }),
+  z.object({
+    action: z.literal("reject"),
+    link_id: z.string().min(1).max(64),
+    expected_guide_revision: z.number().int().min(0),
+    reason: z.string().max(500).optional(),
+  }),
+  z.object({
+    action: z.literal("withdraw"),
+    link_id: z.string().min(1).max(64),
+    expected_guide_revision: z.number().int().min(0),
+    reason: z.string().max(500).optional(),
+  }),
+]);
+
 export const confirmObservationSchema = z.object({
   content: observationDraftSchema,
   teacher_note: z.string().max(500).optional(),
   /** 教师对审核 clarify 问题的补充回答；只在存在待澄清审核时使用 */
   clarification: z.string().max(2000).optional(),
+  /** 指南证据关联决定：与归档在同一事务协调生效（G5，可选） */
+  guide_decisions: z
+    .object({
+      expected_guide_revision: z.number().int().min(0),
+      decisions: z.array(guideEvidenceDecisionSchema).min(1).max(20),
+    })
+    .optional(),
 });
 
 export type ConfirmObservationInput = z.infer<typeof confirmObservationSchema>;
+
+export type GuideEvidenceBasisInputParsed = z.infer<typeof guideEvidenceBasisInputSchema>;
+export type GuideEvidencePeriodNoteParsed = z.infer<typeof guideEvidencePeriodNoteSchema>;
+export type GuideEvidenceDecisionParsed = z.infer<typeof guideEvidenceDecisionSchema>;
+export type GuideEvidenceMutationParsed = z.infer<typeof guideEvidenceMutationSchema>;
+export type GuideDecisionsParsed = z.infer<
+  NonNullable<ConfirmObservationInput["guide_decisions"]>
+>;

@@ -8,7 +8,8 @@ export type LlmResponseType =
   | 'observation_draft'
   | 'teacher_edit_review'
   | 'growth_profile'
-  | 'activity_support';
+  | 'activity_support'
+  | 'guide_evidence_suggestion';
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -163,6 +164,37 @@ const STEPFUN_RESPONSE_FORMATS: Record<LlmResponseType, object> = {
                 observe: { type: 'string' },
                 adaptation: { type: 'string' },
                 evidence: { type: 'array', minItems: 1, maxItems: 4, items: { type: 'string' } },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  // 指南证据关联建议：只输出候选条目、理由与可核对引用；quote_field 用 "" 表示 raw_text（null）
+  guide_evidence_suggestion: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'guide_evidence_suggestion',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['suggestions'],
+        properties: {
+          suggestions: {
+            type: 'array',
+            maxItems: 5,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['item_id', 'reason', 'quote', 'quote_source', 'quote_field'],
+              properties: {
+                item_id: { type: 'string' },
+                reason: { type: 'string' },
+                quote: { type: 'string' },
+                quote_source: { type: 'string', enum: ['raw_text', 'confirmed_content'] },
+                quote_field: { type: 'string', enum: ['highlight_quote', 'highlights', ''] },
               },
             },
           },

@@ -4,6 +4,13 @@ import { reviewTeacherEdit } from "@/lib/ai";
 import { requireTeacher } from "@/lib/auth";
 import { ObservationStateConflictError } from "@/lib/evidence-snapshot";
 import {
+  GuideEvidenceCatalogError,
+  GuideEvidenceConflictError,
+  GuideEvidenceInvalidError,
+  GuideEvidenceNotFoundError,
+} from "@/lib/guide/decisions";
+import {
+  buildGuideResponseLinks,
   confirmObservation,
   getObservation,
   getChild,
@@ -172,6 +179,9 @@ export async function POST(
         observation: updated,
         requiresAgentConfirmation: true,
         agentReview: review,
+        ...(parsed.data.guide_decisions
+          ? { guideEvidence: { status: "deferred" as const } }
+          : {}),
       });
     }
 
@@ -199,7 +209,16 @@ export async function POST(
           agentContext: premiseAgentContext,
           aiDraft: observation.ai_draft,
         },
+        parsed.data.guide_decisions
+          ? {
+              expectedRevision: parsed.data.guide_decisions.expected_guide_revision,
+              decisions: parsed.data.guide_decisions.decisions,
+            }
+          : undefined,
       );
+      const guideResponse = parsed.data.guide_decisions
+        ? await buildGuideResponseLinks(confirmed)
+        : null;
       let profileUpdate: ProfileUpdateResult = {
         status: "failed",
         message: "观察已确认，但成长档案暂未更新，请稍后重试。",
@@ -222,6 +241,15 @@ export async function POST(
         profileUpdateStatus: profileUpdate.status,
         profileUpdateMessage: profileUpdate.message,
         growthProfile: profileUpdate.growthProfile,
+        ...(guideResponse
+          ? {
+              guideEvidence: {
+                status: "applied" as const,
+                revision: guideResponse.revision,
+                links: guideResponse.links,
+              },
+            }
+          : {}),
       });
     }
 
@@ -230,6 +258,9 @@ export async function POST(
         observation,
         requiresAgentConfirmation: true,
         agentReview: currentReview,
+        ...(parsed.data.guide_decisions
+          ? { guideEvidence: { status: "deferred" as const } }
+          : {}),
       });
     }
 
@@ -278,8 +309,35 @@ export async function POST(
       observation: updated,
       requiresAgentConfirmation: true,
       agentReview: review,
+      ...(parsed.data.guide_decisions
+        ? { guideEvidence: { status: "deferred" as const } }
+        : {}),
     });
   } catch (e) {
+    if (e instanceof GuideEvidenceInvalidError) {
+      return NextResponse.json(
+        { error: "invalid_request", message: e.message, link_id: e.link_id, item_id: e.item_id },
+        { status: 400 },
+      );
+    }
+    if (e instanceof GuideEvidenceCatalogError) {
+      return NextResponse.json(
+        { error: "catalog_version_mismatch", message: e.message, item_id: e.item_id },
+        { status: 409 },
+      );
+    }
+    if (e instanceof GuideEvidenceNotFoundError) {
+      return NextResponse.json(
+        { error: "not_found", message: e.message, link_id: e.link_id },
+        { status: 404 },
+      );
+    }
+    if (e instanceof GuideEvidenceConflictError) {
+      return NextResponse.json(
+        { error: "state_conflict", message: e.message, link_id: e.link_id, item_id: e.item_id },
+        { status: 409 },
+      );
+    }
     if (e instanceof ObservationStateConflictError) {
       return NextResponse.json({ message: e.message }, { status: 409 });
     }
