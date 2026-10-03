@@ -3,7 +3,7 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { ArrowUpRight, ChevronDown, Leaf, PenLine } from "lucide-react";
 
-import { classLabel, formatDateCn } from "@/lib/format";
+import { classLabel, formatDateCn, parseIsoDateStrict } from "@/lib/format";
 import {
   GUIDE_AGE_BAND_LABELS,
   type GuideAgeBand,
@@ -25,11 +25,12 @@ import {
 import styles from "./class-evidence-overview.module.css";
 
 /**
- * G4 班级指南证据概览：按当前在班名单回看五大领域的观察证据分布。
+ * G4-R1 班级指南证据概览：按当前在班名单回看五大领域的观察证据分布。
  * - 只读展示服务端 DTO（ClassEvidenceOverview）；人数、分母与占比全部读取 DTO，不从名单重算；
- * - 占比按班级页唯一例外口径展示，且同时给出“X/N 人 + 统计期间”；
- * - 期间与筛选只通过 typed callback 发出意图，正式取数与路由由 G6 接入；
- * - 班级页不展开来源细节，钻取到个人证据册核对来源。
+ * - 可靠性优先于普通状态展示：不可读取的幼儿不归入普通三类名单，完全不可用时不画三类分布；
+ * - 保健参考条目不渲染行为表现统计，只作参考说明与查阅入口；
+ * - 期间选择器始终反映已应用的数据期间，日期草稿单独存在且明确“尚未应用”；
+ * - 期间与筛选只通过 typed callback 发出意图，正式取数与路由由 G6 接入。
  */
 
 export type ClassEvidenceScopeIntent =
@@ -115,6 +116,35 @@ function scopePeriodText(scope: EvidenceScope): string {
   return `${scope.label}（不限日期）`;
 }
 
+function isReferenceItem(item: ClassGuideItemView): boolean {
+  return !item.item.product_rules.counts_in_behavior_stats;
+}
+
+function referenceNote(item: GuidePerformanceItem): string {
+  if (item.product_rules.evidence_type === "health_reference") {
+    return "身高、体重等体态参考只用于日常保育对照阅读，不参与行为表现统计（不计占比），也不作正常／异常判定；相关观察可在展开后查阅。";
+  }
+  return "该条目不参与行为表现统计（不计占比）；相关观察可在展开后查阅。";
+}
+
+/** 记录不可读取或核验受限的幼儿：可靠性优先于普通状态展示 */
+function isRestrictedChild(entry: ClassChildItemStatus): boolean {
+  if (entry.reliability === "unavailable") return true;
+  return entry.reliability === "partial" && entry.status === "no_records";
+}
+
+function childCaveat(entry: ClassChildItemStatus): string | null {
+  if (entry.reliability === "unavailable") {
+    return "该幼儿的相关记录暂时无法读取，不能按「暂无相关记录」理解。";
+  }
+  if (entry.reliability === "partial") {
+    return entry.status === "no_records"
+      ? "该幼儿是否有相关记录暂无法确认：部分记录未通过核对。"
+      : "该幼儿另有部分记录未通过核对，当前状态是可确认下限。";
+  }
+  return null;
+}
+
 function itemRuleLine(item: GuidePerformanceItem): string {
   const age = GUIDE_AGE_BAND_LABELS[item.age_band];
   const type = EVIDENCE_TYPE_LABELS[item.product_rules.evidence_type];
@@ -141,26 +171,13 @@ function ratioState(item: ClassGuideItemView, scope: EvidenceScope): RatioState 
   if (item.total === 0) {
     return { available: false, text: "占比暂不可用：当前在班名单为 0 人。" };
   }
-  if (!item.item.product_rules.counts_in_behavior_stats) {
-    return { available: false, text: "占比暂不可用：该条目为保健参考，不参与行为统计。" };
-  }
   if (item.reliability === "unavailable") {
     return { available: false, text: "占比暂不可用：相关记录暂时无法读取。" };
   }
   if (item.reliability === "partial") {
-    return { available: false, text: "占比暂不可用：部分记录未通过核对，人数为可确认下限。" };
+    return { available: false, text: "占比暂不可用：部分记录未通过核对或无法读取，人数为可确认下限。" };
   }
   return { available: false, text: "占比暂不可用：统计不可用。" };
-}
-
-function reliabilityHint(reliability: EvidenceReliability): string | null {
-  if (reliability === "partial") {
-    return "部分相关记录未通过核对或不在统计期间，人数是可确认的下限。";
-  }
-  if (reliability === "unavailable") {
-    return "该条目的相关记录暂时无法读取，不能按「暂无相关记录」理解；仍显示当前名单分母。";
-  }
-  return null;
 }
 
 function ItemDistribution({ item }: { item: ClassGuideItemView }) {
@@ -207,10 +224,33 @@ function ItemDistribution({ item }: { item: ClassGuideItemView }) {
   );
 }
 
+function ItemStats({ item, scope }: { item: ClassGuideItemView; scope: EvidenceScope }) {
+  if (isReferenceItem(item)) {
+    return (
+      <div className={cx("dist-reference")} data-testid="reference-note">
+        <strong>{EVIDENCE_TYPE_LABELS[item.item.product_rules.evidence_type]}</strong>
+        <span>{referenceNote(item.item)}</span>
+      </div>
+    );
+  }
+  const ratio = ratioState(item, scope);
+  return (
+    <>
+      <ItemDistribution item={item} />
+      <p className={cx("ratio")} data-testid="item-ratio" data-available={ratio.available}>
+        {ratio.text}
+      </p>
+    </>
+  );
+}
+
+type ChildRowVariant = "status" | "restricted" | "reference";
+
 function ChildRow({
   entry,
   child,
   item,
+  variant,
   drilldown,
   onOpenChildItem,
   onRecordObservation,
@@ -219,12 +259,14 @@ function ChildRow({
   entry: ClassChildItemStatus;
   child: EvidenceChildRef | undefined;
   item: GuidePerformanceItem;
+  variant: ChildRowVariant;
   drilldown: ClassEvidenceDrilldown;
   onOpenChildItem?: (target: ClassEvidenceDrilldown) => void;
   onRecordObservation?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
   onOpenActivitySupport?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
 }) {
-  const childReliabilityHint = reliabilityHint(entry.reliability);
+  const caveat = childCaveat(entry);
+  const showStatusBadge = variant === "status";
   return (
     <li
       className={cx("child-row")}
@@ -232,20 +274,50 @@ function ChildRow({
       data-child-id={entry.child_id}
       data-status={entry.status}
       data-reliability={entry.reliability}
+      data-variant={variant}
     >
       <div className={cx("child-line")}>
         <span className={cx("child-name")}>{child ? child.name : `名单幼儿（${entry.child_id}）`}</span>
-        <span className={cx("child-status", STATUS_CLASS[entry.status])}>
-          {GUIDE_ITEM_EVIDENCE_STATUS_LABELS[entry.status]}
-        </span>
+        {showStatusBadge ? (
+          <span className={cx("child-status", STATUS_CLASS[entry.status])} data-testid="child-status-badge">
+            {GUIDE_ITEM_EVIDENCE_STATUS_LABELS[entry.status]}
+          </span>
+        ) : null}
+        {variant === "restricted" ? (
+          <span
+            className={cx(
+              "child-restricted-chip",
+              entry.reliability === "unavailable" && "child-restricted-chip-strong",
+            )}
+            data-testid="child-restricted-chip"
+          >
+            {entry.reliability === "unavailable" ? "记录不可读取" : "核验受限"}
+          </span>
+        ) : null}
+        {variant === "reference" ? (
+          <span className={cx("child-reference-chip")} data-testid="child-reference-chip">
+            有相关观察记录
+          </span>
+        ) : null}
       </div>
       <p className={cx("child-meta")}>
-        {entry.confirmed_link_count > 0 ? (
+        {variant === "reference" ? (
+          entry.confirmed_link_count > 0 ? (
+            <span>相关记录 {entry.confirmed_link_count} 条</span>
+          ) : (
+            <span>有相关观察记录</span>
+          )
+        ) : variant === "restricted" ? null : entry.confirmed_link_count > 0 ? (
           <span>计入证据 {entry.confirmed_link_count} 条</span>
         ) : (
           <span>还没有计入状态的证据</span>
         )}
-        {entry.latest_observed_at ? (
+        {(variant === "reference" || variant === "restricted") && entry.latest_observed_at ? (
+          <>
+            {variant === "reference" ? <span aria-hidden="true"> · </span> : null}
+            <span>最近 {formatDateCn(entry.latest_observed_at)}</span>
+          </>
+        ) : variant === "status" && entry.latest_observed_at ? (
           <>
             <span aria-hidden="true"> · </span>
             <span>最近 {formatDateCn(entry.latest_observed_at)}</span>
@@ -260,11 +332,14 @@ function ChildRow({
           </>
         ) : null}
       </p>
-      {childReliabilityHint ? (
+      {caveat && variant !== "restricted" ? (
         <p
-          className={cx("child-reliability", entry.reliability === "unavailable" && "child-reliability-strong")}
+          className={cx(
+            "child-reliability",
+            entry.reliability === "unavailable" && "child-reliability-strong",
+          )}
         >
-          {childReliabilityHint}
+          {caveat}
         </p>
       ) : null}
       <div className={cx("child-actions")}>
@@ -330,11 +405,35 @@ function ItemRow({
 }) {
   const panelId = `class-evidence-panel-${item.item.id}`;
   const pendingCount = item.children.reduce((sum, entry) => sum + entry.pending_suggestion_count, 0);
-  const ratio = ratioState(item, scope);
-  const groups = STATUS_ORDER.map((status) => ({
+  const reference = isReferenceItem(item);
+  const relatedChildren = item.children.filter((entry) => entry.status !== "no_records");
+  const normalGroups = STATUS_ORDER.map((status) => ({
     status,
-    entries: item.children.filter((entry) => entry.status === status),
+    entries: item.children.filter((entry) => !isRestrictedChild(entry) && entry.status === status),
   })).filter((group) => group.entries.length > 0);
+  const restrictedEntries = item.children.filter(isRestrictedChild);
+
+  function renderChild(entry: ClassChildItemStatus, variant: ChildRowVariant) {
+    return (
+      <ChildRow
+        key={entry.child_id}
+        entry={entry}
+        child={rosterById.get(entry.child_id)}
+        item={item.item}
+        variant={variant}
+        drilldown={{
+          child_id: entry.child_id,
+          item_id: item.item.id,
+          child_status: entry.status,
+          scope,
+          filters,
+        }}
+        onOpenChildItem={onOpenChildItem}
+        onRecordObservation={onRecordObservation}
+        onOpenActivitySupport={onOpenActivitySupport}
+      />
+    );
+  }
 
   return (
     <li
@@ -363,7 +462,7 @@ function ItemRow({
           onClick={onToggle}
           data-testid="item-disclosure"
         >
-          {expanded ? "收起名单" : "查看名单"}
+          {expanded ? (reference ? "收起相关记录" : "收起名单") : reference ? "查阅相关记录" : "查看名单"}
           <ChevronDown className={cx("disclosure-icon", expanded && "disclosure-icon-open")} aria-hidden="true" />
         </button>
       </div>
@@ -371,64 +470,106 @@ function ItemRow({
       <div className={cx("item-body")}>
         <div className={cx("item-text-block")}>
           <p className={cx("item-text")}>{item.item.text}</p>
-          {item.reliability !== "reliable" ? (
+          {item.reliability === "partial" && !reference ? (
             <p className={cx("reliability-note")} data-reliability={item.reliability}>
-              {reliabilityHint(item.reliability)}
+              部分相关记录未通过核对或无法读取，当前人数是可确认的下限。
             </p>
           ) : null}
         </div>
         <div className={cx("item-stats")}>
-          <ItemDistribution item={item} />
-          <p className={cx("ratio")} data-testid="item-ratio" data-available={ratio.available}>
-            {ratio.text}
-          </p>
+          <ItemStats item={item} scope={scope} />
         </div>
       </div>
 
       {expanded ? (
         <div className={cx("panel")} id={panelId}>
-          <p className={cx("panel-rule")}>{itemRuleLine(item.item)}</p>
-          <p className={cx("panel-hint")}>
-            班级页只按幼儿汇总人数，不展开来源；进入个人证据册可核对每条来源、观察日期与发生班级。
-          </p>
-          {item.children.length === 0 ? (
-            <p className={cx("panel-empty")}>当前在班名单为 0 人，暂无幼儿名单可展开。</p>
-          ) : (
-            groups.map((group) => (
+          {reference ? (
+            <>
+              <p className={cx("panel-hint")}>
+                以下为有相关观察记录的幼儿，只作查阅入口；本条目不参与行为统计，也不判定发展状态。
+              </p>
+              {relatedChildren.length > 0 ? (
+                <section
+                  className={cx("reference-records")}
+                  data-testid="reference-records"
+                  aria-label="有相关观察记录的幼儿"
+                >
+                  <h4 className={cx("status-group-title")}>
+                    有相关观察记录的幼儿
+                    <span className={cx("status-group-count")}>{relatedChildren.length} 人</span>
+                  </h4>
+                  <p className={cx("panel-hint")}>
+                    进入个人证据册可核对来源、观察日期与发生班级；此处不代表能力评价。
+                  </p>
+                  <ul className={cx("child-list")}>{relatedChildren.map((entry) => renderChild(entry, "reference"))}</ul>
+                </section>
+              ) : (
+                <p className={cx("panel-empty")}>当前还没有可供查阅的相关观察记录。</p>
+              )}
+            </>
+          ) : item.reliability === "unavailable" ? (
+            <>
+              <p className={cx("panel-warning")}>
+                该条目的相关记录整体暂时无法读取，不能按「暂无相关记录」理解。以下只保留当前名单与个人证据入口，不展示三类人数。
+              </p>
               <section
-                key={group.status}
-                className={cx("status-group")}
-                aria-label={`${GUIDE_ITEM_EVIDENCE_STATUS_LABELS[group.status]}的幼儿名单`}
-                data-testid="status-group"
-                data-status={group.status}
+                className={cx("restricted-group")}
+                data-testid="restricted-group"
+                data-group="restricted"
+                aria-label="相关记录暂不可读取的幼儿"
               >
                 <h4 className={cx("status-group-title")}>
-                  <span className={cx("legend-dot", STATUS_CLASS[group.status])} aria-hidden="true" />
-                  {GUIDE_ITEM_EVIDENCE_STATUS_LABELS[group.status]}
-                  <span className={cx("status-group-count")}>{group.entries.length} 人</span>
+                  <span className={cx("restricted-dot")} aria-hidden="true" />
+                  相关记录暂不可读取
+                  <span className={cx("status-group-count")}>{item.children.length} 人</span>
                 </h4>
-                <ul className={cx("child-list")}>
-                  {group.entries.map((entry) => (
-                    <ChildRow
-                      key={entry.child_id}
-                      entry={entry}
-                      child={rosterById.get(entry.child_id)}
-                      item={item.item}
-                      drilldown={{
-                        child_id: entry.child_id,
-                        item_id: item.item.id,
-                        child_status: entry.status,
-                        scope,
-                        filters,
-                      }}
-                      onOpenChildItem={onOpenChildItem}
-                      onRecordObservation={onRecordObservation}
-                      onOpenActivitySupport={onOpenActivitySupport}
-                    />
-                  ))}
-                </ul>
+                <p className={cx("panel-hint")}>
+                  以下幼儿的记录整体不可读取，不能按「暂无相关记录」理解；可进入个人证据查看可读取范围。
+                </p>
+                <ul className={cx("child-list")}>{item.children.map((entry) => renderChild(entry, "restricted"))}</ul>
               </section>
-            ))
+            </>
+          ) : (
+            <>
+              <p className={cx("panel-rule")}>{itemRuleLine(item.item)}</p>
+              <p className={cx("panel-hint")}>
+                班级页只按幼儿汇总人数，不展开来源；进入个人证据册可核对每条来源、观察日期与发生班级。
+              </p>
+              {normalGroups.map((group) => (
+                <section
+                  key={group.status}
+                  className={cx("status-group")}
+                  aria-label={`${GUIDE_ITEM_EVIDENCE_STATUS_LABELS[group.status]}的幼儿名单`}
+                  data-testid="status-group"
+                  data-status={group.status}
+                >
+                  <h4 className={cx("status-group-title")}>
+                    <span className={cx("legend-dot", STATUS_CLASS[group.status])} aria-hidden="true" />
+                    {GUIDE_ITEM_EVIDENCE_STATUS_LABELS[group.status]}
+                    <span className={cx("status-group-count")}>{group.entries.length} 人</span>
+                  </h4>
+                  <ul className={cx("child-list")}>{group.entries.map((entry) => renderChild(entry, "status"))}</ul>
+                </section>
+              ))}
+              {restrictedEntries.length > 0 ? (
+                <section
+                  className={cx("restricted-group")}
+                  data-testid="restricted-group"
+                  data-group="restricted"
+                  aria-label="核验受限的幼儿"
+                >
+                  <h4 className={cx("status-group-title")}>
+                    <span className={cx("restricted-dot")} aria-hidden="true" />
+                    核验受限，未计入普通名单
+                    <span className={cx("status-group-count")}>{restrictedEntries.length} 人</span>
+                  </h4>
+                  <p className={cx("panel-hint")}>
+                    以下幼儿的记录不可读取或核验受限，可能有未纳入的正式证据；不按「暂无相关记录」理解。
+                  </p>
+                  <ul className={cx("child-list")}>{restrictedEntries.map((entry) => renderChild(entry, "restricted"))}</ul>
+                </section>
+              ) : null}
+            </>
           )}
         </div>
       ) : null}
@@ -449,27 +590,45 @@ export function ClassEvidenceOverview({
   const scopeSelectId = useId();
   const domainGroupId = useId();
   const ageGroupId = useId();
+  const noticeListId = useId();
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [customOpen, setCustomOpen] = useState(overview.scope.kind === "custom_range");
-  const [customFrom, setCustomFrom] = useState(
-    overview.scope.kind === "custom_range" ? (overview.scope.start_date ?? "") : "",
-  );
-  const [customTo, setCustomTo] = useState(
-    overview.scope.kind === "custom_range" ? (overview.scope.end_date ?? "") : "",
-  );
+  const [draft, setDraft] = useState<{ from: string; to: string } | null>(null);
   const [rangeError, setRangeError] = useState<string | null>(null);
+  const [infoExpanded, setInfoExpanded] = useState(false);
 
   useEffect(() => {
-    if (overview.scope.kind !== "custom_range") return;
-    setCustomOpen(true);
-    setCustomFrom(overview.scope.start_date ?? "");
-    setCustomTo(overview.scope.end_date ?? "");
-  }, [overview.scope.kind, overview.scope.start_date, overview.scope.end_date]);
+    setDraft(null);
+    setRangeError(null);
+  }, [overview.scope.kind, overview.scope.semester_id, overview.scope.start_date, overview.scope.end_date]);
 
   const rosterById = useMemo(
     () => new Map(overview.roster.children.map((child) => [child.id, child])),
     [overview.roster.children],
   );
+
+  const catalogIndex = useMemo(() => {
+    const goals = new Map<
+      string,
+      { title: string; index: number; domainName: string; subDomainName: string }
+    >();
+    const domains = new Map<string, string>();
+    const subDomains = new Map<string, string>();
+    for (const domain of overview.catalog.domains) {
+      domains.set(domain.id, domain.name);
+      for (const sub of domain.sub_domains) {
+        subDomains.set(sub.id, sub.name);
+        for (const goal of sub.goals) {
+          goals.set(goal.id, {
+            title: goal.title,
+            index: goal.index,
+            domainName: domain.name,
+            subDomainName: sub.name,
+          });
+        }
+      }
+    }
+    return { goals, domains, subDomains };
+  }, [overview.catalog]);
 
   const semesterOptions = useMemo(() => {
     const options = (semesters ?? []).map((semester) => ({
@@ -485,7 +644,9 @@ export function ClassEvidenceOverview({
     return options;
   }, [semesters, overview.scope]);
 
-  const selectValue: ScopeSelectValue = customOpen ? "custom_range" : scopeSelectValue(overview.scope);
+  const severeNotices = overview.notices.filter((notice) => notice.severity !== "info");
+  const infoNotices = overview.notices.filter((notice) => notice.severity === "info");
+  const activeGoal = overview.filters.goal_id ? catalogIndex.goals.get(overview.filters.goal_id) : undefined;
 
   function toggleItem(itemId: string) {
     setExpandedIds((previous) => {
@@ -496,13 +657,25 @@ export function ClassEvidenceOverview({
     });
   }
 
+  function openCustomDraft() {
+    setDraft({
+      from: overview.scope.start_date ?? "",
+      to: overview.scope.end_date ?? "",
+    });
+    setRangeError(null);
+  }
+
+  function cancelCustomDraft() {
+    setDraft(null);
+    setRangeError(null);
+  }
+
   function handleScopeSelect(value: string) {
     if (value === "custom_range") {
-      setCustomOpen(true);
+      openCustomDraft();
       return;
     }
-    setCustomOpen(false);
-    setRangeError(null);
+    cancelCustomDraft();
     if (value === "all_history") {
       onScopeChange?.({ kind: "all_history" });
       return;
@@ -512,17 +685,22 @@ export function ClassEvidenceOverview({
     }
   }
 
-  function applyCustomRange() {
-    if (!customFrom || !customTo) {
+  function applyCustomDraft() {
+    if (!draft) return;
+    if (!draft.from || !draft.to) {
       setRangeError("请选择开始和结束日期。");
       return;
     }
-    if (customFrom > customTo) {
+    if (!parseIsoDateStrict(draft.from) || !parseIsoDateStrict(draft.to)) {
+      setRangeError("日期格式不正确，请重新选择真实存在的日期。");
+      return;
+    }
+    if (draft.from > draft.to) {
       setRangeError("开始日期不能晚于结束日期。");
       return;
     }
     setRangeError(null);
-    onScopeChange?.({ kind: "custom_range", from: customFrom, to: customTo });
+    onScopeChange?.({ kind: "custom_range", from: draft.from, to: draft.to });
   }
 
   const referenceAgeText = overview.filters.age_band
@@ -566,13 +744,13 @@ export function ClassEvidenceOverview({
       </dl>
 
       <p className={cx("scope-note")}>
-        期间与名单口径：所有期间都按当前在班名单（{overview.roster.child_count} 人）统计；切换历史期间只回看这些幼儿当时的证据，
-        不能还原当时的班级名册，也不代表本班教学成效。
+        期间与名单口径：所有期间都按当前在班名单（{overview.roster.child_count} 人）统计；期间外的证据不参与本期统计（正常口径），
+        切换历史期间只回看这些幼儿当时的证据，不能还原当时的班级名册，也不代表本班教学成效。
       </p>
 
-      {overview.notices.length > 0 ? (
+      {severeNotices.length > 0 ? (
         <ul className={cx("notice-list")}>
-          {overview.notices.map((notice, index) => (
+          {severeNotices.map((notice, index) => (
             <li
               key={`${notice.code}-${index}`}
               className={cx("notice", `notice-${notice.severity}`)}
@@ -586,6 +764,42 @@ export function ClassEvidenceOverview({
         </ul>
       ) : null}
 
+      {infoNotices.length > 0 ? (
+        <div className={cx("notice-info-block")}>
+          <button
+            type="button"
+            className={cx("notice-toggle")}
+            aria-expanded={infoExpanded}
+            aria-controls={noticeListId}
+            onClick={() => setInfoExpanded((previous) => !previous)}
+            data-testid="info-notice-toggle"
+          >
+            其他提示 {infoNotices.length} 条
+            <ChevronDown
+              className={cx("disclosure-icon", infoExpanded && "disclosure-icon-open")}
+              aria-hidden="true"
+            />
+          </button>
+          <ul
+            id={noticeListId}
+            className={cx("notice-list", "notice-info-list")}
+            data-expanded={infoExpanded}
+          >
+            {infoNotices.map((notice, index) => (
+              <li
+                key={`${notice.code}-${index}`}
+                className={cx("notice", `notice-${notice.severity}`)}
+                data-testid="class-notice"
+                data-code={notice.code}
+              >
+                <span className={cx("notice-severity")}>{NOTICE_SEVERITY_LABELS[notice.severity]}</span>
+                {notice.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       <div className={cx("controls")}>
         <div className={cx("control-block")}>
           <label className={cx("control-label")} htmlFor={scopeSelectId}>
@@ -594,7 +808,7 @@ export function ClassEvidenceOverview({
           <select
             id={scopeSelectId}
             className={cx("select")}
-            value={selectValue}
+            value={scopeSelectValue(overview.scope)}
             onChange={(event) => handleScopeSelect(event.target.value)}
             disabled={!onScopeChange}
             data-testid="scope-select"
@@ -607,40 +821,63 @@ export function ClassEvidenceOverview({
             <option value="all_history">全部历史</option>
             <option value="custom_range">自定义日期…</option>
           </select>
-          {customOpen ? (
-            <div className={cx("custom-range")}>
-              <label className={cx("date-field")}>
-                从
-                <input
-                  type="date"
-                  value={customFrom}
-                  onChange={(event) => setCustomFrom(event.target.value)}
-                  data-testid="range-from"
-                />
-              </label>
-              <label className={cx("date-field")}>
-                到
-                <input
-                  type="date"
-                  value={customTo}
-                  onChange={(event) => setCustomTo(event.target.value)}
-                  data-testid="range-to"
-                />
-              </label>
-              <button
-                type="button"
-                className={cx("apply-button")}
-                onClick={applyCustomRange}
-                disabled={!onScopeChange}
-              >
-                应用日期
-              </button>
+          {draft ? (
+            <div className={cx("custom-range")} data-testid="custom-range-editor">
+              <p className={cx("range-pending")} data-testid="range-pending">
+                尚未应用：当前统计期间仍是「{overview.scope.label}」。填写日期后点击“应用日期”。
+              </p>
+              <div className={cx("custom-fields")}>
+                <label className={cx("date-field")}>
+                  从
+                  <input
+                    type="date"
+                    value={draft.from}
+                    onChange={(event) => setDraft({ ...draft, from: event.target.value })}
+                    data-testid="range-from"
+                  />
+                </label>
+                <label className={cx("date-field")}>
+                  到
+                  <input
+                    type="date"
+                    value={draft.to}
+                    onChange={(event) => setDraft({ ...draft, to: event.target.value })}
+                    data-testid="range-to"
+                  />
+                </label>
+                <button
+                  type="button"
+                  className={cx("apply-button")}
+                  onClick={applyCustomDraft}
+                  disabled={!onScopeChange}
+                  data-testid="apply-range"
+                >
+                  应用日期
+                </button>
+                <button
+                  type="button"
+                  className={cx("edit-range-button")}
+                  onClick={cancelCustomDraft}
+                  data-testid="cancel-range"
+                >
+                  取消编辑
+                </button>
+              </div>
               {rangeError ? (
                 <p className={cx("range-error")} role="alert">
                   {rangeError}
                 </p>
               ) : null}
             </div>
+          ) : overview.scope.kind === "custom_range" && onScopeChange ? (
+            <button
+              type="button"
+              className={cx("edit-range-button")}
+              onClick={openCustomDraft}
+              data-testid="edit-range"
+            >
+              修改自定义日期
+            </button>
           ) : null}
         </div>
 
@@ -704,34 +941,72 @@ export function ClassEvidenceOverview({
         </div>
       </div>
 
+      {overview.filters.goal_id ? (
+        <div className={cx("goal-filter")} data-testid="goal-filter" data-goal-id={overview.filters.goal_id}>
+          <span className={cx("goal-filter-label")}>当前目标筛选</span>
+          <span className={cx("goal-filter-title")}>
+            {activeGoal
+              ? `${activeGoal.index}. ${activeGoal.title}（${activeGoal.domainName} · ${activeGoal.subDomainName}）`
+              : overview.filters.goal_id}
+          </span>
+          <button
+            type="button"
+            className={cx("goal-filter-clear")}
+            disabled={!onFiltersChange}
+            onClick={() => onFiltersChange?.({ ...overview.filters, goal_id: null })}
+            data-testid="clear-goal-filter"
+          >
+            清除
+          </button>
+        </div>
+      ) : null}
+
       {overview.goals.length === 0 ? (
         <p className={cx("overview-empty")}>当前筛选下没有可展示的表现条目。</p>
       ) : (
         <div className={cx("goals")}>
-          {overview.goals.map(({ goal, items }) => (
-            <section key={goal.id} className={cx("goal-group")} aria-labelledby={`class-goal-${goal.id}`}>
-              <h3 className={cx("goal-title")} id={`class-goal-${goal.id}`}>
-                <span className={cx("goal-index")}>{goal.index}</span>
-                {goal.title}
-              </h3>
-              <ul className={cx("item-list")}>
-                {items.map((item) => (
-                  <ItemRow
-                    key={item.item.id}
-                    item={item}
-                    scope={overview.scope}
-                    filters={overview.filters}
-                    rosterById={rosterById}
-                    expanded={expandedIds.has(item.item.id)}
-                    onToggle={() => toggleItem(item.item.id)}
-                    onOpenChildItem={onOpenChildItem}
-                    onRecordObservation={onRecordObservation}
-                    onOpenActivitySupport={onOpenActivitySupport}
-                  />
-                ))}
-              </ul>
-            </section>
-          ))}
+          {overview.goals.map(({ goal, items }) => {
+            const domainName = catalogIndex.domains.get(goal.domain_id);
+            const subDomainName = catalogIndex.subDomains.get(goal.sub_domain_id);
+            const pathText =
+              [overview.filters.domain_code === null ? domainName : null, subDomainName]
+                .filter(Boolean)
+                .join(" · ") || "指南目标";
+            return (
+              <section
+                key={goal.id}
+                className={cx("goal-group")}
+                aria-labelledby={`class-goal-${goal.id}`}
+                data-testid="goal-group"
+              >
+                <h3 className={cx("goal-title")} id={`class-goal-${goal.id}`}>
+                  <span className={cx("goal-path")} data-testid="goal-path">
+                    {pathText}
+                  </span>
+                  <span className={cx("goal-heading")}>
+                    <span className={cx("goal-index")}>{goal.index}</span>
+                    {goal.title}
+                  </span>
+                </h3>
+                <ul className={cx("item-list")}>
+                  {items.map((item) => (
+                    <ItemRow
+                      key={item.item.id}
+                      item={item}
+                      scope={overview.scope}
+                      filters={overview.filters}
+                      rosterById={rosterById}
+                      expanded={expandedIds.has(item.item.id)}
+                      onToggle={() => toggleItem(item.item.id)}
+                      onOpenChildItem={onOpenChildItem}
+                      onRecordObservation={onRecordObservation}
+                      onOpenActivitySupport={onOpenActivitySupport}
+                    />
+                  ))}
+                </ul>
+              </section>
+            );
+          })}
         </div>
       )}
     </section>

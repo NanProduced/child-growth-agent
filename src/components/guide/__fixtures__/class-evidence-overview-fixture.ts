@@ -133,7 +133,7 @@ function domain(input: {
 
 export const ITEM_UI_HEALTH_SELF_CARE_34 = "item.ui.health.h1.3-4";
 export const ITEM_UI_HEALTH_SELF_CARE_56 = "item.ui.health.h1.5-6";
-export const ITEM_UI_HEALTH_HABIT_45 = "item.ui.health.h2.4-5";
+export const ITEM_UI_HEALTH_POSTURE_45 = "item.ui.health.h2.4-5";
 export const ITEM_UI_LANGUAGE_SPEAK_34 = "item.ui.language.l1.3-4";
 export const ITEM_UI_LANGUAGE_TELL_45 = "item.ui.language.l1.4-5";
 export const ITEM_UI_SOCIAL_PEER_45 = "item.ui.social.s1.4-5";
@@ -183,15 +183,15 @@ const DOMAIN_DEFS: GuideDomain[] = [
             domain_id: "dom.ui.health",
             sub_domain_id: "sub.ui.health.life",
             index: 2,
-            title: "具有良好的生活与卫生习惯（fixture 示意）",
+            title: "具有健康的体态（fixture 示意）",
             items: [
               item({
-                id: ITEM_UI_HEALTH_HABIT_45,
+                id: ITEM_UI_HEALTH_POSTURE_45,
                 domain_id: "dom.ui.health",
                 sub_domain_id: "sub.ui.health.life",
                 goal_id: "goal.ui.health.2",
                 age_band: "4-5",
-                text: "在提醒下按时午睡、饭前便后洗手，并保持个人卫生（fixture 示意·保健参考）。",
+                text: "身高和体重适宜，参考该年龄段参考标准（fixture 示意·保健参考；只作日常保育对照阅读，不作正常／异常判定）。",
                 product_rules: rules("health_reference"),
               }),
             ],
@@ -353,16 +353,18 @@ interface DistributionInput {
   dedup_first?: boolean;
   /** 待核对建议所在幼儿（处于 no_records 段），不应计入任何正式人数 */
   pending_index?: number;
-  /** 某位幼儿存在未通过核对的依据，条目计数降为下限 */
-  partial_index?: number;
-  /** 相关证据完全无法读取：不得展示为正常的 0，仅显示核验提示 */
+  /** 存在未通过核对的依据，条目计数降为下限 */
+  partial_indices?: number[];
+  /** 单名幼儿的相关记录不可读取（混合可靠性） */
+  unavailable_indices?: number[];
+  /** 整个条目的相关证据完全无法读取：不得展示为正常的 0 */
   unavailable?: boolean;
 }
 
 const DISTRIBUTIONS: Record<string, DistributionInput> = {
   [ITEM_UI_HEALTH_SELF_CARE_34]: { counts: { no_records: 5, has_clues: 3, confirmed_observed: 12 } },
   [ITEM_UI_HEALTH_SELF_CARE_56]: { counts: { no_records: 12, has_clues: 6, confirmed_observed: 2 } },
-  [ITEM_UI_HEALTH_HABIT_45]: { counts: { no_records: 10, has_clues: 2, confirmed_observed: 8 } },
+  [ITEM_UI_HEALTH_POSTURE_45]: { counts: { no_records: 10, has_clues: 2, confirmed_observed: 8 } },
   [ITEM_UI_LANGUAGE_SPEAK_34]: {
     counts: { no_records: 10, has_clues: 4, confirmed_observed: 6 },
     dedup_first: true,
@@ -371,7 +373,8 @@ const DISTRIBUTIONS: Record<string, DistributionInput> = {
   [ITEM_UI_LANGUAGE_TELL_45]: { counts: { no_records: 20, has_clues: 0, confirmed_observed: 0 } },
   [ITEM_UI_SOCIAL_PEER_45]: {
     counts: { no_records: 15, has_clues: 2, confirmed_observed: 3 },
-    partial_index: 2,
+    partial_indices: [2],
+    unavailable_indices: [10],
   },
   [ITEM_UI_SCIENCE_EXPLORE_56]: {
     counts: { no_records: 20, has_clues: 0, confirmed_observed: 0 },
@@ -381,7 +384,6 @@ const DISTRIBUTIONS: Record<string, DistributionInput> = {
 };
 
 const DATE_BASE_CURRENT = "2026-09-01";
-const DATE_BASE_HISTORY = "2025-11-01";
 
 function addDaysIso(base: string, days: number): string {
   const date = new Date(`${base}T00:00:00Z`);
@@ -389,8 +391,18 @@ function addDaysIso(base: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-function buildChildren(input: DistributionInput, dateBase: string): ClassChildItemStatus[] {
-  const { counts, dedup_first, pending_index, partial_index, unavailable } = input;
+/** 证据日期与所选期间保持自洽：从期间起点顺延，并夹在期间结束日之内 */
+function observationDates(scope: EvidenceScope, index: number): { first: string; latest: string } {
+  const base = scope.start_date ?? DATE_BASE_CURRENT;
+  const clamp = (iso: string) => (scope.end_date && iso > scope.end_date ? scope.end_date : iso);
+  const first = clamp(addDaysIso(base, 1 + (index % 8)));
+  let latest = clamp(addDaysIso(base, 8 + (index % 8)));
+  if (latest < first) latest = first;
+  return { first, latest };
+}
+
+function buildChildren(input: DistributionInput, scope: EvidenceScope): ClassChildItemStatus[] {
+  const { counts, dedup_first, pending_index, partial_indices, unavailable_indices, unavailable } = input;
   const cluesEnd = counts.confirmed_observed + counts.has_clues;
   return ROSTER_CHILDREN.map((child, index) => {
     let status: GuideItemEvidenceStatus = "no_records";
@@ -398,18 +410,19 @@ function buildChildren(input: DistributionInput, dateBase: string): ClassChildIt
     else if (index < cluesEnd) status = "has_clues";
 
     let reliability: EvidenceReliability = "reliable";
-    if (unavailable) reliability = "unavailable";
-    else if (partial_index === index) reliability = "partial";
+    if (unavailable || unavailable_indices?.includes(index)) reliability = "unavailable";
+    else if (partial_indices?.includes(index)) reliability = "partial";
 
     const hasEvidence = status !== "no_records";
+    const dates = hasEvidence ? observationDates(scope, index) : { first: null, latest: null };
     return {
       child_id: child.id,
       status,
       reliability,
       confirmed_link_count: hasEvidence ? (dedup_first && index === 0 ? 2 : 1) : 0,
       pending_suggestion_count: pending_index === index ? 1 : 0,
-      first_observed_at: hasEvidence ? addDaysIso(dateBase, 4 + index) : null,
-      latest_observed_at: hasEvidence ? addDaysIso(dateBase, 20 + index * 3) : null,
+      first_observed_at: dates.first,
+      latest_observed_at: dates.latest,
     };
   });
 }
@@ -437,24 +450,27 @@ export const CLASS_FIXTURE_HISTORY_SCOPE: EvidenceScope = {
 export interface ClassOverviewFixtureOptions {
   domain_code?: GuideDomainCode | null;
   age_band?: GuideAgeBand | null;
+  goal_id?: string | null;
   scope?: EvidenceScope;
-  /** 历史期间 fixture 使用过去日期，保持“期间包含”口径自洽 */
-  date_base?: string;
 }
 
-function toClassItem(catalogItem: GuidePerformanceItem, dateBase: string): ClassGuideItemView {
+function toClassItem(catalogItem: GuidePerformanceItem, scope: EvidenceScope): ClassGuideItemView {
   const input = DISTRIBUTIONS[catalogItem.id] ?? { counts: { no_records: 20, has_clues: 0, confirmed_observed: 0 } };
-  const children = buildChildren(input, dateBase);
+  const children = buildChildren(input, scope);
   const total = ROSTER_CHILDREN.length;
-  const lowerReliability = input.unavailable || input.partial_index !== undefined;
+  const reliability: EvidenceReliability = input.unavailable
+    ? "unavailable"
+    : (input.partial_indices?.length ?? 0) > 0 || (input.unavailable_indices?.length ?? 0) > 0
+      ? "partial"
+      : "reliable";
   const countsSum = input.counts.confirmed_observed + input.counts.has_clues + input.counts.no_records;
   return {
     item: catalogItem,
     counts: input.counts,
     total,
-    reliability: lowerReliability ? (input.unavailable ? "unavailable" : "partial") : "reliable",
+    reliability,
     confirmed_ratio:
-      !lowerReliability && catalogItem.product_rules.counts_in_behavior_stats && countsSum > 0
+      reliability === "reliable" && catalogItem.product_rules.counts_in_behavior_stats && countsSum > 0
         ? input.counts.confirmed_observed / total
         : null,
     children,
@@ -465,25 +481,27 @@ export function buildClassEvidenceOverview(
   options: ClassOverviewFixtureOptions = {},
 ): ClassEvidenceOverview {
   const scope = options.scope ?? CLASS_FIXTURE_SEMESTER_SCOPE;
-  const dateBase = options.date_base ?? DATE_BASE_CURRENT;
   const domainCode = options.domain_code ?? null;
   const ageBand = options.age_band ?? null;
+  const goalId = options.goal_id ?? null;
 
   const goals = DOMAIN_DEFS.filter((entry) => domainCode === null || entry.code === domainCode).flatMap(
     (entry) =>
       entry.sub_domains.flatMap((sub) =>
-        sub.goals.map((entryGoal) => ({
-          goal: {
-            id: entryGoal.id,
-            domain_id: entryGoal.domain_id,
-            sub_domain_id: entryGoal.sub_domain_id,
-            index: entryGoal.index,
-            title: entryGoal.title,
-          },
-          items: entryGoal.items
-            .filter((entryItem) => ageBand === null || entryItem.age_band === ageBand)
-            .map((entryItem) => toClassItem(entryItem, dateBase)),
-        })),
+        sub.goals
+          .filter((entryGoal) => goalId === null || entryGoal.id === goalId)
+          .map((entryGoal) => ({
+            goal: {
+              id: entryGoal.id,
+              domain_id: entryGoal.domain_id,
+              sub_domain_id: entryGoal.sub_domain_id,
+              index: entryGoal.index,
+              title: entryGoal.title,
+            },
+            items: entryGoal.items
+              .filter((entryItem) => ageBand === null || entryItem.age_band === ageBand)
+              .map((entryItem) => toClassItem(entryItem, scope)),
+          })),
       ),
   ).filter((entry) => entry.items.length > 0);
 
@@ -499,7 +517,7 @@ export function buildClassEvidenceOverview(
     catalog_version: CLASS_FIXTURE_CATALOG_VERSION,
     catalog: CLASS_EVIDENCE_CATALOG,
     scope,
-    filters: { domain_code: domainCode, age_band: ageBand, goal_id: null },
+    filters: { domain_code: domainCode, age_band: ageBand, goal_id: goalId },
     roster: { child_count: ROSTER_CHILDREN.length, children: ROSTER_CHILDREN },
     goals,
     notices: [
@@ -524,6 +542,12 @@ export function buildClassEvidenceOverview(
         code: "ai_link_failed",
         severity: "info",
         message: "上次 AI 关联建议未生成；教师仍可以在观察记录中手动关联表现条目。",
+      },
+      {
+        code: "guide_evidence_unreadable",
+        severity: "error",
+        item_id: ITEM_UI_SCIENCE_EXPLORE_56,
+        message: "“亲近自然，喜欢探究”下有幼儿的相关记录暂时无法读取，不能按「暂无相关记录」理解。",
       },
     ],
   };
@@ -597,5 +621,4 @@ export const CLASS_FIXTURE_OVERVIEW_MAIN = buildClassEvidenceOverview();
 export const CLASS_FIXTURE_OVERVIEW_EMPTY_ROSTER = buildEmptyRosterOverview();
 export const CLASS_FIXTURE_OVERVIEW_HISTORY = buildClassEvidenceOverview({
   scope: CLASS_FIXTURE_HISTORY_SCOPE,
-  date_base: DATE_BASE_HISTORY,
 });
