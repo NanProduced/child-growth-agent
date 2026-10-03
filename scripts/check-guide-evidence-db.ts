@@ -1,10 +1,26 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import fs from "node:fs";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
 
 import { Client } from "pg";
+
+import {
+  modelGuardEnv,
+  restoreGeneratedArtifacts,
+  runCleanupSteps,
+  sleep,
+  snapshotGeneratedArtifacts,
+  startIsolatedPostgres,
+  startModelRequestGuard,
+  stopTrackedChildTree,
+  trackChildProcess,
+  waitForVerifiedService,
+  type CleanupReport,
+  type IsolatedPostgres,
+  type ModelRequestGuard,
+} from "./harness-safety";
 
 import {
   GuideEvidenceConflictError,
@@ -34,8 +50,15 @@ import type { Observation } from "../src/lib/types";
 /**
  * G5 隔离实库检查（真实 PostgreSQL + 真实 HTTP + 受控双连接交错）。
  *
- * 资源安全：只用本轮唯一命名的本地容器；写入前核验标签/回环映射/库身份/空库；
- * 清理只按已核实容器 ID + 标签所有权；失败路径同样释放资源并报告残留；
+ * 资源安全（复用 scripts/harness-safety.ts）：
+ * - 一次性本地容器：三态核实（已核实 / 明确不存在 / 无法核实），无法核实不删除也不报成功；
+ *   写入前核验标签/回环映射/库身份/空库，清理按已核实容器 ID + 标签所有权并复核；
+ * - dev server：就绪必须核实是本轮子进程（PID + 创建时间 + 端口监听者归属），
+ *   任意 HTTP 200（含外部占位）不算就绪；写前用 HTTP 读模型与直连隔离库比对，
+ *   首笔业务写后直连复核写入目标；清理只终止可核实属于本轮的进程树；
+ * - 模型预算：provider 出口改道本地守门服务器，任何真实调用被计数并失败；
+ * - 生成物：next-env.d.ts 与 .next 类型生成物按快照恢复，不整目录清空。
+ *
  * 不回退 .env、外部 URL 或任何未知数据库。不调用真实模型。
  *
  * 运行：pnpm tsx scripts/check-guide-evidence-db.ts
@@ -45,146 +68,12 @@ const RUN_ID = `${process.pid.toString(36)}${Date.now().toString(36)}`.toLowerCa
 const CONTAINER_NAME = `cga-g5-${RUN_ID}`;
 const DB_NAME = `cga_g5_${RUN_ID}`;
 const CONTAINER_LABEL_KEY = "cga-g5-check";
-const CONTAINER_LABEL = `${CONTAINER_LABEL_KEY}=${RUN_ID}`;
 const TEACHER_PASSCODE = "g5-offline-passcode";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 const cleanupIssues: string[] = [];
 function noteCleanupIssue(label: string, detail: string): void {
   cleanupIssues.push(`${label}: ${detail}`);
-}
-
-interface DockerResult {
-  status: number;
-  stdout: string;
-  stderr: string;
-}
-function docker(args: string[]): DockerResult {
-  const res = spawnSync("docker", args, { encoding: "utf8" });
-  return {
-    status: res.status ?? 1,
-    stdout: (res.stdout ?? "").trim(),
-    stderr: (res.stderr ?? "").trim(),
-  };
-}
-function parseContainerIdFromStdout(stdout: string): string | null {
-  const lines = stdout.split("\n").map((line) => line.trim()).filter(Boolean);
-  const last = lines[lines.length - 1] ?? "";
-  return /^[0-9a-f]{64}$/i.test(last) ? last : null;
-}
-function containerIdOf(idOrName: string): string | null {
-  const res = docker(["inspect", "--format", "{{.Id}}", idOrName]);
-  return res.status === 0 && res.stdout ? res.stdout.split("\n")[0].trim() : null;
-}
-function removeOwnedContainer(containerId: string | null): { ok: boolean; detail: string } {
-  if (!containerId) return { ok: true, detail: "" };
-  if (!containerIdOf(containerId)) return { ok: true, detail: "" };
-  const label = docker([
-    "inspect",
-    "--format",
-    `{{index .Config.Labels "${CONTAINER_LABEL_KEY}"}}`,
-    containerId,
-  ]).stdout;
-  if (label !== RUN_ID) {
-    return { ok: false, detail: `容器标签不属于本轮（实际 ${label || "无"}），拒绝删除` };
-  }
-  const res = docker(["rm", "-f", containerId]);
-  if (res.status === 0) return { ok: true, detail: "" };
-  if (!containerIdOf(containerId)) return { ok: true, detail: "" };
-  return { ok: false, detail: `删除失败：${res.stderr || res.stdout || `exit=${res.status}`}` };
-}
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function startTestDatabase(): Promise<{
-  url: string;
-  containerId: string;
-  teardown: () => { ok: boolean; detail: string };
-}> {
-  const probe = docker(["version"]);
-  if (probe.status !== 0) {
-    throw new Error("未检测到可用的 Docker：G5 自检只使用一次性本地容器，不连接 .env 或任何未知数据库");
-  }
-  const run = docker([
-    "run",
-    "-d",
-    "--name",
-    CONTAINER_NAME,
-    "--label",
-    CONTAINER_LABEL,
-    "-e",
-    "POSTGRES_PASSWORD=postgres",
-    "-e",
-    `POSTGRES_DB=${DB_NAME}`,
-    "-e",
-    "TZ=UTC",
-    "-p",
-    "127.0.0.1::5432",
-    "postgres:16-alpine",
-  ]);
-  const containerId = parseContainerIdFromStdout(run.stdout);
-  if (run.status !== 0 || !containerId) {
-    throw new Error(`启动一次性测试数据库失败：${run.stderr || run.stdout || `exit=${run.status}`}`);
-  }
-  const teardown = () => removeOwnedContainer(containerId);
-  try {
-    const inspected = containerIdOf(containerId);
-    if (!inspected || inspected !== containerId) {
-      throw new Error("无法核实本轮容器身份：docker run stdout 与 inspect 不一致");
-    }
-    const label = docker([
-      "inspect",
-      "--format",
-      `{{index .Config.Labels "${CONTAINER_LABEL_KEY}"}}`,
-      containerId,
-    ]).stdout;
-    if (label !== RUN_ID) throw new Error("容器标签与本轮运行标记不一致，拒绝继续");
-    const mapped = docker(["port", containerId, "5432/tcp"]).stdout.split("\n")[0] ?? "";
-    if (!mapped.startsWith("127.0.0.1:")) throw new Error("端口映射不在本机回环地址上，拒绝连接");
-    const hostPort = mapped.split(":").pop()?.trim();
-    if (!hostPort) throw new Error("无法读取一次性测试数据库端口");
-    const url = `postgresql://postgres:postgres@127.0.0.1:${hostPort}/${DB_NAME}`;
-
-    const deadline = Date.now() + 60_000;
-    for (;;) {
-      const client = new Client({ connectionString: url, connectionTimeoutMillis: 2000 });
-      try {
-        await client.connect();
-        await client.end();
-        break;
-      } catch {
-        try {
-          await client.end();
-        } catch {
-          // 忽略
-        }
-        if (Date.now() > deadline) throw new Error("一次性测试数据库启动超时");
-        await sleep(500);
-      }
-    }
-
-    const verifier = new Client({ connectionString: url });
-    await verifier.connect();
-    try {
-      const identity = await verifier.query<{ db: string; usr: string; port: number }>(
-        "SELECT current_database() AS db, current_user AS usr, inet_server_port() AS port",
-      );
-      if (identity.rows[0]?.db !== DB_NAME) throw new Error("目标库身份不符：库名不一致");
-      if (identity.rows[0]?.usr !== "postgres") throw new Error("目标库身份不符：用户不一致");
-      if (identity.rows[0]?.port !== 5432) throw new Error("目标端口上不是预期的 PostgreSQL 服务");
-      const existing = await verifier.query<{ rel: string | null }>(
-        "SELECT to_regclass('public.observations') AS rel",
-      );
-      if (existing.rows[0]?.rel !== null) throw new Error("目标库不是全新空库，拒绝初始化");
-    } finally {
-      await verifier.end();
-    }
-    return { url, containerId, teardown };
-  } catch (error) {
-    const removal = teardown();
-    if (!removal.ok) noteCleanupIssue("startup-container", removal.detail);
-    throw error;
-  }
 }
 
 /* ------------------------------ 测试数据 ------------------------------ */
@@ -1181,69 +1070,59 @@ async function freePort(): Promise<number> {
   });
 }
 
-async function runHttpTests(url: string): Promise<void> {
+const httpAudit = {
+  pid: -1,
+  startedAt: null as string | null,
+  ownerPids: [] as number[],
+  stop: null as CleanupReport | null,
+};
+
+async function runHttpTests(url: string, guard: ModelRequestGuard): Promise<void> {
   currentPhase = "http";
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const logFile = `${process.env.TEMP ?? "."}\\g5-db-check-server-${RUN_ID}.log`;
-  const fs = await import("node:fs");
   const logFd = fs.openSync(logFile, "w");
-  const server = spawn(
-    process.execPath,
-    [
-      `${ROOT}node_modules/next/dist/bin/next`,
-      "dev",
-      "-p",
-      String(port),
-      "--hostname",
-      "127.0.0.1",
-    ],
-    {
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        DATABASE_URL: url,
-        TEACHER_PASSCODE,
-        LLM_PROVIDER: "coze",
+  const child = trackChildProcess(
+    spawn(
+      process.execPath,
+      [
+        `${ROOT}node_modules/next/dist/bin/next`,
+        "dev",
+        "-p",
+        String(port),
+        "--hostname",
+        "127.0.0.1",
+      ],
+      {
+        cwd: ROOT,
+        env: { ...modelGuardEnv(guard, process.env), DATABASE_URL: url, TEACHER_PASSCODE },
+        stdio: ["ignore", logFd, logFd],
       },
-      stdio: ["ignore", logFd, logFd],
-    },
+    ),
+    { logFile },
   );
-  let serverClosed = false;
-  const stopServer = () => {
-    if (serverClosed) return;
-    serverClosed = true;
-    if (server && !server.killed) {
-      spawnSync("taskkill", ["/PID", String(server.pid), "/T", "/F"], { stdio: "ignore" });
-    }
-    try {
-      fs.closeSync(logFd);
-    } catch {
-      // 已关闭
-    }
-  };
+  httpAudit.pid = child.pid;
+  httpAudit.startedAt = child.startedAt;
 
   try {
-    const deadline = Date.now() + 180_000;
-    let ready = false;
-    while (Date.now() < deadline) {
-      try {
-        const response = await fetch(`${base}/api/auth/status`);
-        if (response.ok) {
-          ready = true;
-          break;
-        }
-      } catch {
-        // 尚未就绪
-      }
-      await sleep(1000);
-    }
-    if (!ready) {
-      const tail = fs.existsSync(logFile)
-        ? fs.readFileSync(logFile, "utf8").split("\n").slice(-20).join("\n")
-        : "";
-      throw new Error(`dev server 未就绪；日志尾部：\n${tail}`);
-    }
+    const ready = await waitForVerifiedService({ base, port, child, timeoutMs: 180_000 });
+    httpAudit.ownerPids = ready.ownerPids;
+    ok(ready.ownerPids.length >= 1, "就绪服务监听者属于本轮子进程树（非任意 200）");
+
+    // 写业务数据前的数据身份核验：HTTP 读模型必须与直连隔离库完全一致
+    const directBook = await loadChildEvidenceBook(ID.child2, { scope: "all_history" });
+    if (!directBook.ok) assert.fail("直连读取儿童2证据册失败");
+    const identityResponse = await fetch(
+      `${base}/api/children/${ID.child2}/evidence-book?scope=all_history`,
+    );
+    eq(identityResponse.status, 200, "写前身份核验：HTTP 读接口返回 200");
+    const identityBody: unknown = await identityResponse.json();
+    eq(
+      JSON.stringify(identityBody),
+      JSON.stringify(directBook.value),
+      "写前身份核验：HTTP 读模型与直连隔离库一致（服务对应当前本轮数据库）",
+    );
 
     // 1) 教师身份
     const login = await fetch(`${base}/api/auth/login`, {
@@ -1274,6 +1153,15 @@ async function runHttpTests(url: string): Promise<void> {
     const linkBody = (await linkResponse.json()) as Record<string, unknown>;
     eq(linkResponse.status, 200, "真实 HTTP 手动关联成功");
     eq(linkBody.revision, 1, "HTTP 返回 revision=1");
+    const directAfterWrite = await queryOne<{ guide_evidence: unknown }>(
+      "SELECT guide_evidence FROM observations WHERE id = $1",
+      [ID.obs4],
+    );
+    const directAfterWriteParsed = parseGuideEvidence(directAfterWrite?.guide_evidence);
+    ok(
+      directAfterWriteParsed.kind === "ok" && directAfterWriteParsed.revision === 1,
+      "业务写入落在本轮隔离库（直连复核 revision=1）",
+    );
 
     // 3) 个人 GET
     const bookResponse = await fetch(`${base}/api/children/${ID.child2}/evidence-book?scope=all_history`);
@@ -1336,23 +1224,62 @@ async function runHttpTests(url: string): Promise<void> {
     const publicBook = await fetch(`${base}/api/children/${ID.child2}/evidence-book?scope=all_history`);
     eq(publicBook.status, 200, "读接口公开可访问");
   } finally {
-    stopServer();
+    await runCleanupSteps(
+      [
+        {
+          label: "http-server",
+          run: async () => {
+            const report = await stopTrackedChildTree(child);
+            httpAudit.stop = report;
+            return report;
+          },
+        },
+        {
+          label: "http-log-fd",
+          run: () => {
+            try {
+              fs.closeSync(logFd);
+            } catch {
+              // 已关闭
+            }
+          },
+        },
+      ],
+      noteCleanupIssue,
+    );
   }
 }
 
 /* ------------------------------ 主流程 ------------------------------ */
 
 async function main(): Promise<void> {
-  const started = await startTestDatabase();
+  const artifacts = snapshotGeneratedArtifacts(ROOT);
+  const guard = await startModelRequestGuard();
+  const guardedEnv = modelGuardEnv(guard, process.env);
+  process.env.LLM_PROVIDER = guardedEnv.LLM_PROVIDER;
+  process.env.STEPFUN_API_KEY = guardedEnv.STEPFUN_API_KEY;
+  process.env.STEPFUN_BASE_URL = guardedEnv.STEPFUN_BASE_URL;
+  process.env.STEPFUN_MODEL = guardedEnv.STEPFUN_MODEL;
+  process.env.STEPFUN_TIMEOUT_MS = guardedEnv.STEPFUN_TIMEOUT_MS;
+
+  let started: IsolatedPostgres | null = null;
   let failure: unknown = null;
+  let artifactReport: { restored: string[]; removed: string[]; issues: string[] } | null = null;
   try {
+    started = await startIsolatedPostgres({
+      runId: RUN_ID,
+      containerName: CONTAINER_NAME,
+      dbName: DB_NAME,
+      labelKey: CONTAINER_LABEL_KEY,
+      noteIssue: noteCleanupIssue,
+    });
     process.env.DATABASE_URL = started.url;
     process.env.TEACHER_PASSCODE = TEACHER_PASSCODE;
 
     const schemaClient = new Client({ connectionString: started.url });
     await schemaClient.connect();
     try {
-      await schemaClient.query(readFileSync(`${ROOT}scripts/initialize-demo-db.sql`, "utf8"));
+      await schemaClient.query(fs.readFileSync(`${ROOT}scripts/initialize-demo-db.sql`, "utf8"));
       await seed(schemaClient);
     } finally {
       await schemaClient.end();
@@ -1360,19 +1287,46 @@ async function main(): Promise<void> {
 
     await runDirectTests();
     await runConcurrencyTest(started.url);
-    await runHttpTests(started.url);
+    await runHttpTests(started.url, guard);
   } catch (error) {
     failure = error;
   } finally {
-    try {
-      await globalThis.__pgPool?.end();
-    } catch (error) {
-      noteCleanupIssue("pg-pool", error instanceof Error ? error.message : String(error));
-    }
-    const teardown = started.teardown();
-    if (!teardown.ok) noteCleanupIssue("container", teardown.detail);
+    await runCleanupSteps(
+      [
+        {
+          label: "pg-pool",
+          timeoutMs: 10_000,
+          run: async () => {
+            await globalThis.__pgPool?.end();
+          },
+        },
+        {
+          label: "container",
+          timeoutMs: 30_000,
+          run: () => started?.teardown() ?? { ok: true, detail: "本轮未创建容器" },
+        },
+        { label: "model-guard", run: () => guard.close() },
+        {
+          label: "generated-artifacts",
+          run: () => {
+            artifactReport = restoreGeneratedArtifacts(artifacts, ROOT);
+            if (artifactReport.issues.length > 0) {
+              return { ok: false, detail: artifactReport.issues.join("；") };
+            }
+            return { ok: true, detail: "" };
+          },
+        },
+      ],
+      noteCleanupIssue,
+    );
   }
 
+  if (guard.hits !== 0) {
+    noteCleanupIssue(
+      "model-guard",
+      `检测到 ${guard.hits} 次真实模型请求：${guard.requestPaths.join(",")}`,
+    );
+  }
   if (failure) {
     if (cleanupIssues.length > 0) console.error(`清理问题：${cleanupIssues.join("；")}`);
     throw failure;
@@ -1390,10 +1344,22 @@ async function main(): Promise<void> {
       database: "disposable-local-postgres (identity-verified before DDL)",
       resource_safety: {
         run_id: RUN_ID,
-        container: started.containerId.slice(0, 12),
-        cleanup: "by-container-id-only + label-ownership-check",
+        container: started?.containerId.slice(0, 12) ?? "none",
+        container_cleanup: "tri-state inspect + verified id + label ownership + post-rm verify",
+        http_server: {
+          pid: httpAudit.pid,
+          started_at: httpAudit.startedAt,
+          listener_owner_pids: httpAudit.ownerPids,
+          stop: httpAudit.stop,
+        },
+        business_write_target: "direct re-read from isolated db after first HTTP write",
+        generated_artifacts: artifactReport,
       },
-      real_model_requests: 0,
+      model_guard: {
+        provider_redirect: "stepfun -> local guard",
+        requests: guard.requestPaths,
+      },
+      real_model_requests: guard.hits,
     }),
   );
 }
