@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requireTeacher } from "@/lib/auth";
 import {
+  GuideEvidenceBasisExpiredError,
   GuideEvidenceCatalogError,
   GuideEvidenceConflictError,
   GuideEvidenceInvalidError,
@@ -107,6 +108,12 @@ export async function POST(
     }
     if (error instanceof GuideEvidenceCatalogError) {
       return errorResponse(409, "catalog_version_mismatch", error.message, {
+        item_id: error.item_id,
+      });
+    }
+    if (error instanceof GuideEvidenceBasisExpiredError) {
+      return errorResponse(409, "basis_expired", error.message, {
+        link_id: error.link_id,
         item_id: error.item_id,
       });
     }

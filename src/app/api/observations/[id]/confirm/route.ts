@@ -4,11 +4,13 @@ import { reviewTeacherEdit } from "@/lib/ai";
 import { requireTeacher } from "@/lib/auth";
 import { ObservationStateConflictError } from "@/lib/evidence-snapshot";
 import {
+  GuideEvidenceBasisExpiredError,
   GuideEvidenceCatalogError,
   GuideEvidenceConflictError,
   GuideEvidenceInvalidError,
   GuideEvidenceNotFoundError,
 } from "@/lib/guide/decisions";
+import { parseGuideEvidence } from "@/lib/guide/runtime";
 import {
   buildGuideResponseLinks,
   confirmObservation,
@@ -46,6 +48,11 @@ function withoutTeacherEditReview(context: AgentContext): AgentContext {
   const next = { ...context };
   delete next.teacher_edit_review;
   return next;
+}
+
+function containerRevision(value: unknown): number {
+  const parsed = parseGuideEvidence(value);
+  return parsed.kind === "ok" ? parsed.revision : 0;
 }
 
 export async function POST(
@@ -217,7 +224,15 @@ export async function POST(
           : undefined,
       );
       const guideResponse = parsed.data.guide_decisions
-        ? await buildGuideResponseLinks(confirmed)
+        ? await (async () => {
+            try {
+              return await buildGuideResponseLinks(confirmed);
+            } catch (error) {
+              // 归档与关联已提交：详情补查失败不得把成功改报失败、不得回滚、不得诱导重复提交
+              console.error("确认已提交，但指南证据详情补查失败：", error);
+              return null;
+            }
+          })()
         : null;
       let profileUpdate: ProfileUpdateResult = {
         status: "failed",
@@ -241,13 +256,21 @@ export async function POST(
         profileUpdateStatus: profileUpdate.status,
         profileUpdateMessage: profileUpdate.message,
         growthProfile: profileUpdate.growthProfile,
-        ...(guideResponse
+        ...(parsed.data.guide_decisions
           ? {
-              guideEvidence: {
-                status: "applied" as const,
-                revision: guideResponse.revision,
-                links: guideResponse.links,
-              },
+              guideEvidence: guideResponse
+                ? {
+                    status: "applied" as const,
+                    revision: guideResponse.revision,
+                    links: guideResponse.links,
+                  }
+                : {
+                    status: "applied" as const,
+                    revision: containerRevision(confirmed.guide_evidence),
+                    detail_unavailable: true,
+                    message:
+                      "观察与关联决定已保存；证据详情暂时无法读取，请刷新查看，不要重复提交。",
+                  },
             }
           : {}),
       });
@@ -323,6 +346,12 @@ export async function POST(
     if (e instanceof GuideEvidenceCatalogError) {
       return NextResponse.json(
         { error: "catalog_version_mismatch", message: e.message, item_id: e.item_id },
+        { status: 409 },
+      );
+    }
+    if (e instanceof GuideEvidenceBasisExpiredError) {
+      return NextResponse.json(
+        { error: "basis_expired", message: e.message, link_id: e.link_id, item_id: e.item_id },
         { status: 409 },
       );
     }

@@ -12,6 +12,7 @@ import {
   GuideEvidenceNotFoundError,
   applyGuideDecisions,
   applyGuideTerminalOperation,
+  hostObservationConflictError,
   type ApplyDecisionsContext,
   type DecisionSourceObservation,
 } from "./guide/decisions";
@@ -19,6 +20,7 @@ import { guideItemById } from "./guide/item-index";
 import {
   buildMutationLinkViews,
   parseGuideEvidence,
+  suggestionSourceSnapshotStillMatches,
   type EvidenceObservation,
 } from "./guide/runtime";
 import {
@@ -960,6 +962,7 @@ export async function confirmObservation(
         itemById: guideItemById,
         sourceById,
         now,
+        confirmingObservationId: id,
       };
       const applied = applyGuideDecisions(parsed, guide.decisions, ctx);
       if (applied.changed && applied.container) {
@@ -1114,6 +1117,9 @@ export async function applyGuideEvidenceMutationWithClient(
 ): Promise<GuideMutationResult> {
   const now = new Date().toISOString();
   const observation = await lockObservationForGuide(client, observationId);
+  // 独立 confirm/reject/withdraw 只作用于已归档观察；幂等重复同样不得绕过
+  const hostConflict = hostObservationConflictError(observation.status);
+  if (hostConflict) throw hostConflict;
   const parsed = parseGuideEvidence(observation.guide_evidence);
   const parsedRevision = parsed.kind === "unreadable" ? 0 : parsed.revision;
   const sources = await loadChildObservationsWithClient(client, observation.child_id);
@@ -1123,6 +1129,7 @@ export async function applyGuideEvidenceMutationWithClient(
     itemById: guideItemById,
     sourceById,
     now,
+    confirmingObservationId: null,
   };
   const result =
     mutation.action === "confirm"
@@ -1245,6 +1252,16 @@ export async function saveGuideEvidenceSuggestionResult(
           : [],
       );
       return mutationResult(observation, parsed.revision, links);
+    }
+    // 保存前同步核对所用来源仍符合生成快照：来源日期/版本迟到变化时不写旧建议
+    const sourceObservations = await loadChildObservationsWithClient(client, observation.child_id);
+    const sourceById = new Map(sourceObservations.map((source) => [source.id, source]));
+    for (const suggestion of fresh) {
+      if (!suggestionSourceSnapshotStillMatches(suggestion, sourceById)) {
+        throw new GuideEvidenceConflictError(
+          "AI 建议生成后来源观察已更新，迟到的建议不会写入；请重新生成建议或手动关联。",
+        );
+      }
     }
     const newLinks = fresh.map((suggestion) => ({
       id: randomUUID(),
