@@ -7,6 +7,7 @@ import {
 import { ObservationStateConflictError, StaleEvidenceError } from "./evidence-snapshot";
 import { isoDateInShanghai } from "./format";
 import type { ObservationClassContextSnapshot } from "./guide/types";
+import { CLASS_STAGES } from "./types";
 import type {
   ActivitySupport,
   AgentContext,
@@ -53,6 +54,30 @@ export function mapClass(row: Row): SchoolClass {
     name: str(row.name),
     stage: (str(row.stage) || "small") as ClassStage,
     school_year: str(row.school_year),
+    is_active: Boolean(row.is_active),
+    is_demo: Boolean(row.is_demo),
+    created_at: str(row.created_at),
+    updated_at: strOrNull(row.updated_at),
+  };
+}
+
+/**
+ * 严格解析班级行：id / name / school_year 必须为非空字符串，stage 必须是三个真实学段之一。
+ * 绝不用“默认小班”兜底；无法核实返回 null。写入边界（发生时班级快照、教师确认）必须用它，
+ * mapClass 只服务展示路径。
+ */
+export function parseReliableClass(row: Row): SchoolClass | null {
+  const id = str(row.id);
+  const name = str(row.name);
+  const stage = str(row.stage);
+  const schoolYear = str(row.school_year);
+  if (!id || !name || !schoolYear) return null;
+  if (!(CLASS_STAGES as readonly string[]).includes(stage)) return null;
+  return {
+    id,
+    name,
+    stage: stage as ClassStage,
+    school_year: schoolYear,
     is_active: Boolean(row.is_active),
     is_demo: Boolean(row.is_demo),
     created_at: str(row.created_at),
@@ -339,6 +364,8 @@ export async function createChild(input: {
   avatar_emoji?: string;
   note?: string;
 }): Promise<Child> {
+  // 首次分班日期与转班、观察默认日期同一口径：亚洲/上海日历日，不用数据库 CURRENT_DATE
+  const enrollmentStart = isoDateInShanghai();
   const row = await queryOne<{ data: Row }>(
     `WITH klass AS (
        SELECT id, name FROM classes WHERE id = $4
@@ -348,7 +375,7 @@ export async function createChild(input: {
        RETURNING children.*
      ), new_enrollment AS (
        INSERT INTO child_class_enrollments (child_id, class_id, start_date)
-       SELECT new_child.id, klass.id, CURRENT_DATE FROM new_child CROSS JOIN klass
+       SELECT new_child.id, klass.id, $7::date FROM new_child CROSS JOIN klass
        RETURNING id
      )
      SELECT to_jsonb(new_child.*) AS data FROM new_child`,
@@ -359,6 +386,7 @@ export async function createChild(input: {
       input.class_id,
       input.avatar_emoji ?? null,
       input.note ?? null,
+      enrollmentStart,
     ]
   );
   if (!row) throw new Error("新增幼儿失败：班级不存在或写入后未能读取记录");
@@ -539,40 +567,117 @@ export async function getObservation(id: string): Promise<Observation | null> {
 }
 
 /**
+ * 观察发生时班级前提：创建接口读取班级/归属后交给保存边界复核。
+ * 前提变化（改名、学段、学年或归属区间失效）→ 拒绝写入，要求重新核对。
+ */
+export interface ObservationClassPremise {
+  class_id: string;
+  class_name: string;
+  stage: ClassStage;
+  school_year: string;
+  /** 分班历史解析来源的归属记录 id；教师确认时为 null */
+  enrollment_id: string | null;
+  observed_at: string;
+}
+
+/** 快照前提在保存时已变化：明确冲突，由路由映射 409，不静默写入旧快照 */
+export class ObservationContextConflictError extends Error {
+  constructor(
+    message = "发生时班级资料在核对后已变化，请重新核对这条观察的班级后再保存。"
+  ) {
+    super(message);
+    this.name = "ObservationContextConflictError";
+  }
+}
+
+/**
  * 保存观察原文：class_id 与 class_context_snapshot 由创建接口按“发生时班级”解析后传入
  * （分班历史唯一命中或教师确认），转班、改名后快照不变；raw_text 保存后不再改写。
  * guide_evidence 保持 NULL（未关联是正常状态，由 G5 后续读写）。
+ *
+ * 共同保存边界（短事务）：先锁 classes 行 FOR SHARE（与 updateClass 的 FOR UPDATE 互斥），
+ * 锁后按 premise 重新核验服务端快照来源；分班历史路径再锁归属行并核验区间仍覆盖
+ * observed_at。前提变化抛 ObservationContextConflictError，不依赖 INSERT 的外键检查
+ * （KEY SHARE 不阻止班级资料变化），也不接受客户端完整快照。模型调用不在此事务内。
  */
 export async function createObservation(input: {
   child_id: string;
-  class_id: string;
   observed_at: string;
   context: string | null;
   raw_text: string;
   is_demo: boolean;
-  class_context_snapshot: ObservationClassContextSnapshot | null;
+  class_context_snapshot: ObservationClassContextSnapshot;
+  premise: ObservationClassPremise;
 }): Promise<Observation> {
-  const row = await queryOne<{ id: string }>(
-    `INSERT INTO observations
-       (child_id, class_id, observed_at, context, raw_text, is_demo, class_context_snapshot)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-     RETURNING id`,
-    [
-      input.child_id,
-      input.class_id,
-      input.observed_at,
-      input.context,
-      input.raw_text,
-      input.is_demo,
-      input.class_context_snapshot === null
-        ? null
-        : JSON.stringify(input.class_context_snapshot),
-    ]
-  );
-  if (!row) throw new Error("保存观察记录失败：写入后未能读取记录");
-  const created = await getObservation(str(row.id));
-  if (!created) throw new Error("保存观察记录失败：写入后未能读取记录");
-  return created;
+  const snapshot = input.class_context_snapshot;
+  if (snapshot.class_id !== input.premise.class_id) {
+    throw new ObservationContextConflictError("发生时班级前提与快照不一致，请重新核对后再保存。");
+  }
+  return withTransaction(async (client) => {
+    const locked = await client.query<{ data: Row }>(
+      "SELECT to_jsonb(classes.*) AS data FROM classes WHERE id = $1 FOR SHARE",
+      [input.premise.class_id]
+    );
+    if (locked.rowCount === 0) {
+      throw new ObservationContextConflictError("发生时班级不存在或已被删除，请重新核对后再保存。");
+    }
+    const current = parseReliableClass(locked.rows[0].data);
+    if (!current) {
+      throw new ObservationContextConflictError("发生时班级资料无法核实，请重新核对后再保存。");
+    }
+    if (
+      current.name !== input.premise.class_name ||
+      current.stage !== input.premise.stage ||
+      current.school_year !== input.premise.school_year
+    ) {
+      throw new ObservationContextConflictError();
+    }
+
+    if (input.premise.enrollment_id) {
+      const enrollment = await client.query<{
+        class_id: string;
+        start_date: string;
+        end_date: string | null;
+      }>(
+        `SELECT class_id, start_date::text AS start_date, end_date::text AS end_date
+           FROM child_class_enrollments
+          WHERE id = $1 AND child_id = $2
+          FOR SHARE`,
+        [input.premise.enrollment_id, input.child_id]
+      );
+      const row = enrollment.rows[0];
+      const covers =
+        row &&
+        row.class_id === input.premise.class_id &&
+        row.start_date <= input.premise.observed_at &&
+        (row.end_date === null || row.end_date >= input.premise.observed_at);
+      if (!covers) {
+        throw new ObservationContextConflictError(
+          "这条观察的分班归属在核对后已变化，请重新核对后再保存。"
+        );
+      }
+    }
+
+    const inserted = await client.query<{ data: Row }>(
+      `INSERT INTO observations
+         (child_id, class_id, observed_at, context, raw_text, is_demo, class_context_snapshot)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+       RETURNING to_jsonb(observations.*) AS data`,
+      [
+        input.child_id,
+        snapshot.class_id,
+        input.observed_at,
+        input.context,
+        input.raw_text,
+        input.is_demo,
+        JSON.stringify(snapshot),
+      ]
+    );
+    if (inserted.rowCount === 0) {
+      throw new Error("保存观察记录失败：写入后未能读取记录");
+    }
+    return mapObservation(inserted.rows[0].data);
+  });
 }
 
 /**

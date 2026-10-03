@@ -1,11 +1,14 @@
 import type { ObservationClassContextSnapshot } from "@/lib/guide/types";
 import { parseIsoDateStrict } from "@/lib/format";
+import { parseReliableClass } from "@/lib/queries";
 import {
   CLASS_STAGES,
   type ClassStage,
   type SchoolClass,
 } from "@/lib/types";
 import { query, queryOne } from "@/storage/database/pg-client";
+
+export { parseReliableClass };
 
 /**
  * 观察发生时班级解析（G2）。
@@ -68,29 +71,6 @@ type Row = Record<string, unknown>;
 const str = (value: unknown): string => (typeof value === "string" ? value : "");
 const strOrNull = (value: unknown): string | null =>
   typeof value === "string" ? value : null;
-
-/**
- * 严格解析班级行：id / name / school_year 必须为非空字符串，stage 必须是三个真实学段之一。
- * 绝不用“默认小班”兜底；无法核实返回 null，调用方必须转为需核对/不可靠状态。
- */
-export function parseReliableClass(row: Row): SchoolClass | null {
-  const id = str(row.id);
-  const name = str(row.name);
-  const stage = str(row.stage);
-  const schoolYear = str(row.school_year);
-  if (!id || !name || !schoolYear) return null;
-  if (!(CLASS_STAGES as readonly string[]).includes(stage)) return null;
-  return {
-    id,
-    name,
-    stage: stage as ClassStage,
-    school_year: schoolYear,
-    is_active: Boolean(row.is_active),
-    is_demo: Boolean(row.is_demo),
-    created_at: str(row.created_at),
-    updated_at: strOrNull(row.updated_at),
-  };
-}
 
 /** 运行时校验一个已构造的 SchoolClass 是否可核实（供快照构造器与教师确认共用） */
 export function isReliableClass(klass: SchoolClass): boolean {

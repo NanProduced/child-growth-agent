@@ -78,6 +78,8 @@ export default function NewObservationPage() {
 
   // 当前有效的查询键：旧请求/旧响应不得覆盖新儿童或新日期的状态
   const lookupKeyRef = useRef<string | null>(null);
+  // 防重复提交：状态更新是异步的，同一 tick 的连点必须被 ref 拦住
+  const submittingRef = useRef(false);
 
   // 默认日期仅客户端挂载后写入，且统一按亚洲/上海日历日，保证服务端渲染与水合一致
   useEffect(() => {
@@ -141,13 +143,15 @@ export default function NewObservationPage() {
 
   // 幼儿或日期变化时，按分班历史核对发生班级。
   // 只接受明确合法的 resolved / needs_confirmation；无效 JSON、解析失败等进入错误态并可重试。
+  // 请求代次（lookupNonce）也参与键控：同儿童同日期的重试不会被上一代迟到响应覆盖。
   useEffect(() => {
     const validDate = observedAt.length > 0 && parseIsoDateStrict(observedAt) !== null;
-    const key = childId && validDate ? `${childId}|${observedAt}` : null;
-    lookupKeyRef.current = key;
-    // 切换对象/日期后旧的人工选择立即失效
+    const requestKey =
+      childId && validDate ? `${childId}|${observedAt}|#${lookupNonce}` : null;
+    lookupKeyRef.current = requestKey;
+    // 切换对象/日期/重试代次后旧的人工选择立即失效
     setConfirmedSelection(null);
-    if (!key) {
+    if (!requestKey) {
       setClassContext({ status: 'idle' });
       return;
     }
@@ -155,11 +159,15 @@ export default function NewObservationPage() {
     setClassContext({ status: 'checking' });
     fetchClassContextState({ childId, observedAt, signal: controller.signal })
       .then((state) => {
-        if (lookupKeyRef.current !== key) return;
+        if (lookupKeyRef.current !== requestKey) return;
+        if (state.status === 'resolved') {
+          // resolved 时明确清除人工选择，避免旧选择影响后续提交
+          setConfirmedSelection(null);
+        }
         setClassContext(state);
       })
       .catch((error: unknown) => {
-        if (lookupKeyRef.current !== key) return;
+        if (lookupKeyRef.current !== requestKey) return;
         if (isAbortError(error)) return;
         setClassContext({
           status: 'error',
@@ -171,13 +179,14 @@ export default function NewObservationPage() {
 
   const selectedChild = children.find((c) => c.id === childId) ?? null;
   const needsClassConfirmation = classContext.status === 'needs_confirmation';
-  // 提交只携带“当前需要人工确认且绑定当前儿童+日期”的选择
+  // 提交只携带“当前确为 needs_confirmation 且绑定当前儿童+日期”的选择
   const boundSelection =
     confirmedSelection &&
     confirmedSelection.child_id === childId &&
     confirmedSelection.observed_at === observedAt
       ? confirmedSelection
       : null;
+  const canSendConfirmedClass = needsClassConfirmation ? boundSelection : null;
 
   const retryLookup = useCallback(() => setLookupNonce((n) => n + 1), []);
   const retryClasses = useCallback(() => setClassesNonce((n) => n + 1), []);
@@ -199,10 +208,12 @@ export default function NewObservationPage() {
       toast.error('正在核对这条观察发生时的班级，请稍候');
       return;
     }
-    if (needsClassConfirmation && !boundSelection) {
+    if (needsClassConfirmation && !canSendConfirmedClass) {
       toast.error('请选择这条观察发生时的班级');
       return;
     }
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       const res = await fetch('/api/observations', {
@@ -213,7 +224,9 @@ export default function NewObservationPage() {
           observed_at: observedAt,
           context: context.trim() || null,
           raw_text: rawText.trim(),
-          ...(boundSelection ? { confirmed_class_id: boundSelection.class_id } : {}),
+          ...(canSendConfirmedClass
+            ? { confirmed_class_id: canSendConfirmedClass.class_id }
+            : {}),
         }),
       });
       const data = (await res.json().catch(() => ({}))) as ClassContextResponseBody;
@@ -228,6 +241,10 @@ export default function NewObservationPage() {
                 : '无法自动确定这条观察发生时的班级，请选择。',
           });
           setConfirmedSelection(null);
+        } else if (data.error === 'class_context_conflict') {
+          // 保存边界发现班级资料在核对后已变化：立即失效旧选择并重新核对
+          setConfirmedSelection(null);
+          setLookupNonce((n) => n + 1);
         }
         throw new Error(
           typeof data.message === 'string' && data.message ? data.message : '保存失败，请稍后再试',
@@ -237,6 +254,7 @@ export default function NewObservationPage() {
       router.push(`/observations/${data.observation.id}/review`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '保存失败，请稍后再试');
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
@@ -362,7 +380,7 @@ export default function NewObservationPage() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="min-h-9"
+                      className="min-h-11"
                       onClick={retryClasses}
                     >
                       重新加载班级
@@ -408,13 +426,16 @@ export default function NewObservationPage() {
                 </p>
               </div>
             ) : classContext.status === 'error' ? (
-              <div className="space-y-2 rounded-lg border border-rose-200 bg-rose-50/70 px-3 py-3">
+              <div
+                role="alert"
+                className="space-y-2 rounded-lg border border-rose-200 bg-rose-50/70 px-3 py-3"
+              >
                 <p className="text-xs leading-5 text-rose-800">{classContext.message}</p>
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  className="min-h-9"
+                  className="min-h-11"
                   onClick={retryLookup}
                 >
                   重新核对
@@ -462,7 +483,7 @@ export default function NewObservationPage() {
           </div>
 
           <Button
-            className="w-full"
+            className="min-h-11 w-full"
             onClick={() => void handleSubmit()}
             disabled={submitting || loadingChildren || classContext.status === 'checking'}
           >
