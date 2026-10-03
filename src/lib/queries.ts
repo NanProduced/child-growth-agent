@@ -308,26 +308,35 @@ export async function enrollChildInClass(input: {
 }): Promise<{ closed: number; opened: number }> {
   // 默认分班日期按服务端统一口径取亚洲/上海日历日，避免 UTC 跨日导致归属日期错位
   const startDate = input.start_date ?? isoDateInShanghai();
-  const row = await queryOne<{ closed: number; opened: number }>(
-    `WITH closed AS (
-       UPDATE child_class_enrollments
-          SET end_date = GREATEST(start_date, ($2::date - 1))
-        WHERE child_id = $1::text AND end_date IS NULL
-        RETURNING id
-     ), opened AS (
-       INSERT INTO child_class_enrollments (child_id, class_id, start_date)
-       VALUES ($1::text, $3::text, $2::date)
-       RETURNING id
-     ), synced AS (
-       UPDATE children
-          SET class_name = (SELECT name FROM classes WHERE id = $3::text), updated_at = now()
-        WHERE id = $1::text
-     )
-     SELECT (SELECT count(*) FROM closed)::int AS closed,
-            (SELECT count(*) FROM opened)::int AS opened`,
-    [input.child_id, startDate, input.class_id]
-  );
-  return { closed: row?.closed ?? 0, opened: row?.opened ?? 0 };
+  // 与观察保存共用“先锁 children 行”的顺序：保存边界读归属集合时会 FOR SHARE 同一行，
+  // 从而串行化“读集合→写观察”与“结束旧归属→新增归属”，消除新增重叠记录的窗口。
+  return withTransaction(async (client) => {
+    const locked = await client.query("SELECT id FROM children WHERE id = $1 FOR UPDATE", [
+      input.child_id,
+    ]);
+    if (locked.rowCount === 0) throw new Error("幼儿档案不存在");
+    const result = await client.query<{ closed: number; opened: number }>(
+      `WITH closed AS (
+         UPDATE child_class_enrollments
+            SET end_date = GREATEST(start_date, ($2::date - 1))
+          WHERE child_id = $1::text AND end_date IS NULL
+          RETURNING id
+       ), opened AS (
+         INSERT INTO child_class_enrollments (child_id, class_id, start_date)
+         VALUES ($1::text, $3::text, $2::date)
+         RETURNING id
+       ), synced AS (
+         UPDATE children
+            SET class_name = (SELECT name FROM classes WHERE id = $3::text), updated_at = now()
+          WHERE id = $1::text
+       )
+       SELECT (SELECT count(*) FROM closed)::int AS closed,
+              (SELECT count(*) FROM opened)::int AS opened`,
+      [input.child_id, startDate, input.class_id]
+    );
+    const row = result.rows[0];
+    return { closed: row?.closed ?? 0, opened: row?.opened ?? 0 };
+  });
 }
 
 export async function listChildren(): Promise<Child[]> {
@@ -591,14 +600,35 @@ export class ObservationContextConflictError extends Error {
 }
 
 /**
+ * 观察日期覆盖的归属集合与异常归属检查：解析与保存边界共用同一 SQL，避免语义漂移。
+ * 保存时以同一查询重新判定“当前仍唯一且无异常”，而不是只看旧 enrollment_id 是否覆盖日期。
+ */
+export const ENROLLMENT_MATCHES_SQL = `SELECT to_jsonb(e.*) AS enrollment_data, to_jsonb(k.*) AS class_data
+   FROM child_class_enrollments e
+   JOIN classes k ON k.id = e.class_id
+  WHERE e.child_id = $1
+    AND e.start_date <= $2::date
+    AND (e.end_date IS NULL OR e.end_date >= $2::date)
+  ORDER BY e.start_date ASC, e.id ASC`;
+
+export const BROKEN_ENROLLMENTS_SQL = `SELECT count(*)::int AS count
+   FROM child_class_enrollments
+  WHERE child_id = $1
+    AND end_date IS NOT NULL
+    AND end_date < start_date`;
+
+/**
  * 保存观察原文：class_id 与 class_context_snapshot 由创建接口按“发生时班级”解析后传入
  * （分班历史唯一命中或教师确认），转班、改名后快照不变；raw_text 保存后不再改写。
  * guide_evidence 保持 NULL（未关联是正常状态，由 G5 后续读写）。
  *
- * 共同保存边界（短事务）：先锁 classes 行 FOR SHARE（与 updateClass 的 FOR UPDATE 互斥），
- * 锁后按 premise 重新核验服务端快照来源；分班历史路径再锁归属行并核验区间仍覆盖
- * observed_at。前提变化抛 ObservationContextConflictError，不依赖 INSERT 的外键检查
- * （KEY SHARE 不阻止班级资料变化），也不接受客户端完整快照。模型调用不在此事务内。
+ * 共同保存边界（短事务，锁顺序 children → classes → observations，与既有确认链路一致）：
+ * 1. 先锁 children 行 FOR SHARE：与分班/转班写入的 children 行锁串行化，
+ *    封住“读归属集合→写观察”之间新增重叠归属的窗口；
+ * 2. 锁 classes 行 FOR SHARE（与 updateClass 的 FOR UPDATE 互斥），按 premise 复核资料；
+ * 3. 分班历史路径用同一 SQL 复核当前归属集合：仍唯一、无异常、且仍是前提对应的归属。
+ * 任一项变化抛 ObservationContextConflictError（路由 409），不依赖 INSERT 外键检查，
+ * 不静默换班、不伪装 teacher_confirmed。模型调用不在此事务内。
  */
 export async function createObservation(input: {
   child_id: string;
@@ -614,6 +644,14 @@ export async function createObservation(input: {
     throw new ObservationContextConflictError("发生时班级前提与快照不一致，请重新核对后再保存。");
   }
   return withTransaction(async (client) => {
+    const childLocked = await client.query(
+      "SELECT id FROM children WHERE id = $1 FOR SHARE",
+      [input.child_id]
+    );
+    if (childLocked.rowCount === 0) {
+      throw new ObservationContextConflictError("幼儿档案不存在，请重新核对后再保存。");
+    }
+
     const locked = await client.query<{ data: Row }>(
       "SELECT to_jsonb(classes.*) AS data FROM classes WHERE id = $1 FOR SHARE",
       [input.premise.class_id]
@@ -634,24 +672,30 @@ export async function createObservation(input: {
     }
 
     if (input.premise.enrollment_id) {
-      const enrollment = await client.query<{
-        class_id: string;
-        start_date: string;
-        end_date: string | null;
-      }>(
-        `SELECT class_id, start_date::text AS start_date, end_date::text AS end_date
-           FROM child_class_enrollments
-          WHERE id = $1 AND child_id = $2
-          FOR SHARE`,
-        [input.premise.enrollment_id, input.child_id]
+      const broken = await client.query<{ count: number }>(BROKEN_ENROLLMENTS_SQL, [
+        input.child_id,
+      ]);
+      if ((broken.rows[0]?.count ?? 0) > 0) {
+        throw new ObservationContextConflictError(
+          "这名幼儿的分班历史在核对后出现异常记录，请重新核对后再保存。"
+        );
+      }
+      const matches = await client.query<{ enrollment_data: Row; class_data: Row }>(
+        ENROLLMENT_MATCHES_SQL,
+        [input.child_id, input.observed_at]
       );
-      const row = enrollment.rows[0];
-      const covers =
-        row &&
-        row.class_id === input.premise.class_id &&
-        row.start_date <= input.premise.observed_at &&
-        (row.end_date === null || row.end_date >= input.premise.observed_at);
-      if (!covers) {
+      if (matches.rowCount !== 1) {
+        throw new ObservationContextConflictError(
+          "这条观察日期的分班归属在核对后不再唯一，请重新核对这条观察的班级后再保存。"
+        );
+      }
+      const matched = matches.rows[0];
+      if (str(matched.enrollment_data.id) !== input.premise.enrollment_id) {
+        throw new ObservationContextConflictError(
+          "这条观察的分班归属在核对后已变化，请重新核对后再保存。"
+        );
+      }
+      if (str(matched.enrollment_data.class_id) !== input.premise.class_id) {
         throw new ObservationContextConflictError(
           "这条观察的分班归属在核对后已变化，请重新核对后再保存。"
         );

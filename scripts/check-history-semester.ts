@@ -62,6 +62,8 @@ const TEACHER_PASSCODE_KEY = 'TEACHER_PASSCODE';
 const LEGACY_CONTAINER_NAME = 'cga-history-check';
 const FAULT_MODE =
   process.argv.find((arg) => arg.startsWith('--fault='))?.split('=')[1] ?? null;
+/** 轻量场景：只跑离线检查 + 一次最小实库往返，用于验证 created:false 反例容器在正常结束时不被删除 */
+const DECOY_ONLY = process.argv.includes('--scenario=decoy-normal');
 
 /** 本轮唯一标记：容器名、库名、标签共用；只影响本轮创建的资源 */
 const RUN_ID = `${process.pid.toString(36)}${Date.now().toString(36)}`.toLowerCase();
@@ -150,6 +152,30 @@ function removeContainerById(containerId: string | null): CleanupResult {
   };
 }
 
+/**
+ * 所有权核实的删除：知道 ID 不等于拥有它。
+ * 删除前必须确认容器仍存在且标签等于本轮标记；既有/他人容器一律不删。
+ */
+function removeOwnedContainer(
+  containerId: string | null,
+  labelKey: string,
+  expectedLabelValue: string,
+  label: string
+): CleanupResult {
+  if (!containerId) return { ok: true, detail: '' };
+  if (!containerIdOf(containerId)) return { ok: true, detail: '' };
+  const value = docker([
+    'inspect', '--format', `{{index .Config.Labels "${labelKey}"}}`, containerId,
+  ]).stdout;
+  if (value !== expectedLabelValue) {
+    return {
+      ok: false,
+      detail: `${label} 容器标签不属于本轮（实际 ${value || '无'}），拒绝删除`,
+    };
+  }
+  return removeContainerById(containerId);
+}
+
 /** 反例容器：占用历史固定名称，验证本轮清理不会按名称误删 */
 function ensureLegacyNameDecoy(): { id: string | null; created: boolean } {
   const existing = containerIdOf(LEGACY_CONTAINER_NAME);
@@ -200,7 +226,9 @@ async function startTestDatabase(): Promise<{
       `启动一次性测试数据库失败：${run.stderr || run.stdout || `exit=${run.status}`}`
     );
   }
-  const teardown = () => removeContainerById(containerId);
+  // 删除前再次核实标签所有权；知道 ID 不等于拥有容器
+  const teardown = () =>
+    removeOwnedContainer(containerId, 'cga-history-check', RUN_ID, '本轮数据库');
 
   try {
     const inspected = containerIdOf(containerId);
@@ -358,6 +386,10 @@ const ID = {
   classBackdatedTo: 'a0000000-0000-4000-8000-000000000015',
   classWindow: 'a0000000-0000-4000-8000-000000000016',
   classDateCheck: 'a0000000-0000-4000-8000-000000000017',
+  classGapFrom: 'a0000000-0000-4000-8000-000000000018',
+  classGapTo: 'a0000000-0000-4000-8000-000000000019',
+  classBackfillOverlap: 'a0000000-0000-4000-8000-000000000020',
+  classOverlapExtra: 'a0000000-0000-4000-8000-000000000021',
   childBackfill: 'b0000000-0000-4000-8000-000000000001',
   childOverlap: 'b0000000-0000-4000-8000-000000000002',
   childBroken: 'b0000000-0000-4000-8000-000000000003',
@@ -370,6 +402,9 @@ const ID = {
   childEnrollConflict: 'b0000000-0000-4000-8000-000000000010',
   childBackdated: 'b0000000-0000-4000-8000-000000000011',
   childWindow: 'b0000000-0000-4000-8000-000000000012',
+  childGap: 'b0000000-0000-4000-8000-000000000013',
+  childBackfillOverlap: 'b0000000-0000-4000-8000-000000000014',
+  childWindowGap: 'b0000000-0000-4000-8000-000000000015',
   enrollBackfillA: 'e0000000-0000-4000-8000-000000000001',
   enrollBackfillB: 'e0000000-0000-4000-8000-000000000002',
   enrollOverlapA: 'e0000000-0000-4000-8000-000000000003',
@@ -381,6 +416,11 @@ const ID = {
   enrollBrokenRecord: 'e0000000-0000-4000-8000-000000000009',
   enrollEnrollConflict: 'e0000000-0000-4000-8000-000000000010',
   enrollBackdated: 'e0000000-0000-4000-8000-000000000011',
+  enrollGapOld: 'e0000000-0000-4000-8000-000000000012',
+  enrollBackfillOverlapBase: 'e0000000-0000-4000-8000-000000000013',
+  enrollBackfillOverlapExtra: 'e0000000-0000-4000-8000-000000000014',
+  enrollWindowGap: 'e0000000-0000-4000-8000-000000000015',
+  enrollWindowGapOverlap: 'e0000000-0000-4000-8000-000000000016',
 } as const;
 
 function checkDateSemantics(): void {
@@ -668,7 +708,13 @@ function checkMigrationAndSchema(): void {
   );
 }
 
-/** 在成功路径拉起故障注入子进程，验证失败退出 + 资源清理 + 既有资源不受影响 */
+/**
+ * 在成功路径拉起子进程验证：
+ * - 故障注入（init/begin/insert/race-assert）非零退出且本轮子进程资源全清；
+ * - 预先存在、created:false 的固定名容器：外层装置创建与清理，被测脚本不得删除，
+ *   正常结束与故障结束两种路径都覆盖；
+ * - 残留只按“子进程前后差集”判定，不把其他 agent 的合法容器当成自己的残留。
+ */
 async function runFaultChildren(
   legacyPreExistingId: string | null,
   countPassed: () => void
@@ -676,6 +722,40 @@ async function runFaultChildren(
   const tsxCli = fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs', import.meta.url));
   const scriptPath = fileURLToPath(new URL('./check-history-semester.ts', import.meta.url));
   const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+
+  const spawnCheckChild = (args: string[]) =>
+    spawnSync(process.execPath, [tsxCli, scriptPath, ...args], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 180_000,
+    });
+
+  function containerSnapshot(): { runs: Set<string>; legacy: Set<string> } {
+    return {
+      runs: new Set(listContainersByLabel('cga-history-check')),
+      legacy: new Set(listContainersByName(LEGACY_CONTAINER_NAME)),
+    };
+  }
+
+  /** 只把子进程结束后“新增且未清理”的容器视为本轮残留 */
+  function assertNoNewResidual(
+    label: string,
+    before: { runs: Set<string>; legacy: Set<string> }
+  ): void {
+    const newRuns = listContainersByLabel('cga-history-check').filter(
+      (id) => !before.runs.has(id)
+    );
+    if (newRuns.length > 0) {
+      throw new Error(`${label} 后有本轮残留容器：${newRuns.join(',')}`);
+    }
+    const newLegacy = listContainersByName(LEGACY_CONTAINER_NAME).filter(
+      (id) => !before.legacy.has(id)
+    );
+    if (newLegacy.length > 0) {
+      throw new Error(`${label} 后反例容器未清理：${newLegacy.join(',')}`);
+    }
+  }
+
   const sentinelName = `cga-r2-sentinel-${RUN_ID}`;
   const sentinelRun = docker([
     'run', '-d',
@@ -688,14 +768,12 @@ async function runFaultChildren(
   if (sentinelRun.status !== 0 || !sentinelId) {
     throw new Error(`无法创建既有资源哨兵：${sentinelRun.stderr || sentinelRun.stdout}`);
   }
+  const sentinelContainerId: string = sentinelId;
 
   try {
     for (const mode of ['init', 'begin', 'insert', 'race-assert']) {
-      const child = spawnSync(
-        process.execPath,
-        [tsxCli, scriptPath, `--fault=${mode}`],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 180_000 }
-      );
+      const before = containerSnapshot();
+      const child = spawnCheckChild([`--fault=${mode}`]);
       const output = `${child.stdout ?? ''}\n${child.stderr ?? ''}`;
       if (child.error) {
         throw new Error(`故障注入 ${mode} 子进程异常：${child.error.message}`);
@@ -706,27 +784,81 @@ async function runFaultChildren(
       if (!output.includes('注入故障')) {
         throw new Error(`故障注入 ${mode} 未按预期失败：${output.slice(-400)}`);
       }
-      const runResidual = listContainersByLabel('cga-history-check');
-      if (runResidual.length > 0) {
-        throw new Error(`故障注入 ${mode} 后有残留容器：${runResidual.join(',')}`);
+      assertNoNewResidual(`故障注入 ${mode}`, before);
+      if (legacyPreExistingId && !containerIdOf(legacyPreExistingId)) {
+        throw new Error(`故障注入 ${mode} 误删了既有同名容器`);
       }
-      if (legacyPreExistingId) {
-        if (!containerIdOf(legacyPreExistingId)) {
-          throw new Error(`故障注入 ${mode} 误删了既有同名容器`);
-        }
-      } else {
-        const decoyResidual = listContainersByName(LEGACY_CONTAINER_NAME);
-        if (decoyResidual.length > 0) {
-          throw new Error(`故障注入 ${mode} 后反例容器未清理：${decoyResidual.join(',')}`);
-        }
-      }
-      if (!containerIdOf(sentinelId)) {
+      if (!containerIdOf(sentinelContainerId)) {
         throw new Error(`故障注入 ${mode} 误删了既有资源哨兵`);
       }
       countPassed();
     }
+
+    // 预先存在、created:false 的固定名容器：外层创建，被测脚本只能检查不能删除
+    async function runWithOuterDecoy(
+      args: string[],
+      expectStatus: number,
+      label: string
+    ): Promise<void> {
+      if (containerIdOf(LEGACY_CONTAINER_NAME)) {
+        throw new Error(`${label}: 固定名容器已被占用，外层装置无法放置哨兵`);
+      }
+      const created = docker([
+        'run', '-d',
+        '--name', LEGACY_CONTAINER_NAME,
+        '--label', `cga-outer-decoy=${RUN_ID}`,
+        'postgres:16-alpine',
+        'true',
+      ]);
+      const outerId = parseContainerIdFromStdout(created.stdout);
+      if (created.status !== 0 || !outerId) {
+        throw new Error(`${label}: 无法创建外层既有容器`);
+      }
+      try {
+        const before = containerSnapshot();
+        const child = spawnCheckChild(args);
+        const output = `${child.stdout ?? ''}\n${child.stderr ?? ''}`;
+        if (child.error) {
+          throw new Error(`${label} 子进程异常：${child.error.message}`);
+        }
+        if (child.status !== expectStatus) {
+          throw new Error(
+            `${label}: 期望退出码 ${expectStatus}，实际 ${child.status}：${output.slice(-400)}`
+          );
+        }
+        if (expectStatus !== 0 && !output.includes('注入故障')) {
+          throw new Error(`${label} 未按预期失败：${output.slice(-400)}`);
+        }
+        if (!containerIdOf(outerId)) {
+          throw new Error(`${label}: 被测脚本清理了外层既有容器（created:false 不得删除）`);
+        }
+        assertNoNewResidual(label, before);
+        if (!containerIdOf(sentinelContainerId)) {
+          throw new Error(`${label} 误删了既有资源哨兵`);
+        }
+      } finally {
+        const removal = removeOwnedContainer(
+          outerId,
+          'cga-outer-decoy',
+          RUN_ID,
+          `${label} 外层反例`
+        );
+        if (!removal.ok) noteCleanupIssue(`${label}-outer`, removal.detail);
+      }
+      countPassed();
+    }
+
+    if (legacyPreExistingId) {
+      // 本机本来就有同名容器：只需确认它没有被动过
+      if (!containerIdOf(legacyPreExistingId)) {
+        throw new Error('既有同名容器在子进程阶段消失');
+      }
+    } else {
+      await runWithOuterDecoy(['--scenario=decoy-normal'], 0, '既有容器+正常结束');
+      await runWithOuterDecoy(['--fault=init'], 1, '既有容器+故障结束');
+    }
   } finally {
-    const removal = removeContainerById(sentinelId);
+    const removal = removeOwnedContainer(sentinelContainerId, 'cga-r2-sentinel', RUN_ID, '既有资源哨兵');
     if (!removal.ok) noteCleanupIssue('sentinel', removal.detail);
   }
 }
@@ -755,12 +887,22 @@ async function main(): Promise<void> {
     if (decoyFinalized) return;
     decoyFinalized = true;
     if (!decoy.id) return;
-    // teardown 之后先验证反例容器仍存在，再删除自己创建的那一个
+    // teardown 之后先验证反例容器仍存在
     if (!containerIdOf(decoy.id)) {
-      noteCleanupIssue('decoy', '反例容器在本轮 teardown 后丢失（清理误伤）');
+      noteCleanupIssue(
+        decoy.created ? 'decoy' : 'decoy-existing',
+        decoy.created
+          ? '反例容器在本轮 teardown 后丢失（清理误伤）'
+          : '既有固定名容器在本轮 teardown 后丢失'
+      );
       return;
     }
-    const removal = removeContainerById(decoy.id);
+    if (!decoy.created) {
+      // 既有容器只验证存在，绝不删除；它由外层装置或环境负责
+      return;
+    }
+    // 只有本轮创建且标签所有权核实的反例容器才可清理
+    const removal = removeOwnedContainer(decoy.id, 'cga-decoy', RUN_ID, '本轮反例');
     if (!removal.ok) noteCleanupIssue('decoy-remove', removal.detail);
   }
 
@@ -852,6 +994,24 @@ async function main(): Promise<void> {
     process.env.DATABASE_URL = db.url;
     setup = new Client({ connectionString: db.url });
     await setup.connect();
+
+    if (DECOY_ONLY) {
+      // 正常结束的轻量场景：最小实库往返后按“关库→验证既有容器→清理自有”顺序收尾
+      await applySql(setup, 'initialize-demo-db.sql');
+      const demoCount = await queryOne<{ count: number }>(
+        `SELECT count(*)::int AS count FROM observations WHERE is_demo`
+      );
+      assert.equal(demoCount?.count, 3);
+      passed += 1;
+      await closeParentDatabase();
+      finalizeDecoy();
+      if (cleanupIssues.length > 0) {
+        throw new Error(`本轮资源清理失败：${cleanupIssues.join('；')}`);
+      }
+      console.log(JSON.stringify({ scenario: 'decoy-normal', passed, total: passed, result: 'OK' }));
+      return;
+    }
+
     process.env[TEACHER_PASSCODE_KEY] = 'history-offline-passcode';
     if (FAULT_MODE === 'init') throw new Error('注入故障：初始化阶段失败');
 
@@ -912,6 +1072,10 @@ async function main(): Promise<void> {
     await insertClass({ id: ID.classBackdatedTo, name: '补录转入班', stage: 'middle', school_year: '2039-2040' });
     await insertClass({ id: ID.classWindow, name: '窗口班级', stage: 'small', school_year: '2040-2041' });
     await insertClass({ id: ID.classDateCheck, name: '日期口径班', stage: 'small', school_year: '2026-2027' });
+    await insertClass({ id: ID.classGapFrom, name: '同日转班前班', stage: 'small', school_year: '2041-2042' });
+    await insertClass({ id: ID.classGapTo, name: '同日转班后班', stage: 'middle', school_year: '2041-2042' });
+    await insertClass({ id: ID.classBackfillOverlap, name: '补录重叠主班', stage: 'small', school_year: '2042-2043' });
+    await insertClass({ id: ID.classOverlapExtra, name: '补录重叠附加班', stage: 'middle', school_year: '2042-2043' });
     await insertChild(ID.childBackfill, '补录幼儿');
     await insertChild(ID.childOverlap, '重叠幼儿');
     await insertChild(ID.childBroken, '异常幼儿');
@@ -923,6 +1087,9 @@ async function main(): Promise<void> {
     await insertChild(ID.childEnrollConflict, '归属改名幼儿');
     await insertChild(ID.childBackdated, '补录转班幼儿');
     await insertChild(ID.childWindow, '窗口幼儿');
+    await insertChild(ID.childGap, '同日转班幼儿');
+    await insertChild(ID.childBackfillOverlap, '补录重叠幼儿');
+    await insertChild(ID.childWindowGap, '窗口重叠幼儿');
     await insertEnrollment({
       id: ID.enrollBackfillA,
       child_id: ID.childBackfill,
@@ -984,6 +1151,27 @@ async function main(): Promise<void> {
       child_id: ID.childBackdated,
       class_id: ID.classBackdatedFrom,
       start_date: '2039-01-01',
+      end_date: null,
+    });
+    await insertEnrollment({
+      id: ID.enrollGapOld,
+      child_id: ID.childGap,
+      class_id: ID.classGapFrom,
+      start_date: '2041-03-01',
+      end_date: null,
+    });
+    await insertEnrollment({
+      id: ID.enrollBackfillOverlapBase,
+      child_id: ID.childBackfillOverlap,
+      class_id: ID.classBackfillOverlap,
+      start_date: '2042-01-01',
+      end_date: null,
+    });
+    await insertEnrollment({
+      id: ID.enrollWindowGap,
+      child_id: ID.childWindowGap,
+      class_id: ID.classGapFrom,
+      start_date: '2043-01-01',
       end_date: null,
     });
     await query(
@@ -1248,10 +1436,12 @@ async function main(): Promise<void> {
       sleep(700).then(() => 'blocked'),
     ]);
     assert.equal(early, 'blocked', '学段修改必须等待未提交的分班写入，而不是先通过检查再更新');
-    await racer.query('COMMIT');
     if (FAULT_MODE === 'race-assert') {
-      throw new Error('注入故障：竞争断言失败（保留未等待的 updateClass）');
+      // 竞争故障注入必须在 COMMIT 之前：racer 仍持锁、updateClass 正在等待时失败，
+      // 由清理路径验证回滚、等待任务结束、关池与自有资源清理。
+      throw new Error('注入故障：竞争断言失败（racer 仍持锁、updateClass 等待中）');
     }
+    await racer.query('COMMIT');
     await assert.rejects(raceUpdate, (error: unknown) => error instanceof ClassHistoryProtectedError);
     await closeTxClient(racer, 'racer');
     const raceState = await queryOne<{ stage: string }>(
@@ -1480,7 +1670,167 @@ async function main(): Promise<void> {
     assert.equal(windowCount?.count, 0, '交错 B 不得成功落入旧快照');
     passed += 1;
 
-    // 15) 缺失/非法学段：不得生成默认小班快照；教师确认也必须拒绝
+    // 15) 同日转班产生重叠：旧解析结果保存必须被拒（零写入），教师重新核对后正常保存
+    const gapLookup = await resolveClassContextAt(ID.childGap, '2041-03-01');
+    assert.ok(gapLookup.status === 'resolved');
+    assert.equal(gapLookup.enrollment_id, ID.enrollGapOld);
+    const gapTransfer = await enrollHandler(
+      apiRequest(`/api/classes/${ID.classGapTo}/children`, {
+        method: 'POST',
+        body: { child_id: ID.childGap, start_date: '2041-03-01' },
+        cookie,
+      }),
+      { params: Promise.resolve({ id: ID.classGapTo }) }
+    );
+    assert.equal(gapTransfer.status, 200);
+    const gapAfterTransfer = await resolveClassContextAt(ID.childGap, '2041-03-01');
+    assert.ok(gapAfterTransfer.status === 'needs_confirmation');
+    assert.equal(gapAfterTransfer.reason, 'overlapping_attribution');
+    await assert.rejects(
+      createObservation({
+        child_id: ID.childGap,
+        observed_at: '2041-03-01',
+        context: null,
+        raw_text: '同日转班重叠的观察原文：幼儿在晨间活动中主动整理玩具并帮助同伴摆放椅子。',
+        is_demo: false,
+        class_context_snapshot: buildEnrollmentSnapshot(gapLookup.class, gapLookup.enrollment_id),
+        premise: {
+          class_id: gapLookup.class.id,
+          class_name: gapLookup.class.name,
+          stage: gapLookup.class.stage,
+          school_year: gapLookup.class.school_year,
+          enrollment_id: gapLookup.enrollment_id,
+          observed_at: '2041-03-01',
+        },
+      }),
+      (error: unknown) => error instanceof ObservationContextConflictError
+    );
+    const gapCount = await queryOne<{ count: number }>(
+      `SELECT count(*)::int AS count FROM observations WHERE child_id = $1`,
+      [ID.childGap]
+    );
+    assert.equal(gapCount?.count, 0, '同日转班重叠后旧解析结果不得写入');
+    const gapConfirm = await postObservation({
+      child_id: ID.childGap,
+      observed_at: '2041-03-01',
+      raw_text: '教师重新核对后的观察原文：幼儿在晨间活动中主动整理玩具并帮助同伴摆放椅子。',
+      confirmed_class_id: ID.classGapTo,
+    });
+    assert.equal(gapConfirm.status, 201);
+    assert.equal(
+      ((await gapConfirm.json()) as ApiBody).observation?.class_context_snapshot?.source,
+      'teacher_confirmed'
+    );
+    passed += 1;
+
+    // 16) 新增/补录重叠历史：旧解析结果保存必须被拒，教师重新核对后正常保存
+    const backfillOverlapLookup = await resolveClassContextAt(ID.childBackfillOverlap, '2042-03-01');
+    assert.ok(backfillOverlapLookup.status === 'resolved');
+    await insertEnrollment({
+      id: ID.enrollBackfillOverlapExtra,
+      child_id: ID.childBackfillOverlap,
+      class_id: ID.classOverlapExtra,
+      start_date: '2042-02-01',
+      end_date: '2042-04-01',
+    });
+    const backfillOverlapAfter = await resolveClassContextAt(ID.childBackfillOverlap, '2042-03-01');
+    assert.ok(backfillOverlapAfter.status === 'needs_confirmation');
+    assert.equal(backfillOverlapAfter.reason, 'overlapping_attribution');
+    await assert.rejects(
+      createObservation({
+        child_id: ID.childBackfillOverlap,
+        observed_at: '2042-03-01',
+        context: null,
+        raw_text: '补录重叠历史的观察原文：幼儿在阅读区安静翻阅图画书并向同伴复述故事。',
+        is_demo: false,
+        class_context_snapshot: buildEnrollmentSnapshot(
+          backfillOverlapLookup.class,
+          backfillOverlapLookup.enrollment_id
+        ),
+        premise: {
+          class_id: backfillOverlapLookup.class.id,
+          class_name: backfillOverlapLookup.class.name,
+          stage: backfillOverlapLookup.class.stage,
+          school_year: backfillOverlapLookup.class.school_year,
+          enrollment_id: backfillOverlapLookup.enrollment_id,
+          observed_at: '2042-03-01',
+        },
+      }),
+      (error: unknown) => error instanceof ObservationContextConflictError
+    );
+    const backfillOverlapCount = await queryOne<{ count: number }>(
+      `SELECT count(*)::int AS count FROM observations WHERE child_id = $1`,
+      [ID.childBackfillOverlap]
+    );
+    assert.equal(backfillOverlapCount?.count, 0, '补录重叠历史后旧解析结果不得写入');
+    const backfillOverlapConfirm = await postObservation({
+      child_id: ID.childBackfillOverlap,
+      observed_at: '2042-03-01',
+      raw_text: '教师重新核对后的观察原文：幼儿在阅读区安静翻阅图画书并向同伴复述故事。',
+      confirmed_class_id: ID.classBackfillOverlap,
+    });
+    assert.equal(backfillOverlapConfirm.status, 201);
+    passed += 1;
+
+    // 17) 受控交错：同儿童归属写入（模拟 enrollChildInClass 的 children→归属顺序）未提交时，
+    // 旧解析结果的保存必须等待；提交后归属集合不再唯一，必须拒绝且零写入
+    const windowGapLookup = await resolveClassContextAt(ID.childWindowGap, '2043-03-01');
+    assert.ok(windowGapLookup.status === 'resolved');
+    const windowGapBlocker = await openTxClient();
+    await windowGapBlocker.query('BEGIN');
+    await windowGapBlocker.query('SELECT id FROM children WHERE id = $1 FOR UPDATE', [
+      ID.childWindowGap,
+    ]);
+    await windowGapBlocker.query(
+      `INSERT INTO child_class_enrollments (id, child_id, class_id, start_date, end_date)
+       VALUES ($1, $2, $3, '2043-02-01', '2043-04-01')`,
+      [ID.enrollWindowGapOverlap, ID.childWindowGap, ID.classGapTo]
+    );
+    const windowGapSave = createObservation({
+      child_id: ID.childWindowGap,
+      observed_at: '2043-03-01',
+      context: null,
+      raw_text: '窗口重叠的观察原文：幼儿在建构区用积木搭建高塔并测量高度。',
+      is_demo: false,
+      class_context_snapshot: buildEnrollmentSnapshot(
+        windowGapLookup.class,
+        windowGapLookup.enrollment_id
+      ),
+      premise: {
+        class_id: windowGapLookup.class.id,
+        class_name: windowGapLookup.class.name,
+        stage: windowGapLookup.class.stage,
+        school_year: windowGapLookup.class.school_year,
+        enrollment_id: windowGapLookup.enrollment_id,
+        observed_at: '2043-03-01',
+      },
+    });
+    trackPending(windowGapSave);
+    const windowGapEarly = await Promise.race([
+      windowGapSave.then(
+        () => 'settled',
+        () => 'settled'
+      ),
+      sleep(700).then(() => 'blocked'),
+    ]);
+    assert.equal(windowGapEarly, 'blocked', '保存必须等待同儿童的归属写入，封住新增重叠的窗口');
+    await windowGapBlocker.query('COMMIT');
+    await closeTxClient(windowGapBlocker, 'windowGapBlocker');
+    await assert.rejects(
+      windowGapSave,
+      (error: unknown) => error instanceof ObservationContextConflictError
+    );
+    const windowGapCount = await queryOne<{ count: number }>(
+      `SELECT count(*)::int AS count FROM observations WHERE child_id = $1`,
+      [ID.childWindowGap]
+    );
+    assert.equal(windowGapCount?.count, 0, '新增重叠归属后旧解析结果不得写入');
+    const windowGapAfter = await resolveClassContextAt(ID.childWindowGap, '2043-03-01');
+    assert.ok(windowGapAfter.status === 'needs_confirmation');
+    assert.equal(windowGapAfter.reason, 'overlapping_attribution');
+    passed += 1;
+
+    // 18) 缺失/非法学段：不得生成默认小班快照；教师确认也必须拒绝
     await query('ALTER TABLE classes DROP CONSTRAINT classes_stage_check');
     await insertClass({
       id: ID.classBrokenRecord,
@@ -1554,8 +1904,8 @@ async function main(): Promise<void> {
     );
     assert.equal(
       snapshotCount?.count,
-      6,
-      '快照数应为 6 条：补录/转班当天/教师确认/前提重核/归属改名重存/补录转班重存；被拒交错不落库'
+      8,
+      '快照数应为 8 条：补录/转班当天/教师确认/前提重核/归属改名重存/补录转班重存/同日转班确认/补录重叠确认；被拒交错不落库'
     );
     const demoStillNull = await query<{ id: string }>(
       `SELECT id FROM observations
@@ -1573,10 +1923,11 @@ async function main(): Promise<void> {
     }
     passed += 1;
 
-    // 19) 故障注入子进程（仅成功路径拉起；先完整关闭父进程数据库，再让子进程独占验证清理）
+    // 19) 故障注入子进程（仅成功路径拉起）。
+    // 真实顺序：关闭本轮数据库/删除本轮数据库容器 → 验证既有/反例容器仍存在 → 仅删除自己创建的反例。
     if (!FAULT_MODE) {
-      finalizeDecoy();
       await closeParentDatabase();
+      finalizeDecoy();
       await runFaultChildren(legacyPreExistingId, () => {
         passed += 1;
       });
@@ -1590,10 +1941,11 @@ async function main(): Promise<void> {
         resource_safety: {
           run_id: RUN_ID,
           container: parentContainerId?.slice(0, 12) ?? '(cleaned)',
-          cleanup: 'by-container-id-only',
+          cleanup: 'by-container-id-only + label-ownership-check',
           external_url_mode: 'removed',
           decoy_container_preserved: true,
-          failure_paths: ['init', 'begin', 'insert', 'race-assert'],
+          preexisting_decoy: ['normal-exit', 'fault-exit'],
+          failure_paths: ['init', 'begin', 'insert', 'race-assert-before-commit'],
         },
         simulated_responses: 'client parser covered offline; browser interception is separate',
       })
@@ -1601,8 +1953,8 @@ async function main(): Promise<void> {
   } catch (error) {
     failure = error;
   } finally {
+    // 真实顺序：先关闭本轮数据库并删除本轮容器，再验证既有/反例容器，最后清理自有反例
     await closeParentDatabase();
-    // teardown 之后再验证反例容器，然后清理自己创建的那一个
     finalizeDecoy();
     // 恢复环境变量
     if (previousPasscode === undefined) delete process.env[TEACHER_PASSCODE_KEY];

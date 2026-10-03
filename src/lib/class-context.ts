@@ -1,6 +1,10 @@
 import type { ObservationClassContextSnapshot } from "@/lib/guide/types";
 import { parseIsoDateStrict } from "@/lib/format";
-import { parseReliableClass } from "@/lib/queries";
+import {
+  BROKEN_ENROLLMENTS_SQL,
+  ENROLLMENT_MATCHES_SQL,
+  parseReliableClass,
+} from "@/lib/queries";
 import {
   CLASS_STAGES,
   type ClassStage,
@@ -124,14 +128,7 @@ export async function resolveClassContextAt(
     throw new Error("观察日期必须是真实存在的日历日期（YYYY-MM-DD）");
   }
 
-  const broken = await queryOne<{ count: number }>(
-    `SELECT count(*)::int AS count
-       FROM child_class_enrollments
-      WHERE child_id = $1
-        AND end_date IS NOT NULL
-        AND end_date < start_date`,
-    [childId],
-  );
+  const broken = await queryOne<{ count: number }>(BROKEN_ENROLLMENTS_SQL, [childId]);
   if ((broken?.count ?? 0) > 0) {
     return {
       status: "needs_confirmation",
@@ -145,16 +142,7 @@ export async function resolveClassContextAt(
   const rows = await query<{
     enrollment_data: Row;
     class_data: Row;
-  }>(
-    `SELECT to_jsonb(e.*) AS enrollment_data, to_jsonb(k.*) AS class_data
-       FROM child_class_enrollments e
-       JOIN classes k ON k.id = e.class_id
-      WHERE e.child_id = $1
-        AND e.start_date <= $2::date
-        AND (e.end_date IS NULL OR e.end_date >= $2::date)
-      ORDER BY e.start_date ASC, e.id ASC`,
-    [childId, observedAt],
-  );
+  }>(ENROLLMENT_MATCHES_SQL, [childId, observedAt]);
 
   // 共同来源边界：先核实全部命中的班级资料，任何一条无法核实都不生成快照
   const parsed = rows.map((row) => parseReliableClass(row.class_data));
