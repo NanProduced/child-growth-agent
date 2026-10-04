@@ -75,6 +75,39 @@ export async function startClassesHarnessDatabase(
   });
 }
 
+/**
+ * 最小结构化资源报告：父检查据此在本轮子任务超时/异常退出、来不及执行 finally 时，
+ * 按已核实容器 ID + 所有权标签做补偿清理。只含运行标记与容器引用，不含连接串/口令/Cookie。
+ */
+interface HarnessResourceReport {
+  resource: 'classes-harness';
+  run_id: string;
+  container_name: string;
+  container_id: string;
+  label_key: string;
+  phase: string;
+}
+
+function reportHarnessResource(containerId: string, phase: string): void {
+  const report: HarnessResourceReport = {
+    resource: 'classes-harness',
+    run_id: RUN_ID,
+    container_name: CONTAINER_NAME,
+    container_id: containerId,
+    label_key: OWNERSHIP_LABEL,
+    phase,
+  };
+  console.log(JSON.stringify(report));
+}
+
+/** 反例注入：容器已创建并登记后确定性挂起，父检查用短超时验证进程树核验与补偿清理 */
+async function injectHang(): Promise<void> {
+  if (FAULT_STAGE !== 'hang-after-container') return;
+  await new Promise<void>(() => {
+    setInterval(() => undefined, 1000);
+  });
+}
+
 async function endPool(): Promise<CleanupReport> {
   const pool = globalThis.__pgPool;
   if (!pool) return { ok: true, detail: '本轮未创建连接池' };
@@ -249,6 +282,9 @@ async function main(): Promise<void> {
     // ————————————————————————— 本地一次性 Postgres —————————————————————————
     phase = 'database-start';
     database = await startClassesHarnessDatabase(noteIssue);
+    // 容器身份核验通过后立即登记资源报告；此后的挂起/崩溃由父检查补偿清理
+    reportHarnessResource(database.containerId, 'database-start');
+    await injectHang();
     // 数据访问前绑定：只认本轮已核验目标，且不回退到 .env / 平台注入的数据库
     process.env.DATABASE_URL = database.url;
     delete process.env.PGDATABASE_URL;
@@ -462,6 +498,8 @@ async function main(): Promise<void> {
     const createdEnrollments = await listEnrollments(createdChild.id);
     assert.equal(createdEnrollments.length, 1);
     const enrollmentStart = createdEnrollments[0].start_date;
+    const firstRawText =
+      '自检幼儿在积木区把三块长积木并排搭成小桥，桥上放了一个小汽车，桥没有倒。';
     const firstObsRes = await createObservationHandler(
       apiRequest('/api/observations', {
         method: 'POST',
@@ -469,17 +507,33 @@ async function main(): Promise<void> {
           child_id: createdChild.id,
           observed_at: enrollmentStart,
           context: '自检区域活动',
-          raw_text: '自检幼儿在积木区把三块长积木并排搭成小桥，桥上放了一个小汽车，桥没有倒。',
+          raw_text: firstRawText,
         },
         cookie,
       })
     );
     assert.equal(firstObsRes.status, 201);
     const firstObs = ((await firstObsRes.json()) as ApiBody).observation as Observation;
+    // 创建响应以持久化快照为准：observed_class 是读取路径的动态联表投影，创建响应不承诺该字段
     assert.equal(firstObs.class_id, created.small.id);
-    assert.equal(firstObs.observed_class?.name, '自检小班');
+    assert.equal(firstObs.observed_at, enrollmentStart);
+    assert.equal(firstObs.raw_text, firstRawText);
+    assert.ok(firstObs.class_context_snapshot, '创建响应必须携带发生时班级快照');
     assert.equal(firstObs.class_context_snapshot?.source, 'enrollment_lookup');
     assert.equal(firstObs.class_context_snapshot?.class_id, created.small.id);
+    assert.equal(firstObs.class_context_snapshot?.class_name, '自检小班');
+    assert.equal(firstObs.class_context_snapshot?.stage, 'small');
+    assert.equal(firstObs.class_context_snapshot?.school_year, '2031-2032');
+    // 回读同一观察（真实读取路径）保留联表投影验证，并与创建响应对齐持久化快照
+    const firstObsRead = (await listObservations({ childId: createdChild.id })).find(
+      (o) => o.id === firstObs.id
+    );
+    assert.ok(firstObsRead, '回读第一条观察失败');
+    assert.equal(firstObsRead.class_id, firstObs.class_id);
+    assert.equal(firstObsRead.observed_at, firstObs.observed_at);
+    assert.equal(firstObsRead.raw_text, firstObs.raw_text);
+    assert.equal(firstObsRead.observed_class?.name, '自检小班');
+    assert.deepEqual(firstObsRead.class_context_snapshot, firstObs.class_context_snapshot);
 
     assert.equal(
       (
@@ -547,7 +601,10 @@ async function main(): Promise<void> {
     assert.equal(oldObs?.class_id, created.small.id);
     assert.equal(oldObs?.observed_class?.name, '自检小班');
     assert.equal(oldObs?.raw_text, firstObs.raw_text);
+    // 转班不改写历史：旧观察的持久化快照与创建时完全一致
+    assert.deepEqual(oldObs?.class_context_snapshot, firstObs.class_context_snapshot);
 
+    const secondRawText = '转班之后的观察原文，需要超过十个字以便通过校验规则。';
     const secondObsRes = await createObservationHandler(
       apiRequest('/api/observations', {
         method: 'POST',
@@ -555,17 +612,32 @@ async function main(): Promise<void> {
           child_id: createdChild.id,
           observed_at: transferStart,
           context: '转班当天',
-          raw_text: '转班之后的观察原文，需要超过十个字以便通过校验规则。',
+          raw_text: secondRawText,
         },
         cookie,
       })
     );
     assert.equal(secondObsRes.status, 201);
     const secondObs = ((await secondObsRes.json()) as ApiBody).observation as Observation;
+    // 新观察记录新的发生时班级：创建响应以持久化快照为准
     assert.equal(secondObs.class_id, created.middle.id);
-    assert.equal(secondObs.observed_class?.name, '自检中班');
+    assert.equal(secondObs.observed_at, transferStart);
+    assert.equal(secondObs.raw_text, secondRawText);
+    assert.ok(secondObs.class_context_snapshot, '创建响应必须携带发生时班级快照');
     assert.equal(secondObs.class_context_snapshot?.source, 'enrollment_lookup');
     assert.equal(secondObs.class_context_snapshot?.class_id, created.middle.id);
+    assert.equal(secondObs.class_context_snapshot?.class_name, '自检中班');
+    assert.equal(secondObs.class_context_snapshot?.stage, 'middle');
+    assert.equal(secondObs.class_context_snapshot?.school_year, '2031-2032');
+    const secondObsRead = (await listObservations({ childId: createdChild.id })).find(
+      (o) => o.id === secondObs.id
+    );
+    assert.ok(secondObsRead, '回读第二条观察失败');
+    assert.equal(secondObsRead.class_id, secondObs.class_id);
+    assert.equal(secondObsRead.observed_at, secondObs.observed_at);
+    assert.equal(secondObsRead.raw_text, secondObs.raw_text);
+    assert.equal(secondObsRead.observed_class?.name, '自检中班');
+    assert.deepEqual(secondObsRead.class_context_snapshot, secondObs.class_context_snapshot);
 
     assert.equal(
       (
@@ -602,6 +674,8 @@ async function main(): Promise<void> {
     assert.equal(keptOld?.observed_class?.name, '自检小班');
     assert.equal(keptOld?.raw_text, firstObs.raw_text);
     assert.equal(keptOld?.confirmed_content, null);
+    // 停用班级不改写历史观察的持久化快照
+    assert.deepEqual(keptOld?.class_context_snapshot, firstObs.class_context_snapshot);
 
     assert.equal(
       (
