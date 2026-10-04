@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { evidenceEntryQuery } from '@/lib/guide/navigation';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import {
@@ -158,6 +159,11 @@ export default async function ClassDetailPage({
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <Button asChild variant="outline" size="sm" className="min-h-11">
+              <Link href={`/classes/${encodeURIComponent(klass.id)}/evidence?${evidenceEntryQuery(klass.stage)}`}>
+                查看班级证据概览
+              </Link>
+            </Button>
             <Button asChild size="sm" className="min-h-11">
               <Link href="/observations/new">
                 <PenLine className="size-4" />

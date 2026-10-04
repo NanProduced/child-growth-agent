@@ -29,6 +29,7 @@ import {
 import { hasCurrentActivitySupport } from '@/lib/activity-support';
 import { buildGrowthProfileFallback } from '@/lib/growth-profile';
 import { getChild, listClasses, listEnrollments, listObservations } from '@/lib/queries';
+import { evidenceEntryQuery } from '@/lib/guide/navigation';
 import type {
   Child,
   ChildClassEnrollment,
@@ -279,6 +280,11 @@ export default async function ChildDetailPage({
             </div>
           </div>
           <div className="flex shrink-0 flex-wrap gap-2">
+            <Button asChild variant="outline" className="min-h-11">
+              <Link href={`/children/${encodeURIComponent(child.id)}/evidence?${evidenceEntryQuery(child.class_stage)}`}>
+                查看指南证据册
+              </Link>
+            </Button>
             <TransferClassDialog child={child} classes={classes} />
             <Button asChild size="lg" className="w-full sm:w-auto">
               <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>

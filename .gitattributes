@@ -1,0 +1,2 @@
+# Keep the approved raw-byte safety-helper checksum stable on Windows checkouts.
+scripts/harness-safety.ts text eol=lf
