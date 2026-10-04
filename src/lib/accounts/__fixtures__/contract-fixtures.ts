@@ -1,4 +1,5 @@
 import {
+  ACCESS_INVALID_COMBINATION_ERROR,
   CLIENT_CLEANUP_TARGETS,
   CSRF_HEADER_NAME,
   LEGACY_AUTH_COOKIE,
@@ -7,16 +8,20 @@ import {
   type AccessProjection,
   type AccessResource,
   type AccessVia,
+  type AdminBootstrapContext,
+  type AdminBootstrapInput,
+  type AdminBootstrapResult,
+  type AdminBootstrapStatus,
   type AuthDenyReason,
   type AuthState,
   type ClassAssignmentRequest,
   type ClassUnassignmentRequest,
   type DataScope,
-  type InitialAdminRequest,
-  type InitialAdminResponse,
+  type LoginGuardFailure,
   type LoginRequest,
   type LoginResponse,
   type LogoutResponse,
+  type ModelWaitEvent,
   type PasswordResetRequest,
   type PasswordResetResponse,
   type Principal,
@@ -29,10 +34,13 @@ import {
 } from "../types";
 
 /**
- * 账号与授权 v1 契约 fixture：纯数据，不写数据库、不调用模型、不冒充真实认证。
+ * 账号与授权 v1 契约 fixture（AUTH0-R1 返修候选）：纯数据，
+ * 不写数据库、不调用模型、不冒充真实认证。
  *
  * 覆盖反例：两教师不同/重叠班级、多班、空分配、管理员教学拒绝、未登录、
- * 未知身份、权限撤销、转班历史、作者不等授权、错误不等空数据、旧 Cookie 不认可。
+ * 未知身份、权限撤销、转班历史、作者不等授权、错误不等空数据、旧 Cookie 不认可、
+ * 动作/资源非法组合、登录前保护、会话 CSRF 绑定、初始化资格与并发、
+ * 模型等待期间撤权/停用/转班、首位管理员脚本语义。
  * 期望值由 `scripts/check-auth-contract.ts` 的参考算法核对，标记 reference_only。
  */
 
@@ -59,7 +67,7 @@ export const FIXTURE_ACCOUNT_IDS = {
 export const FIXTURE_CHILD_IDS = {
   /** 仍在向日葵班（教师 A 当前负责） */
   current: "a1c10000-0000-4000-8000-0000000000c1",
-  /** 原在向日葵班，现转至郁金香班（教师 A 不再是当前负责人） */
+  /** 原在向日葵班，现转至蒲公英班（教师 A 不再是当前负责人，教师 B 当前负责） */
   transferred: "a1c10000-0000-4000-8000-0000000000c2",
 } as const;
 
@@ -70,6 +78,8 @@ export const FIXTURE_OBSERVATION_IDS = {
   daisyByRevokedAuthor: "0b5e0000-0000-4000-8000-000000000002",
   /** 已停用教师当年在郁金香班写下的历史观察 */
   tulipByDisabledAuthor: "0b5e0000-0000-4000-8000-000000000003",
+  /** 当前负责教师在班内待确认的观察 */
+  inClassConfirmable: "0b5e0000-0000-4000-8000-000000000004",
 } as const;
 
 /* --------------------------------- 操作者 --------------------------------- */
@@ -96,7 +106,7 @@ export const FIXTURE_PRINCIPAL_TEACHER_A: Principal = {
   },
 };
 
-/** 与教师 A 在郁金香班重叠：郁金香 + 雏菊 */
+/** 与教师 A 在郁金香班重叠：郁金香 + 蒲公英（当前负责转班幼儿） */
 export const FIXTURE_PRINCIPAL_TEACHER_B: Principal = {
   account_id: FIXTURE_ACCOUNT_IDS.teacherB,
   username: "wanglaoshi",
@@ -177,12 +187,19 @@ export const FIXTURE_AUTH_UNAVAILABLE: AuthState = {
   reason: "identity_service_unavailable",
 };
 
+/** 模型等待期间会话被撤销后的状态 */
+export const FIXTURE_AUTH_REVOKED_AFTER_WAIT: AuthState = {
+  kind: "invalid_session",
+  reason: "revoked",
+};
+
 /* ------------------------------ 旧 Cookie 与空范围 ------------------------------ */
 
 /** 旧教师口令 Cookie：新会话校验一律不认可 */
 export const FIXTURE_LEGACY_COOKIE = {
   cookie_name: LEGACY_AUTH_COOKIE,
   value: "1750000000.0123456789abcdef",
+  clear_path: "/",
 } as const;
 
 export const FIXTURE_LEGACY_COOKIE_STATE: AuthState = {
@@ -201,6 +218,8 @@ export interface FixtureAccessExpectation {
   via?: AccessVia;
   projection?: AccessProjection;
   deny?: AuthDenyReason;
+  /** 动作/资源组合非法：400，先于角色与范围判定 */
+  invalid_request?: typeof ACCESS_INVALID_COMBINATION_ERROR;
   /** 授权通过后仍可能被 G2 业务保护拦截（409），不属于授权错误 */
   business_guard?: "class_history_protected" | null;
 }
@@ -220,6 +239,11 @@ const childResource = (child_id: string, current_class_id: string | null): Acces
   child_id,
   current_class_id,
 });
+const transferResource = (
+  child_id: string,
+  current_class_id: string | null,
+  target_class_id: string,
+): AccessResource => ({ kind: "transfer", child_id, current_class_id, target_class_id });
 const observationResource = (input: {
   observation_id: string;
   child_id: string;
@@ -227,6 +251,26 @@ const observationResource = (input: {
   observed_class_id: string | null;
   author_account_id: string | null;
 }): AccessResource => ({ kind: "observation", ...input });
+
+/** 转班幼儿在原班的历史观察：当前归属蒲公英班，发生时向日葵班 */
+const transferredHistoryResource = (): AccessResource =>
+  observationResource({
+    observation_id: FIXTURE_OBSERVATION_IDS.transferredHistory,
+    child_id: FIXTURE_CHILD_IDS.transferred,
+    current_class_id: FIXTURE_CLASS_IDS.daisy,
+    observed_class_id: FIXTURE_CLASS_IDS.sunflower,
+    author_account_id: FIXTURE_ACCOUNT_IDS.teacherA,
+  });
+
+/** 教师 A 当前负责幼儿在班内待确认的观察 */
+const inClassConfirmableResource = (): AccessResource =>
+  observationResource({
+    observation_id: FIXTURE_OBSERVATION_IDS.inClassConfirmable,
+    child_id: FIXTURE_CHILD_IDS.current,
+    current_class_id: FIXTURE_CLASS_IDS.sunflower,
+    observed_class_id: FIXTURE_CLASS_IDS.sunflower,
+    author_account_id: FIXTURE_ACCOUNT_IDS.teacherA,
+  });
 
 export const FIXTURE_ACCESS_CASES: FixtureAccessCase[] = [
   {
@@ -289,53 +333,46 @@ export const FIXTURE_ACCESS_CASES: FixtureAccessCase[] = [
     name: "admin-create-profile-base-info",
     auth: FIXTURE_AUTH_ADMIN,
     action: "child.create_profile",
-    resource: childResource(FIXTURE_CHILD_IDS.current, FIXTURE_CLASS_IDS.sunflower),
+    resource: classResource(FIXTURE_CLASS_IDS.sunflower),
     expected: { allowed: true, via: "admin_school", projection: "full" },
   },
   {
     name: "admin-transfer-child",
     auth: FIXTURE_AUTH_ADMIN,
     action: "child.transfer",
-    resource: childResource(FIXTURE_CHILD_IDS.current, FIXTURE_CLASS_IDS.sunflower),
+    resource: transferResource(
+      FIXTURE_CHILD_IDS.current,
+      FIXTURE_CLASS_IDS.sunflower,
+      FIXTURE_CLASS_IDS.tulip,
+    ),
     expected: { allowed: true, via: "admin_school", projection: "full" },
   },
   {
     name: "admin-teaching-write-denied",
     auth: FIXTURE_AUTH_ADMIN,
     action: "observation.write",
-    resource: observationResource({
-      observation_id: FIXTURE_OBSERVATION_IDS.transferredHistory,
-      child_id: FIXTURE_CHILD_IDS.current,
-      current_class_id: FIXTURE_CLASS_IDS.sunflower,
-      observed_class_id: FIXTURE_CLASS_IDS.sunflower,
-      author_account_id: null,
-    }),
+    resource: childResource(FIXTURE_CHILD_IDS.current, FIXTURE_CLASS_IDS.sunflower),
+    expected: { allowed: false, deny: "forbidden_role" },
+  },
+  {
+    name: "admin-teaching-organize-denied",
+    auth: FIXTURE_AUTH_ADMIN,
+    action: "observation.organize",
+    resource: inClassConfirmableResource(),
     expected: { allowed: false, deny: "forbidden_role" },
   },
   {
     name: "admin-teaching-confirm-denied",
     auth: FIXTURE_AUTH_ADMIN,
     action: "observation.confirm",
-    resource: observationResource({
-      observation_id: FIXTURE_OBSERVATION_IDS.transferredHistory,
-      child_id: FIXTURE_CHILD_IDS.current,
-      current_class_id: FIXTURE_CLASS_IDS.sunflower,
-      observed_class_id: FIXTURE_CLASS_IDS.sunflower,
-      author_account_id: null,
-    }),
+    resource: inClassConfirmableResource(),
     expected: { allowed: false, deny: "forbidden_role" },
   },
   {
     name: "admin-guide-decision-denied",
     auth: FIXTURE_AUTH_ADMIN,
     action: "guide.decide",
-    resource: observationResource({
-      observation_id: FIXTURE_OBSERVATION_IDS.transferredHistory,
-      child_id: FIXTURE_CHILD_IDS.current,
-      current_class_id: FIXTURE_CLASS_IDS.sunflower,
-      observed_class_id: FIXTURE_CLASS_IDS.sunflower,
-      author_account_id: null,
-    }),
+    resource: inClassConfirmableResource(),
     expected: { allowed: false, deny: "forbidden_role" },
   },
   {
@@ -419,27 +456,50 @@ export const FIXTURE_ACCESS_CASES: FixtureAccessCase[] = [
     name: "teacher-a-read-transferred-history-observation",
     auth: FIXTURE_AUTH_TEACHER_A,
     action: "observation.read",
-    resource: observationResource({
-      observation_id: FIXTURE_OBSERVATION_IDS.transferredHistory,
-      child_id: FIXTURE_CHILD_IDS.transferred,
-      current_class_id: FIXTURE_CLASS_IDS.daisy,
-      observed_class_id: FIXTURE_CLASS_IDS.sunflower,
-      author_account_id: FIXTURE_ACCOUNT_IDS.teacherA,
-    }),
+    resource: transferredHistoryResource(),
     expected: { allowed: true, via: "historical_class", projection: "historical_read_only" },
   },
   {
     name: "current-responsible-reads-prior-class-history",
     auth: FIXTURE_AUTH_TEACHER_B,
     action: "observation.read",
-    resource: observationResource({
-      observation_id: FIXTURE_OBSERVATION_IDS.transferredHistory,
-      child_id: FIXTURE_CHILD_IDS.transferred,
-      current_class_id: FIXTURE_CLASS_IDS.daisy,
-      observed_class_id: FIXTURE_CLASS_IDS.sunflower,
-      author_account_id: FIXTURE_ACCOUNT_IDS.teacherA,
-    }),
+    resource: transferredHistoryResource(),
     expected: { allowed: true, via: "current_responsible", projection: "full" },
+  },
+  {
+    name: "teacher-a-write-observation-for-current-child",
+    auth: FIXTURE_AUTH_TEACHER_A,
+    action: "observation.write",
+    resource: childResource(FIXTURE_CHILD_IDS.current, FIXTURE_CLASS_IDS.sunflower),
+    expected: { allowed: true, via: "current_responsible", projection: "full" },
+  },
+  {
+    name: "teacher-a-organize-existing-observation",
+    auth: FIXTURE_AUTH_TEACHER_A,
+    action: "observation.organize",
+    resource: inClassConfirmableResource(),
+    expected: { allowed: true, via: "current_responsible", projection: "full" },
+  },
+  {
+    name: "teacher-a-confirm-existing-observation",
+    auth: FIXTURE_AUTH_TEACHER_A,
+    action: "observation.confirm",
+    resource: inClassConfirmableResource(),
+    expected: { allowed: true, via: "current_responsible", projection: "full" },
+  },
+  {
+    name: "teacher-b-confirm-prior-class-history",
+    auth: FIXTURE_AUTH_TEACHER_B,
+    action: "observation.confirm",
+    resource: transferredHistoryResource(),
+    expected: { allowed: true, via: "current_responsible", projection: "full" },
+  },
+  {
+    name: "teacher-a-operate-transferred-history-denied",
+    auth: FIXTURE_AUTH_TEACHER_A,
+    action: "observation.confirm",
+    resource: transferredHistoryResource(),
+    expected: { allowed: false, deny: "out_of_scope" },
   },
   {
     name: "author-is-not-authorization-after-revocation",
@@ -486,6 +546,50 @@ export const FIXTURE_ACCESS_CASES: FixtureAccessCase[] = [
       business_guard: "class_history_protected",
     },
   },
+
+  /* ---- 动作/资源非法组合：400，先于角色与范围，管理员也不能绕过 ---- */
+  {
+    name: "invalid-combo-confirm-with-class",
+    auth: FIXTURE_AUTH_TEACHER_A,
+    action: "observation.confirm",
+    resource: classResource(FIXTURE_CLASS_IDS.sunflower),
+    expected: { allowed: false, invalid_request: ACCESS_INVALID_COMBINATION_ERROR },
+  },
+  {
+    name: "invalid-combo-admin-confirm-with-class",
+    auth: FIXTURE_AUTH_ADMIN,
+    action: "observation.confirm",
+    resource: classResource(FIXTURE_CLASS_IDS.sunflower),
+    expected: { allowed: false, invalid_request: ACCESS_INVALID_COMBINATION_ERROR },
+  },
+  {
+    name: "invalid-combo-write-with-observation",
+    auth: FIXTURE_AUTH_TEACHER_A,
+    action: "observation.write",
+    resource: inClassConfirmableResource(),
+    expected: { allowed: false, invalid_request: ACCESS_INVALID_COMBINATION_ERROR },
+  },
+  {
+    name: "invalid-combo-profile-with-observation",
+    auth: FIXTURE_AUTH_TEACHER_A,
+    action: "growth_profile.write",
+    resource: inClassConfirmableResource(),
+    expected: { allowed: false, invalid_request: ACCESS_INVALID_COMBINATION_ERROR },
+  },
+  {
+    name: "invalid-combo-guide-with-child",
+    auth: FIXTURE_AUTH_TEACHER_A,
+    action: "guide.decide",
+    resource: childResource(FIXTURE_CHILD_IDS.current, FIXTURE_CLASS_IDS.sunflower),
+    expected: { allowed: false, invalid_request: ACCESS_INVALID_COMBINATION_ERROR },
+  },
+  {
+    name: "invalid-combo-teacher-manage-with-class",
+    auth: FIXTURE_AUTH_ADMIN,
+    action: "teacher.manage",
+    resource: classResource(FIXTURE_CLASS_IDS.sunflower),
+    expected: { allowed: false, invalid_request: ACCESS_INVALID_COMBINATION_ERROR },
+  },
 ];
 
 /** 授权失败 ≠ 空数据：错误必须是显式拒绝，不能伪装成“没有记录” */
@@ -495,11 +599,373 @@ export const FIXTURE_AUTHORIZATION_DENIED_RESULT: AccessDecision = {
 };
 export const FIXTURE_AUTHORIZED_EMPTY_LIST = { items: [] as string[] };
 
+/* ------------------------------ 登录前请求保护 ------------------------------ */
+
+export const FIXTURE_TRUSTED_ORIGINS = ["https://yaya.example.edu"] as const;
+
+export interface FixtureLoginGuardCase {
+  name: string;
+  origin: string | null;
+  sec_fetch_site: string | null;
+  auth_request_header: string | null;
+  content_type: string | null;
+  has_session_cookie: boolean;
+  has_legacy_cookie: boolean;
+  /** 用于证明 Host / Forwarded 不能被当作可信源 */
+  host_header: string | null;
+  expected: { accepted: boolean; failure?: LoginGuardFailure };
+}
+
+export const FIXTURE_LOGIN_GUARD_CASES: FixtureLoginGuardCase[] = [
+  {
+    name: "valid-pre-login-without-session",
+    origin: FIXTURE_TRUSTED_ORIGINS[0],
+    sec_fetch_site: "same-origin",
+    auth_request_header: "1",
+    content_type: "application/json",
+    has_session_cookie: false,
+    has_legacy_cookie: true,
+    host_header: "yaya.example.edu",
+    expected: { accepted: true },
+  },
+  {
+    name: "cross-origin-rejected",
+    origin: "https://evil.example",
+    sec_fetch_site: "cross-site",
+    auth_request_header: "1",
+    content_type: "application/json",
+    has_session_cookie: false,
+    has_legacy_cookie: false,
+    host_header: "yaya.example.edu",
+    expected: { accepted: false, failure: "origin_untrusted" },
+  },
+  {
+    name: "origin-null-rejected",
+    origin: "null",
+    sec_fetch_site: null,
+    auth_request_header: "1",
+    content_type: "application/json",
+    has_session_cookie: false,
+    has_legacy_cookie: false,
+    host_header: "yaya.example.edu",
+    expected: { accepted: false, failure: "origin_untrusted" },
+  },
+  {
+    name: "spoofed-host-not-trusted",
+    origin: "https://evil.example",
+    sec_fetch_site: "same-origin",
+    auth_request_header: "1",
+    content_type: "application/json",
+    has_session_cookie: false,
+    has_legacy_cookie: false,
+    host_header: "yaya.example.edu",
+    expected: { accepted: false, failure: "origin_untrusted" },
+  },
+  {
+    name: "origin-missing-rejected",
+    origin: null,
+    sec_fetch_site: "same-origin",
+    auth_request_header: "1",
+    content_type: "application/json",
+    has_session_cookie: false,
+    has_legacy_cookie: false,
+    host_header: "yaya.example.edu",
+    expected: { accepted: false, failure: "same_origin_proof_missing" },
+  },
+  {
+    name: "custom-header-missing-rejected",
+    origin: FIXTURE_TRUSTED_ORIGINS[0],
+    sec_fetch_site: "same-origin",
+    auth_request_header: null,
+    content_type: "application/json",
+    has_session_cookie: false,
+    has_legacy_cookie: false,
+    host_header: "yaya.example.edu",
+    expected: { accepted: false, failure: "auth_request_header_missing" },
+  },
+  {
+    name: "plain-form-rejected",
+    origin: FIXTURE_TRUSTED_ORIGINS[0],
+    sec_fetch_site: "same-origin",
+    auth_request_header: "1",
+    content_type: "application/x-www-form-urlencoded",
+    has_session_cookie: false,
+    has_legacy_cookie: false,
+    host_header: "yaya.example.edu",
+    expected: { accepted: false, failure: "content_type_rejected" },
+  },
+];
+
+/* ------------------------------ 会话 CSRF 绑定 ------------------------------ */
+
+export const FIXTURE_CSRF_BINDING = {
+  session_a: { session_id: "5e55ion0-0000-4000-8000-00000000000a", token: "csrf-token-a" },
+  session_b: { session_id: "5e55ion0-0000-4000-8000-00000000000b", token: "csrf-token-b" },
+} as const;
+
+export interface FixtureCsrfCase {
+  name: string;
+  session_id: string;
+  token: string | null;
+  expected: "accepted" | "csrf_rejected";
+}
+
+export const FIXTURE_CSRF_CASES: FixtureCsrfCase[] = [
+  {
+    name: "own-session-token-accepted",
+    session_id: FIXTURE_CSRF_BINDING.session_a.session_id,
+    token: FIXTURE_CSRF_BINDING.session_a.token,
+    expected: "accepted",
+  },
+  {
+    name: "other-session-token-rejected",
+    session_id: FIXTURE_CSRF_BINDING.session_b.session_id,
+    token: FIXTURE_CSRF_BINDING.session_a.token,
+    expected: "csrf_rejected",
+  },
+  {
+    name: "missing-token-rejected",
+    session_id: FIXTURE_CSRF_BINDING.session_a.session_id,
+    token: null,
+    expected: "csrf_rejected",
+  },
+];
+
+/* -------------------------------- 退出与 Cookie 并存 -------------------------------- */
+
+export interface FixtureLogoutCase {
+  name: string;
+  session: "valid" | "invalid" | "absent";
+  expected: { status: 200; revoke_current: boolean; clear_cookies: true };
+}
+
+export const FIXTURE_LOGOUT_CASES: FixtureLogoutCase[] = [
+  { name: "logout-valid-session", session: "valid", expected: { status: 200, revoke_current: true, clear_cookies: true } },
+  { name: "logout-invalid-session-idempotent", session: "invalid", expected: { status: 200, revoke_current: false, clear_cookies: true } },
+  { name: "logout-absent-session-idempotent", session: "absent", expected: { status: 200, revoke_current: false, clear_cookies: true } },
+];
+
+export const FIXTURE_LEGACY_COOKIE_CLEAR = {
+  cookie_name: LEGACY_AUTH_COOKIE,
+  path: "/",
+} as const;
+
+/** 新旧 Cookie 并存：新会话按自身有效性校验，旧 Cookie 不提升权限也不阻断登录 */
+export interface FixtureCookieCoexistenceCase {
+  name: string;
+  new_session: "valid" | "invalid" | "absent";
+  legacy_cookie: boolean;
+  expected_state: "authenticated" | "invalid_session";
+  login_allowed: boolean;
+}
+
+export const FIXTURE_COOKIE_COEXISTENCE_CASES: FixtureCookieCoexistenceCase[] = [
+  { name: "valid-new-session-with-legacy", new_session: "valid", legacy_cookie: true, expected_state: "authenticated", login_allowed: true },
+  { name: "invalid-new-session-with-legacy", new_session: "invalid", legacy_cookie: true, expected_state: "invalid_session", login_allowed: true },
+  { name: "legacy-only", new_session: "absent", legacy_cookie: true, expected_state: "invalid_session", login_allowed: true },
+];
+
+export const FIXTURE_RELOGIN_SESSION_IDS = {
+  previous: "5e55ion0-0000-4000-8000-00000000000c",
+  next: "5e55ion0-0000-4000-8000-00000000000d",
+} as const;
+
+/* ------------------------------ 首位管理员初始化（部署者脚本） ------------------------------ */
+
+export interface FixtureBootstrapCase {
+  name: string;
+  context: AdminBootstrapContext;
+  admins_exist: boolean;
+  expected: { accepted: boolean; error?: "not_deployer" | "admin_already_initialized" };
+}
+
+export const FIXTURE_BOOTSTRAP_CASES: FixtureBootstrapCase[] = [
+  {
+    name: "deployer-no-admin-accepted",
+    context: "deployer_non_public_script",
+    admins_exist: false,
+    expected: { accepted: true },
+  },
+  {
+    name: "deployer-admin-exists-rejected",
+    context: "deployer_non_public_script",
+    admins_exist: true,
+    expected: { accepted: false, error: "admin_already_initialized" },
+  },
+  {
+    name: "public-http-no-admin-rejected",
+    context: "public_http",
+    admins_exist: false,
+    expected: { accepted: false, error: "not_deployer" },
+  },
+  {
+    name: "authenticated-http-admin-exists-rejected",
+    context: "authenticated_http",
+    admins_exist: true,
+    expected: { accepted: false, error: "not_deployer" },
+  },
+];
+
+/** 并发初始化：两个同时执行只允许一个成功，另一个得到 admin_already_initialized */
+export const FIXTURE_BOOTSTRAP_CONCURRENT = {
+  attempts: 2,
+  initial_admins: 0,
+  expected_successes: 1,
+  expected_conflicts: 1,
+} as const;
+
+export const FIXTURE_ADMIN_BOOTSTRAP_INPUT: AdminBootstrapInput = {
+  username: "yayuanzhang",
+  display_name: "芽芽园长",
+  password: "fixture-admin-password-no-default",
+};
+
+export const FIXTURE_ADMIN_BOOTSTRAP_RESULT: AdminBootstrapResult = {
+  principal: FIXTURE_PRINCIPAL_ADMIN,
+};
+
+export const FIXTURE_ADMIN_BOOTSTRAP_STATUS: AdminBootstrapStatus = {
+  admin_initialized: false,
+};
+
+/* ------------------------------ 模型等待期间重核 ------------------------------ */
+
+export interface FixtureModelWaitCase {
+  name: string;
+  event: ModelWaitEvent;
+  before: { auth: AuthState; action: AccessAction; resource: AccessResource };
+  after: { auth: AuthState; action: AccessAction; resource: AccessResource };
+  expected:
+    | { write: true; outcome: "saved" }
+    | { write: false; outcome: "denied"; deny: AuthDenyReason }
+    | { write: false; outcome: "conflict"; error: "state_conflict" | "attempt_owner_mismatch" };
+}
+
+export const FIXTURE_MODEL_WAIT_CASES: FixtureModelWaitCase[] = [
+  {
+    name: "no-change-saves",
+    event: "none",
+    before: {
+      auth: FIXTURE_AUTH_TEACHER_A,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    after: {
+      auth: FIXTURE_AUTH_TEACHER_A,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    expected: { write: true, outcome: "saved" },
+  },
+  {
+    name: "session-revoked-during-wait",
+    event: "session_revoked",
+    before: {
+      auth: FIXTURE_AUTH_TEACHER_A,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    after: {
+      auth: FIXTURE_AUTH_REVOKED_AFTER_WAIT,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    expected: { write: false, outcome: "denied", deny: "unauthenticated" },
+  },
+  {
+    name: "account-disabled-during-wait",
+    event: "account_disabled",
+    before: {
+      auth: FIXTURE_AUTH_TEACHER_A,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    after: {
+      auth: FIXTURE_AUTH_TEACHER_DISABLED,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    expected: { write: false, outcome: "denied", deny: "account_disabled" },
+  },
+  {
+    name: "assignment-removed-during-wait",
+    event: "assignment_removed",
+    before: {
+      auth: FIXTURE_AUTH_TEACHER_A,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    after: {
+      auth: FIXTURE_AUTH_TEACHER_REVOKED,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    expected: { write: false, outcome: "denied", deny: "out_of_scope" },
+  },
+  {
+    name: "child-transferred-during-wait",
+    event: "child_transferred",
+    before: {
+      auth: FIXTURE_AUTH_TEACHER_A,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    after: {
+      auth: FIXTURE_AUTH_TEACHER_A,
+      action: "observation.confirm",
+      resource: observationResource({
+        observation_id: FIXTURE_OBSERVATION_IDS.inClassConfirmable,
+        child_id: FIXTURE_CHILD_IDS.current,
+        current_class_id: FIXTURE_CLASS_IDS.daisy,
+        observed_class_id: FIXTURE_CLASS_IDS.sunflower,
+        author_account_id: FIXTURE_ACCOUNT_IDS.teacherA,
+      }),
+    },
+    expected: { write: false, outcome: "denied", deny: "out_of_scope" },
+  },
+  {
+    name: "observation-changed-during-wait",
+    event: "observation_changed",
+    before: {
+      auth: FIXTURE_AUTH_TEACHER_A,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    after: {
+      auth: FIXTURE_AUTH_TEACHER_A,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    expected: { write: false, outcome: "conflict", error: "state_conflict" },
+  },
+  {
+    name: "new-session-cannot-take-over",
+    event: "principal_replaced",
+    before: {
+      auth: FIXTURE_AUTH_TEACHER_A,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    after: {
+      auth: FIXTURE_AUTH_TEACHER_B,
+      action: "observation.confirm",
+      resource: inClassConfirmableResource(),
+    },
+    expected: { write: false, outcome: "conflict", error: "attempt_owner_mismatch" },
+  },
+];
+
+/* ------------------------------ 密码原样处理 ------------------------------ */
+
+/** 含两端空白与大小写的原始密码：不得 trim、不得 Unicode 规范化 */
+export const FIXTURE_PASSWORD_RAW = "  Passw0rd 保留两端空白与大小写 ";
+export const FIXTURE_PASSWORD_USERNAME = "  LiLaoShi ";
+
 /* ------------------------------ 接口契约 fixture ------------------------------ */
 
 export const FIXTURE_LOGIN_REQUEST: LoginRequest = {
-  username: "  LiLaoShi ",
-  password: "fixture-only-password",
+  username: FIXTURE_PASSWORD_USERNAME,
+  password: FIXTURE_PASSWORD_RAW,
 };
 
 export const FIXTURE_SESSION_VIEW = {
@@ -592,14 +1058,4 @@ export const FIXTURE_PASSWORD_RESET_REQUEST: PasswordResetRequest = {
 export const FIXTURE_PASSWORD_RESET_RESPONSE: PasswordResetResponse = {
   teacher: FIXTURE_TEACHER_A_SUMMARY,
   revoked_session_count: 3,
-};
-
-export const FIXTURE_INITIAL_ADMIN_REQUEST: InitialAdminRequest = {
-  username: "yayuanzhang",
-  display_name: "芽芽园长",
-  password: "fixture-admin-password",
-};
-
-export const FIXTURE_INITIAL_ADMIN_RESPONSE: InitialAdminResponse = {
-  principal: FIXTURE_PRINCIPAL_ADMIN,
 };
