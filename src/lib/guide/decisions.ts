@@ -226,26 +226,34 @@ function buildBasis(
     source_confirmed_at: source.confirmed_at,
   };
 
-  const saved = findSavedBasis(savedBasis, input);
-  if (!saved) return fresh;
-  // 沿用旧依据（同一来源观察）：核实保存时的来源版本与日期，不允许静默刷新旧快照。
+  const saved = findSavedBasis(savedBasis, input, fresh.quote);
+  const savedSource = saved ?? findSavedSourceBasis(savedBasis, input.observation_id);
+  if (!savedSource) return fresh;
+  // 日期一致性独立核对：任何沿用（含首次归档豁免版本时）都不得跳过日期
+  if (savedSource.observed_at !== fresh.observed_at) {
+    throw new GuideEvidenceBasisExpiredError(
+      "沿用的依据来源观察日期已变化，旧快照不能静默刷新；请重新核对来源或明确改用新依据。",
+      { item_id: savedSource.observation_id },
+    );
+  }
+  // 版本核对仍按来源进行：首次归档豁免只处理“空版本 → 首次 confirmed_at”
   const firstArchive =
-    ctx.confirmingObservationId === saved.observation_id && saved.source_confirmed_at === null;
+    ctx.confirmingObservationId === savedSource.observation_id &&
+    savedSource.source_confirmed_at === null;
   if (!firstArchive) {
     const versionConsistent =
-      saved.source_confirmed_at !== null &&
-      sameTimestamp(saved.source_confirmed_at, fresh.source_confirmed_at);
-    if (!versionConsistent || saved.observed_at !== fresh.observed_at) {
+      savedSource.source_confirmed_at !== null &&
+      sameTimestamp(savedSource.source_confirmed_at, fresh.source_confirmed_at);
+    if (!versionConsistent) {
       throw new GuideEvidenceBasisExpiredError(
-        "沿用的依据来源在建议后已更新（版本或日期变化），旧快照不能静默刷新；请重新核对来源或明确改用新依据。",
-        { item_id: saved.observation_id },
+        "沿用的依据来源在建议后已更新（版本变化），旧快照不能静默刷新；请重新核对来源或明确改用新依据。",
+        { item_id: savedSource.observation_id },
       );
     }
   }
-  // 同事务首次归档或教师改写了片段：返回新快照；完全沿用旧片段时保留保存时的快照结构
-  if (firstArchive || saved.quote !== fresh.quote || saved.quote_source !== fresh.quote_source) {
-    return fresh;
-  }
+  // 仅完整定位（observation_id + quote + quote_source + quote_field）一致时复用保存快照；
+  // 教师明确更换字段或片段属于修改，必须写入新定位，不得吞掉或误用第一个旧依据
+  if (!saved || firstArchive) return fresh;
   return {
     observation_id: saved.observation_id,
     observed_at: saved.observed_at,
@@ -257,12 +265,32 @@ function buildBasis(
   };
 }
 
+/** 完整定位匹配：同一来源、同一片段、同一出处、同一字段 */
 function findSavedBasis(
   savedBasis: GuideEvidenceBasis[] | null,
   input: GuideEvidenceBasisInputParsed,
+  quote: string,
 ): GuideEvidenceBasis | null {
   if (!savedBasis) return null;
-  return savedBasis.find((entry) => entry.observation_id === input.observation_id) ?? null;
+  const quoteField = input.quote_source === "raw_text" ? null : (input.quote_field ?? null);
+  return (
+    savedBasis.find(
+      (entry) =>
+        entry.observation_id === input.observation_id &&
+        entry.quote === quote &&
+        entry.quote_source === input.quote_source &&
+        (entry.quote_field ?? null) === quoteField,
+    ) ?? null
+  );
+}
+
+/** 同一来源的任一条旧依据：仅用于版本/日期守门，不用于复用快照 */
+function findSavedSourceBasis(
+  savedBasis: GuideEvidenceBasis[] | null,
+  observationId: string,
+): GuideEvidenceBasis | null {
+  if (!savedBasis) return null;
+  return savedBasis.find((entry) => entry.observation_id === observationId) ?? null;
 }
 
 function sustainedConditionMet(

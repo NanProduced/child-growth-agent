@@ -1170,6 +1170,421 @@ function testFactQuoteNotScored(): void {
   check(!fabricated.ok, "虚构引用仍必须拒绝");
 }
 
+/* ---------------- R2-A) 引用字段修改不能被吞掉 ---------------- */
+
+const CONTENT_BOTH = {
+  ...CONTENT_A,
+  highlight_quote: "请你先玩。",
+  highlights: ["请你先玩。"],
+};
+
+function fieldLink(
+  id: string,
+  quoteField: "highlight_quote" | "highlights",
+  quote = "请你先玩。",
+  observedAt = "2026-09-20",
+  sourceConfirmedAt: string | null = T1,
+): GuideEvidenceLink {
+  return makeLink({
+    id,
+    item_id: ITEM_ALLOWED,
+    origin: "ai",
+    status: "ai_suggested",
+    support: null,
+    decided_at: null,
+    basis: [
+      {
+        observation_id: OBS_A,
+        observed_at: observedAt,
+        quote,
+        quote_source: "confirmed_content",
+        quote_field: quoteField,
+        class_context: { ...SNAPSHOT_MIDDLE },
+        source_confirmed_at: sourceConfirmedAt,
+      },
+    ],
+  });
+}
+
+function fieldDecision(
+  linkId: string,
+  quoteField: "highlight_quote" | "highlights",
+  quote = "请你先玩。",
+) {
+  return {
+    link_id: linkId,
+    support: "single_event" as const,
+    basis: [
+      {
+        observation_id: OBS_A,
+        quote,
+        quote_source: "confirmed_content" as const,
+        quote_field: quoteField,
+      },
+    ],
+  };
+}
+
+function testQuoteFieldChange(): void {
+  const source = makeObs({ id: OBS_A, confirmed_content: { ...CONTENT_BOTH } });
+  const ctx = decisionContext([source]);
+
+  // A1: highlight_quote → highlights（同句）必须生效
+  const savedHq = fieldLink("link-field", "highlight_quote");
+  const toHighlights = applyGuideDecisions(
+    parseGuideEvidence(makeContainer([savedHq])),
+    [fieldDecision("link-field", "highlights")],
+    ctx,
+  );
+  const highlightsLink = toHighlights.links.find((link) => link.id === "link-field");
+  check(toHighlights.changed === true, "R2-A1 更换合法字段必须产生变更");
+  check(highlightsLink?.basis[0]?.quote_field === "highlights", "R2-A1 新位置必须反映在结果中");
+
+  // A3: 完全相同的重复提交幂等，不增长 revision
+  const repeat = applyGuideDecisions(
+    parseGuideEvidence(toHighlights.container),
+    [fieldDecision("link-field", "highlights")],
+    ctx,
+  );
+  check(
+    repeat.changed === false && repeat.revision === toHighlights.revision,
+    "R2-A3 完全重复不增长 revision",
+  );
+
+  // A2: highlights → highlight_quote（同句）必须生效
+  const savedHl = fieldLink("link-field-2", "highlights");
+  const toHighlightQuote = applyGuideDecisions(
+    parseGuideEvidence(makeContainer([savedHl])),
+    [fieldDecision("link-field-2", "highlight_quote")],
+    ctx,
+  );
+  const hqLink = toHighlightQuote.links.find((link) => link.id === "link-field-2");
+  check(toHighlightQuote.changed === true, "R2-A2 反向更换合法字段必须产生变更");
+  check(hqLink?.basis[0]?.quote_field === "highlight_quote", "R2-A2 反向新位置必须反映在结果中");
+
+  // A4: 同一来源多个片段/字段并存时按完整定位选择，不相互覆盖
+  const multi = makeLink({
+    id: "link-multi",
+    item_id: ITEM_ALLOWED,
+    origin: "ai",
+    status: "ai_suggested",
+    support: null,
+    decided_at: null,
+    basis: [
+      {
+        observation_id: OBS_A,
+        observed_at: "2026-09-20",
+        quote: "请你先玩。",
+        quote_source: "confirmed_content",
+        quote_field: "highlight_quote",
+        class_context: { ...SNAPSHOT_MIDDLE },
+        source_confirmed_at: T1,
+      },
+      {
+        observation_id: OBS_A,
+        observed_at: "2026-09-20",
+        quote: "请你先玩。",
+        quote_source: "confirmed_content",
+        quote_field: "highlights",
+        class_context: { ...SNAPSHOT_MIDDLE },
+        source_confirmed_at: T1,
+      },
+    ],
+  });
+  const multiHighlights = applyGuideDecisions(
+    parseGuideEvidence(makeContainer([multi])),
+    [fieldDecision("link-multi", "highlights")],
+    ctx,
+  );
+  const multiHighlightsLink = multiHighlights.links.find((link) => link.id === "link-multi");
+  check(
+    multiHighlightsLink?.basis[0]?.quote_field === "highlights",
+    "R2-A4 多字段并存时按完整定位选择 highlights，不误用第一个旧依据",
+  );
+  const multiHq = applyGuideDecisions(
+    parseGuideEvidence(makeContainer([multi])),
+    [fieldDecision("link-multi", "highlight_quote")],
+    ctx,
+  );
+  const multiHqLink = multiHq.links.find((link) => link.id === "link-multi");
+  check(
+    multiHqLink?.basis[0]?.quote_field === "highlight_quote",
+    "R2-A4 多字段并存时按完整定位选择 highlight_quote",
+  );
+
+  // A5: 新声明位置没有该片段时仍拒绝
+  const sourceHqOnly = makeObs({
+    id: OBS_A,
+    confirmed_content: { ...CONTENT_A, highlight_quote: "请你先玩。", highlights: ["把小汽车递给同伴"] },
+  });
+  let invalidCode: string | null = null;
+  try {
+    applyGuideDecisions(
+      parseGuideEvidence(makeContainer([fieldLink("link-field-3", "highlight_quote")])),
+      [fieldDecision("link-field-3", "highlights")],
+      decisionContext([sourceHqOnly]),
+    );
+  } catch (error) {
+    invalidCode = errorCode(error);
+  }
+  check(invalidCode === "invalid_request", `R2-A5 新位置无该片段仍拒绝（实际 ${invalidCode}）`);
+
+  // A6: 来源版本已漂移时，切换字段不能绕过守门
+  const driftedSource = makeObs({ id: OBS_A, confirmed_content: { ...CONTENT_BOTH }, confirmed_at: T2 });
+  let driftCode: string | null = null;
+  try {
+    applyGuideDecisions(
+      parseGuideEvidence(makeContainer([fieldLink("link-field-4", "highlight_quote", "请你先玩。", "2026-09-20", T1)])),
+      [fieldDecision("link-field-4", "highlights")],
+      decisionContext([driftedSource]),
+    );
+  } catch (error) {
+    driftCode = errorCode(error);
+  }
+  check(driftCode === "basis_expired", `R2-A6 字段切换不能绕过版本守门（实际 ${driftCode}）`);
+}
+
+/* ---------------- R2-B) 首次归档不能豁免日期一致性 ---------------- */
+
+function testFirstArchiveDateConsistency(): void {
+  const nullDateLink = makeLink({
+    id: "link-null-date",
+    item_id: ITEM_ALLOWED,
+    origin: "ai",
+    status: "ai_suggested",
+    support: null,
+    decided_at: null,
+    basis: [
+      {
+        observation_id: OBS_A,
+        observed_at: "2026-09-01",
+        quote: "请你先玩。",
+        quote_source: "raw_text",
+        quote_field: null,
+        class_context: null,
+        source_confirmed_at: null,
+      },
+    ],
+  });
+  const decision = {
+    link_id: "link-null-date",
+    support: "single_event" as const,
+    basis: [VALID_BASIS],
+  };
+
+  // B1: 空版本 + 同日期首次归档成功
+  const sameDate = makeObs({
+    id: OBS_A,
+    observed_at: "2026-09-01",
+    status: "confirmed",
+    confirmed_at: NOW,
+  });
+  const ok = applyGuideDecisions(
+    parseGuideEvidence(makeContainer([nullDateLink])),
+    [decision],
+    decisionContext([sameDate], OBS_A),
+  );
+  const okLink = ok.links.find((link) => link.id === "link-null-date");
+  check(
+    ok.changed && okLink?.basis[0]?.source_confirmed_at === NOW,
+    "R2-B1 空版本 + 同日期首次归档成功",
+  );
+
+  // B2: 空版本 + 日期漂移必须失败
+  const driftedDate = makeObs({
+    id: OBS_A,
+    observed_at: "2026-09-20",
+    status: "confirmed",
+    confirmed_at: NOW,
+  });
+  let dateCode: string | null = null;
+  try {
+    applyGuideDecisions(
+      parseGuideEvidence(makeContainer([nullDateLink])),
+      [decision],
+      decisionContext([driftedDate], OBS_A),
+    );
+  } catch (error) {
+    dateCode = errorCode(error);
+  }
+  check(dateCode === "basis_expired", `R2-B2 空版本 + 日期漂移必须 basis_expired（实际 ${dateCode}）`);
+
+  // B3: 已有版本 + 日期漂移失败（保留 R1 口径）
+  const versionedLink = makeLink({
+    id: "link-versioned-date",
+    item_id: ITEM_ALLOWED,
+    origin: "ai",
+    status: "ai_suggested",
+    support: null,
+    decided_at: null,
+    basis: [
+      {
+        observation_id: OBS_A,
+        observed_at: "2026-09-01",
+        quote: "请你先玩。",
+        quote_source: "raw_text",
+        quote_field: null,
+        class_context: null,
+        source_confirmed_at: T1,
+      },
+    ],
+  });
+  const versionedSource = makeObs({ id: OBS_A, observed_at: "2026-09-20", confirmed_at: T1 });
+  let versionedCode: string | null = null;
+  try {
+    applyGuideDecisions(
+      parseGuideEvidence(makeContainer([versionedLink])),
+      [{ link_id: "link-versioned-date", support: "single_event", basis: [VALID_BASIS] }],
+      decisionContext([versionedSource]),
+    );
+  } catch (error) {
+    versionedCode = errorCode(error);
+  }
+  check(versionedCode === "basis_expired", `R2-B3 已有版本 + 日期漂移失败（实际 ${versionedCode}）`);
+
+  // B4: 批量中一条日期不符 → 整批失败、零部分写入
+  const before = parseGuideEvidence(makeContainer([nullDateLink]));
+  const freshSource = makeObs({
+    id: OBS_C,
+    observed_at: "2026-09-18",
+    raw_text: "他主动把积木分给同伴一起搭桥。",
+  });
+  let batchCode: string | null = null;
+  try {
+    applyGuideDecisions(
+      before,
+      [
+        {
+          item_id: ITEM_REQUIRES_INDEPENDENCE,
+          support: "clue_only",
+          basis: [{ observation_id: OBS_C, quote: "主动把积木分给同伴", quote_source: "raw_text" }],
+        },
+        decision,
+      ],
+      decisionContext([driftedDate, freshSource], OBS_A),
+    );
+  } catch (error) {
+    batchCode = errorCode(error);
+  }
+  check(batchCode === "basis_expired", `R2-B4 批量日期不符整批失败（实际 ${batchCode}）`);
+  check(before.kind === "ok" && before.links.length === 1, "R2-B4 零部分写入（输入容器不变）");
+}
+
+/* ---------------- R2-四) 旧空版本建议的既有 API 恢复路线 ---------------- */
+
+async function testNullVersionRecoveryRoute(): Promise<void> {
+  const { applyGuideEvidenceMutationWithClient } = await import("../src/lib/queries");
+  const oldSuggestion = makeLink({
+    id: "link-old-ai",
+    item_id: ITEM_ALLOWED,
+    origin: "ai",
+    status: "ai_suggested",
+    support: null,
+    decided_at: null,
+    basis: [
+      {
+        observation_id: OBS_A,
+        observed_at: "2026-09-20",
+        quote: "请你先玩。",
+        quote_source: "raw_text",
+        quote_field: null,
+        class_context: { ...SNAPSHOT_MIDDLE },
+        source_confirmed_at: null,
+      },
+    ],
+  });
+  // 模拟“未归档生成建议 → 普通归档不携带 guide_decisions”后的实库状态
+  const host = makeObs({
+    id: OBS_A,
+    status: "confirmed",
+    confirmed_content: { ...CONTENT_A },
+    confirmed_at: T2,
+    guide_evidence: makeContainer([oldSuggestion]),
+  });
+  const client = fakeClient(host as unknown as Observation);
+  const oldConfirm = {
+    action: "confirm" as const,
+    expected_guide_revision: 1,
+    decisions: [
+      {
+        link_id: "link-old-ai",
+        support: "single_event" as const,
+        basis: [{ observation_id: OBS_A, quote: "请你先玩。", quote_source: "raw_text" as const }],
+      },
+    ],
+  };
+
+  // 严格口径：旧空版本建议独立确认必须 basis_expired
+  let confirmCode: string | null = null;
+  try {
+    await applyGuideEvidenceMutationWithClient(client, OBS_A, oldConfirm);
+  } catch (error) {
+    confirmCode = errorCode(error);
+  }
+  check(
+    confirmCode === "basis_expired",
+    `恢复路线：旧空版本建议确认返回 basis_expired（实际 ${confirmCode}）`,
+  );
+  check(host.status === "confirmed", "恢复路线：宿主保持已归档");
+  check(
+    (host.guide_evidence as ObservationGuideEvidence).revision === 1,
+    "恢复路线：失败不增长 revision",
+  );
+
+  // 可达恢复：拒绝旧待核对建议（保留审计）
+  const rejected = await applyGuideEvidenceMutationWithClient(client, OBS_A, {
+    action: "reject",
+    link_id: "link-old-ai",
+    expected_guide_revision: 1,
+    reason: "旧建议版本无法核对，改用当前来源重新关联",
+  });
+  const rejectedLink = rejected.links.find((link) => link.link_id === "link-old-ai");
+  check(rejected.revision === 2 && rejectedLink?.status === "rejected", "恢复路线：拒绝旧建议 revision=2 且保留审计");
+
+  // 可达恢复：手动建立当前目录关联
+  const manual = await applyGuideEvidenceMutationWithClient(client, OBS_A, {
+    action: "confirm",
+    expected_guide_revision: 2,
+    decisions: [
+      {
+        item_id: ITEM_ALLOWED,
+        support: "single_event",
+        basis: [{ observation_id: OBS_A, quote: "请你先玩。", quote_source: "raw_text" }],
+      },
+    ],
+  });
+  const manualLink = manual.links.find((link) => link.status === "confirmed_performance");
+  check(manual.revision === 3, "恢复路线：新手动关联 revision=3");
+  check(
+    manualLink?.basis[0]?.observation_id === OBS_A &&
+      manualLink?.basis[0]?.observed_at === "2026-09-20" &&
+      manualLink?.basis[0]?.source_confirmed_at === T2,
+    "恢复路线：新依据来源/日期/确认版本正确",
+  );
+  check(
+    (manualLink?.basis[0]?.source_confirmed_at ?? null) !== null,
+    "恢复路线：新正式依据版本非空",
+  );
+
+  // 重复提交幂等
+  const repeat = await applyGuideEvidenceMutationWithClient(client, OBS_A, {
+    action: "confirm",
+    expected_guide_revision: 3,
+    decisions: [
+      {
+        item_id: ITEM_ALLOWED,
+        support: "single_event",
+        basis: [{ observation_id: OBS_A, quote: "请你先玩。", quote_source: "raw_text" }],
+      },
+    ],
+  });
+  check(
+    repeat.revision === 3 && repeat.links.length === 2,
+    "恢复路线：重复提交幂等且不新增关联",
+  );
+  check(host.raw_text === RAW_A, "恢复路线：raw_text 未改写");
+}
+
 async function main(): Promise<void> {
   const run = async (name: string, fn: () => void | Promise<void>) => {
     try {
@@ -1190,6 +1605,9 @@ async function main(): Promise<void> {
   await run("F 引用来源绑定", testSuggestionSourceBinding);
   await run("F 建议 schema 与保存前核对", testSuggestionSchemaAndSaveGuard);
   await run("G 事实引用守门", testFactQuoteNotScored);
+  await run("R2-A quote_field 修改", testQuoteFieldChange);
+  await run("R2-B 首次归档日期一致性", testFirstArchiveDateConsistency);
+  await run("R2-四 旧空版本恢复路线", testNullVersionRecoveryRoute);
 
   if (failures.length > 0) {
     console.error(JSON.stringify({ passed, failed: failures.length, failures }, null, 2));
