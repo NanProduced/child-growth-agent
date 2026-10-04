@@ -12,6 +12,7 @@ import {
   assertCleanupComplete,
   inspectOwnedContainer,
   nativeCommand,
+  parseContainerIdFromStdout,
   removeOwnedContainer,
   runCleanupSteps,
   sleep,
@@ -92,7 +93,18 @@ interface FakeDocker {
   commands: string[][];
 }
 
-function createFakeDocker(seed: FakeContainer[], portLine: string): FakeDocker {
+interface FakeDockerOptions {
+  /** 以该前缀命名的 docker run 注入失败（模拟后续资源创建失败） */
+  failRunNamePrefix?: string;
+  /** 精确匹配该名称的容器 rm 注入失败（模拟单个资源清理失败） */
+  failRmNameEquals?: string;
+}
+
+function createFakeDocker(
+  seed: FakeContainer[],
+  portLine: string,
+  options: FakeDockerOptions = {}
+): FakeDocker {
   const containers: FakeContainer[] = seed.map((item) => ({ ...item, labels: { ...item.labels } }));
   const commands: string[][] = [];
   let created = 0;
@@ -107,6 +119,10 @@ function createFakeDocker(seed: FakeContainer[], portLine: string): FakeDocker {
         return { status: 0, stdout: '29.5.3', stderr: '' };
       case 'run': {
         const nameAt = rest.indexOf('--name');
+        const name = nameAt >= 0 ? (rest[nameAt + 1] ?? '') : '';
+        if (options.failRunNamePrefix && name.startsWith(options.failRunNamePrefix)) {
+          return { status: 1, stdout: '', stderr: `simulated run failure: ${name}` };
+        }
         const labelAt = rest.indexOf('--label');
         const rawLabel = labelAt >= 0 ? (rest[labelAt + 1] ?? '') : '';
         const eq = rawLabel.indexOf('=');
@@ -114,7 +130,7 @@ function createFakeDocker(seed: FakeContainer[], portLine: string): FakeDocker {
         const id = created.toString(16).padStart(64, '0');
         containers.push({
           id,
-          name: nameAt >= 0 ? (rest[nameAt + 1] ?? '') : '',
+          name,
           labels: eq >= 0 ? { [rawLabel.slice(0, eq)]: rawLabel.slice(eq + 1) } : {},
           exists: true,
         });
@@ -136,6 +152,9 @@ function createFakeDocker(seed: FakeContainer[], portLine: string): FakeDocker {
         const target = rest.find((arg) => arg !== '-f') ?? '';
         const found = containers.find((c) => c.exists && (c.id === target || c.name === target));
         if (!found) return { status: 1, stdout: '', stderr: `Error: No such container: ${target}` };
+        if (options.failRmNameEquals && found.name === options.failRmNameEquals) {
+          return { status: 1, stdout: '', stderr: `simulated rm failure: ${found.name}` };
+        }
         found.exists = false;
         return { status: 0, stdout: found.id, stderr: '' };
       }
@@ -171,15 +190,18 @@ function listContainerIds(label?: string): string[] {
     .filter(Boolean);
 }
 
-async function ensureLegacyContainer(): Promise<LegacyContainer> {
-  const existing = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, nativeCommand);
+async function ensureLegacyContainer(
+  runner: CommandRunner,
+  register: (handle: LegacyContainer) => void
+): Promise<LegacyContainer> {
+  const existing = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, runner);
   if (existing.state === 'unverifiable') {
     throw new Error(`无法核实旧固定名容器：${existing.detail}`);
   }
   if (existing.state === 'verified') return { id: existing.id, created: false, runId: null };
 
   const runId = `legacy-${process.pid}-${Date.now().toString(36)}`;
-  const created = nativeCommand('docker', [
+  const created = runner('docker', [
     'run',
     '-d',
     '--name',
@@ -190,12 +212,20 @@ async function ensureLegacyContainer(): Promise<LegacyContainer> {
     'POSTGRES_PASSWORD=postgres',
     'postgres:16-alpine',
   ]);
-  if (created.status !== 0) {
+  const createdId = parseContainerIdFromStdout(created.stdout);
+  if (created.status !== 0 || !createdId) {
     throw new Error(`准备旧固定名容器失败：${created.stderr || created.stdout || created.error}`);
   }
-  const after = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, nativeCommand);
-  if (after.state !== 'verified') throw new Error('旧固定名容器创建后无法核实身份');
-  return { id: after.id, created: true, runId };
+  // 句柄先登记再核验：后续核验失败也不丢已创建资源
+  const handle: LegacyContainer = { id: createdId, created: true, runId };
+  register(handle);
+  const after = inspectOwnedContainer(createdId, LEGACY_LABEL, runner);
+  if (after.state !== 'verified' || after.id !== createdId || after.label !== runId) {
+    throw new Error(
+      `旧固定名容器创建后无法核实身份（${after.state}）；资源引用已保留：${createdId}`
+    );
+  }
+  return handle;
 }
 
 interface ForeignRun {
@@ -208,11 +238,14 @@ interface ForeignRun {
  * 测试装置自建“同一所有权标签、不同 RUN_ID”的合法容器，用于验证本轮残留判定不会误伤它。
  * 所有权记录在测试装置侧（runId），收尾只由创建者按 ID + 对应标签删除。
  */
-async function ensureSameLabelForeignContainer(): Promise<ForeignRun> {
+async function ensureSameLabelForeignContainer(
+  runner: CommandRunner,
+  register: (handle: ForeignRun) => void
+): Promise<ForeignRun> {
   const suffix = `${process.pid}-${Date.now().toString(36)}`;
   const name = `cga-classes-check-foreign-${suffix}`;
   const runId = `foreign-${suffix}`;
-  const created = nativeCommand('docker', [
+  const created = runner('docker', [
     'run',
     '-d',
     '--name',
@@ -223,21 +256,20 @@ async function ensureSameLabelForeignContainer(): Promise<ForeignRun> {
     'POSTGRES_PASSWORD=postgres',
     'postgres:16-alpine',
   ]);
-  if (created.status !== 0) {
+  const createdId = parseContainerIdFromStdout(created.stdout);
+  if (created.status !== 0 || !createdId) {
     throw new Error(`准备同标签异 RUN 容器失败：${created.stderr || created.stdout || created.error}`);
   }
-  const inspected = inspectOwnedContainer(name, OWNERSHIP_LABEL, nativeCommand);
-  if (inspected.state !== 'verified' || inspected.label !== runId) {
-    const cleanup = removeOwnedContainer(inspected.state === 'verified' ? inspected.id : null, {
-      fallbackName: name,
-      runId,
-      labelKey: OWNERSHIP_LABEL,
-    });
+  // 句柄先登记再核验：后续核验失败也不丢已创建资源
+  const handle: ForeignRun = { id: createdId, name, runId };
+  register(handle);
+  const inspected = inspectOwnedContainer(createdId, OWNERSHIP_LABEL, runner);
+  if (inspected.state !== 'verified' || inspected.id !== createdId || inspected.label !== runId) {
     throw new Error(
-      `同标签异 RUN 容器创建后无法核实身份（${inspected.state}）；清理结果：${cleanup.ok ? 'ok' : cleanup.detail}`,
+      `同标签异 RUN 容器创建后无法核实身份（${inspected.state}）；资源引用已保留：${createdId}`
     );
   }
-  return { id: inspected.id, name, runId };
+  return handle;
 }
 
 function assertSameLabelForeignAlive(foreign: ForeignRun | null): void {
@@ -250,6 +282,94 @@ function assertSameLabelForeignAlive(foreign: ForeignRun | null): void {
       state.state === 'unverifiable' ? `（${state.detail}）` : ''
     }`,
   );
+}
+
+interface ResourceSetup {
+  dockerOk: boolean;
+  legacy: LegacyContainer | null;
+  foreign: ForeignRun | null;
+  setupError: string | null;
+}
+
+/** 初始化自有资源：每取得一个句柄立即保留，后续失败不置空、不排除 */
+async function setupOwnedResources(runner: CommandRunner = nativeCommand): Promise<ResourceSetup> {
+  let legacy: LegacyContainer | null = null;
+  let foreign: ForeignRun | null = null;
+  let setupError: string | null = null;
+  let dockerOk = true;
+  try {
+    legacy = await ensureLegacyContainer(runner, (handle) => {
+      legacy = handle;
+    });
+    foreign = await ensureSameLabelForeignContainer(runner, (handle) => {
+      foreign = handle;
+    });
+  } catch (error) {
+    setupError = error instanceof Error ? error.message : String(error);
+    dockerOk = false;
+  }
+  return { dockerOk, legacy, foreign, setupError };
+}
+
+interface ResourceCleanupOutcome {
+  name: string;
+  resourceId: string;
+  labelKey: string;
+  report: CleanupReport;
+}
+
+/** 收尾清理实际持有的句柄：单步失败不跳过其他资源；created:false 不进入删除 */
+async function cleanupOwnedResources(
+  setup: Pick<ResourceSetup, 'legacy' | 'foreign'>,
+  runner: CommandRunner = nativeCommand
+): Promise<{ outcomes: ResourceCleanupOutcome[]; issues: string[] }> {
+  const outcomes: ResourceCleanupOutcome[] = [];
+  const issues: string[] = [];
+  const steps: CleanupStep[] = [];
+  if (setup.legacy?.created && setup.legacy.runId) {
+    const target = setup.legacy;
+    steps.push({
+      label: 'legacy-container-released-by-id-and-label',
+      run: (): CleanupReport => {
+        const report = removeOwnedContainer(target.id, {
+          fallbackName: LEGACY_NAME,
+          runId: target.runId ?? '',
+          labelKey: LEGACY_LABEL,
+          run: runner,
+        });
+        outcomes.push({
+          name: 'legacy-container-released-by-id-and-label',
+          resourceId: target.id,
+          labelKey: LEGACY_LABEL,
+          report,
+        });
+        return report;
+      },
+    });
+  }
+  if (setup.foreign) {
+    const target = setup.foreign;
+    steps.push({
+      label: 'same-label-foreign-container-released-by-creator',
+      run: (): CleanupReport => {
+        const report = removeOwnedContainer(target.id, {
+          fallbackName: target.name,
+          runId: target.runId,
+          labelKey: OWNERSHIP_LABEL,
+          run: runner,
+        });
+        outcomes.push({
+          name: 'same-label-foreign-container-released-by-creator',
+          resourceId: target.id,
+          labelKey: OWNERSHIP_LABEL,
+          report,
+        });
+        return report;
+      },
+    });
+  }
+  await runCleanupSteps(steps, (label, detail) => issues.push(`${label}: ${detail}`));
+  return { outcomes, issues };
 }
 
 interface Sentinel {
@@ -465,6 +585,76 @@ function compensateRegisteredResources(
   return runCleanupSteps(steps, noteIssue);
 }
 
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 调用方级补偿：主步骤无论断言成功与否，finally 中对已登记资源执行补偿清理。
+ * 原失败与清理失败分别保留并合并报告；finally 的异常不覆盖原失败；存在任一失败即抛错（阻断 PASS）。
+ */
+async function runWithRegisteredCleanup(
+  run: ChildRun,
+  body: () => void | Promise<void>,
+  runner: CommandRunner = nativeCommand,
+): Promise<void> {
+  const cleanupIssues: string[] = [];
+  let bodyError: unknown = null;
+  try {
+    await body();
+  } catch (error) {
+    bodyError = error;
+  } finally {
+    // 补偿不依赖断言成功：进程终止失败、结果断言失败、资源状态断言失败都仍然执行
+    try {
+      await compensateRegisteredResources(
+        run,
+        (label, detail) => cleanupIssues.push(`${label}: ${detail}`),
+        runner
+      );
+    } catch (error) {
+      cleanupIssues.push(`compensation-threw: ${messageOf(error)}`);
+    }
+  }
+  if (bodyError !== null && cleanupIssues.length > 0) {
+    throw new Error(
+      `${messageOf(bodyError)}；补偿清理问题（资源引用保留）：${cleanupIssues.join('；')}`
+    );
+  }
+  if (bodyError !== null) throw bodyError;
+  if (cleanupIssues.length > 0) {
+    throw new Error(`补偿清理失败（资源引用保留）：${cleanupIssues.join('；')}`);
+  }
+}
+
+function makeResourceReport(
+  containerId: string,
+  overrides: Partial<HarnessResourceReport> = {}
+): HarnessResourceReport {
+  return {
+    resource: 'classes-harness',
+    run_id: FAKE_RUN_ID,
+    container_name: 'cga-classes-check-own',
+    container_id: containerId,
+    label_key: OWNERSHIP_LABEL,
+    phase: 'database-start',
+    ...overrides,
+  };
+}
+
+function fakeChildRun(overrides: Partial<ChildRun> = {}): ChildRun {
+  return {
+    status: null,
+    signal: null,
+    stdout: '',
+    stderr: '',
+    timedOut: false,
+    treeStop: null,
+    resources: [],
+    ...overrides,
+  };
+}
+
 function parseReport(output: string, result: 'PASS' | 'FAIL'): CheckReport {
   const line = output
     .split(/\r?\n/)
@@ -493,8 +683,6 @@ function assertForeignContainersAlive(preexisting: string[]): void {
 /* ------------------------------ 主流程 ------------------------------ */
 
 async function main(): Promise<void> {
-  let legacy: LegacyContainer | null = null;
-  let foreign: ForeignRun | null = null;
   const preexisting: string[] = [];
 
   await counterexample('helper-blob-unmodified', () => {
@@ -790,6 +978,236 @@ async function main(): Promise<void> {
     return '正常结束/已清理资源的补偿路径保持成功且无删除动作';
   });
 
+  await counterexample('caller-compensates-when-tree-stop-fails', async () => {
+    const ownId = '6'.repeat(64);
+    const fake = createFakeDocker(
+      [{ id: ownId, name: 'cga-classes-check-own', labels: { [OWNERSHIP_LABEL]: FAKE_RUN_ID }, exists: true }],
+      '127.0.0.1:32768'
+    );
+    const run = fakeChildRun({
+      timedOut: true,
+      treeStop: { ok: false, detail: '终止命令返回失败：simulated；已记录的后代仍存活：PID 9001' },
+      resources: [makeResourceReport(ownId)],
+    });
+    let thrown: unknown = null;
+    try {
+      await runWithRegisteredCleanup(run, () => {
+        assertTimeoutOutcome(run);
+      }, fake.run);
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown, 'treeStop 失败时整体必须失败');
+    assert.match(messageOf(thrown), /未核实|残留|不得/, '保留原失败原因');
+    assert.equal(alive(fake, ownId), false, 'treeStop 失败不得跳过登记资源补偿');
+    return '进程终止失败仍完成登记资源补偿，整体非成功';
+  });
+
+  await counterexample('caller-compensates-when-middle-assertion-fails', async () => {
+    const ownId = '7'.repeat(64);
+    const fake = createFakeDocker(
+      [{ id: ownId, name: 'cga-classes-check-own', labels: { [OWNERSHIP_LABEL]: FAKE_RUN_ID }, exists: true }],
+      '127.0.0.1:32768'
+    );
+    const run = fakeChildRun({ resources: [makeResourceReport(ownId)] });
+    let thrown: unknown = null;
+    try {
+      await runWithRegisteredCleanup(run, () => {
+        assert.fail('中间断言失败注入');
+      }, fake.run);
+    } catch (error) {
+      thrown = error;
+    }
+    assert.match(messageOf(thrown), /中间断言失败注入/, '保留原失败原因');
+    assert.equal(alive(fake, ownId), false, '中间断言抛错不得跳过补偿');
+    return '中间断言抛错后登记资源仍被补偿清理，整体非成功';
+  });
+
+  await counterexample('caller-preserves-both-failures', async () => {
+    const ownId = '8'.repeat(64);
+    const state = { exists: true };
+    const failingRunner: CommandRunner = (file, args) => {
+      if (file !== 'docker') {
+        return { status: 127, stdout: '', stderr: 'unsupported', error: 'unsupported' };
+      }
+      const [sub] = args;
+      if (sub === 'inspect') {
+        if (!state.exists) return { status: 1, stdout: '', stderr: `Error: No such object: ${ownId}` };
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            Id: ownId,
+            Config: { Labels: { [OWNERSHIP_LABEL]: FAKE_RUN_ID } },
+          }),
+          stderr: '',
+        };
+      }
+      if (sub === 'rm') {
+        return { status: 1, stdout: '', stderr: 'simulated removal denied' };
+      }
+      return { status: 1, stdout: '', stderr: `unsupported subcommand: ${sub}` };
+    };
+    const run = fakeChildRun({
+      timedOut: true,
+      treeStop: { ok: false, detail: '终止命令返回失败：tree' },
+      resources: [makeResourceReport(ownId)],
+    });
+    let thrown: unknown = null;
+    try {
+      await runWithRegisteredCleanup(run, () => {
+        assertTimeoutOutcome(run);
+      }, failingRunner);
+    } catch (error) {
+      thrown = error;
+    }
+    const message = messageOf(thrown);
+    assert.match(message, /未核实|残留|不得/, '保留原失败原因');
+    assert.match(message, /removal denied/, '保留补偿失败原因');
+    assert.ok(message.includes(ownId), '保留资源引用');
+    assert.equal(state.exists, true, '清理失败资源保持不动');
+    return `原失败与补偿失败并存且资源引用保留：${message.slice(0, 100)}…`;
+  });
+
+  await counterexample('caller-cleans-remaining-resources-when-one-compensation-fails', async () => {
+    const failedId = '9'.repeat(64);
+    const cleanedId = 'a'.repeat(64);
+    const exists = new Set([failedId, cleanedId]);
+    const runner: CommandRunner = (file, args) => {
+      if (file !== 'docker') {
+        return { status: 127, stdout: '', stderr: 'unsupported', error: 'unsupported' };
+      }
+      const [sub, ...rest] = args;
+      if (sub === 'inspect') {
+        const target = rest[rest.length - 1] ?? '';
+        if (!exists.has(target)) {
+          return { status: 1, stdout: '', stderr: `Error: No such object: ${target}` };
+        }
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            Id: target,
+            Config: { Labels: { [OWNERSHIP_LABEL]: FAKE_RUN_ID } },
+          }),
+          stderr: '',
+        };
+      }
+      if (sub === 'rm') {
+        const target = rest.find((arg) => arg !== '-f') ?? '';
+        if (target === failedId) {
+          return { status: 1, stdout: '', stderr: 'simulated removal denied' };
+        }
+        exists.delete(target);
+        return { status: 0, stdout: target, stderr: '' };
+      }
+      return { status: 1, stdout: '', stderr: `unsupported subcommand: ${sub}` };
+    };
+    const run = fakeChildRun({
+      resources: [
+        makeResourceReport(failedId),
+        makeResourceReport(cleanedId, { container_name: 'cga-classes-check-own-2' }),
+      ],
+    });
+    let thrown: unknown = null;
+    try {
+      await runWithRegisteredCleanup(run, () => undefined, runner);
+    } catch (error) {
+      thrown = error;
+    }
+    assert.match(messageOf(thrown), /removal denied/, '失败资源的问题必须保留');
+    assert.ok(messageOf(thrown).includes(failedId), '失败资源引用保留');
+    assert.equal(exists.has(failedId), true, '清理失败资源保持不动');
+    assert.equal(exists.has(cleanedId), false, '其余自有资源仍被清理');
+    return '单个资源清理失败不跳过其他自有资源，整体非成功';
+  });
+
+  await counterexample('caller-compensation-idempotent-normal-path', async () => {
+    const absentId = 'b'.repeat(64);
+    const fake = createFakeDocker([], '127.0.0.1:32768');
+    const run = fakeChildRun({ resources: [makeResourceReport(absentId)] });
+    await runWithRegisteredCleanup(run, () => undefined, fake.run);
+    return '正常路径下已清理资源的补偿幂等成功';
+  });
+
+  await counterexample('partial-init-legacy-created-foreign-fails', async () => {
+    const fake = createFakeDocker([], '127.0.0.1:32768', {
+      failRunNamePrefix: 'cga-classes-check-foreign-',
+    });
+    const setup = await setupOwnedResources(fake.run);
+    assert.equal(setup.dockerOk, false, '部分初始化失败必须标记未完成');
+    assert.ok(setup.setupError, '保留初始化失败原因');
+    assert.ok(setup.legacy?.created === true, '自建 legacy 句柄必须保留');
+    assert.equal(setup.foreign, null, 'foreign 未创建不得产生句柄');
+    const { outcomes } = await cleanupOwnedResources(setup, fake.run);
+    assert.ok(
+      outcomes.some(
+        (entry) => entry.name === 'legacy-container-released-by-id-and-label' && entry.report.ok
+      ),
+      '自建 legacy 必须进入清理并成功'
+    );
+    assert.equal(alive(fake, setup.legacy.id), false, '自建 legacy 必须被清理');
+    return 'legacy 创建成功、foreign 创建失败：legacy 句柄保留并清理';
+  });
+
+  await counterexample('partial-init-existing-legacy-foreign-fails', async () => {
+    const existingId = 'c'.repeat(64);
+    const fake = createFakeDocker(
+      [{ id: existingId, name: LEGACY_NAME, labels: { [LEGACY_LABEL]: 'preexisting-run' }, exists: true }],
+      '127.0.0.1:32768',
+      { failRunNamePrefix: 'cga-classes-check-foreign-' }
+    );
+    const setup = await setupOwnedResources(fake.run);
+    assert.equal(setup.dockerOk, false, '部分初始化失败必须标记未完成');
+    assert.ok(setup.legacy?.created === false, '既有 legacy 必须保持 created:false');
+    const { outcomes } = await cleanupOwnedResources(setup, fake.run);
+    assert.equal(outcomes.length, 0, 'created:false 不得进入删除步骤');
+    assert.equal(alive(fake, existingId), true, '既有 legacy 保持不变');
+    return '既有 legacy（created:false）+ foreign 创建失败：既有资源保留';
+  });
+
+  await counterexample('partial-init-both-created-middle-fails', async () => {
+    const fake = createFakeDocker([], '127.0.0.1:32768');
+    const setup = await setupOwnedResources(fake.run);
+    assert.equal(setup.dockerOk, true, '两资源初始化成功');
+    assert.ok(setup.legacy?.created === true && setup.foreign, '两个句柄均已取得');
+    let middleError: unknown = null;
+    try {
+      throw new Error('middle step failure');
+    } catch (error) {
+      middleError = error;
+    }
+    assert.ok(middleError, '中间步骤失败已模拟');
+    const { outcomes } = await cleanupOwnedResources(setup, fake.run);
+    assert.equal(outcomes.length, 2, '两个句柄都必须进入清理');
+    assert.ok(outcomes.every((entry) => entry.report.ok), '两个资源清理均成功');
+    assert.equal(alive(fake, setup.legacy.id), false, 'legacy 已清理');
+    assert.equal(alive(fake, setup.foreign.id), false, 'foreign 已清理');
+    return '两资源均创建后中间步骤失败：两者都进入清理';
+  });
+
+  await counterexample('partial-init-one-cleanup-fails-other-continues', async () => {
+    const fake = createFakeDocker([], '127.0.0.1:32768', { failRmNameEquals: LEGACY_NAME });
+    const setup = await setupOwnedResources(fake.run);
+    assert.equal(setup.dockerOk, true, '两资源初始化成功');
+    assert.ok(setup.legacy?.created === true && setup.foreign, '两个句柄均已取得');
+    const { outcomes, issues } = await cleanupOwnedResources(setup, fake.run);
+    const legacyOutcome = outcomes.find(
+      (entry) => entry.name === 'legacy-container-released-by-id-and-label'
+    );
+    const foreignOutcome = outcomes.find(
+      (entry) => entry.name === 'same-label-foreign-container-released-by-creator'
+    );
+    assert.ok(legacyOutcome && !legacyOutcome.report.ok, 'legacy 清理失败必须记录');
+    assert.ok(legacyOutcome.report.detail.includes(setup.legacy.id), '失败必须保留资源引用');
+    assert.ok(foreignOutcome?.report.ok, 'foreign 仍必须被清理');
+    assert.equal(alive(fake, setup.legacy.id), true, '清理失败的 legacy 保持不动');
+    assert.equal(alive(fake, setup.foreign.id), false, 'foreign 已清理');
+    assert.ok(
+      issues.some((issue) => issue.includes('legacy-container-released-by-id-and-label')),
+      '失败问题被记录'
+    );
+    return '一个清理失败不跳过另一个：整体非成功且保留引用';
+  });
+
   let dockerOk = false;
   await counterexample('docker-daemon-available', () => {
     const probe = nativeCommand('docker', ['version']);
@@ -798,19 +1216,73 @@ async function main(): Promise<void> {
     return 'docker daemon 可用，进入真实反例';
   });
 
+  // 真实资源的部分初始化失败：legacy 创建成功、foreign 创建失败，legacy 句柄仍进入清理
   if (dockerOk) {
-    try {
-      preexisting.push(...listContainerIds());
-      legacy = await ensureLegacyContainer();
-      foreign = await ensureSameLabelForeignContainer();
-    } catch (error) {
-      record('real-counterexample-setup', false, error instanceof Error ? error.message : String(error));
+    await counterexample('real-partial-init-legacy-created-foreign-fails', async () => {
+      const existing = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, nativeCommand);
+      if (existing.state === 'unverifiable') {
+        assert.fail(`无法核实旧固定名容器：${existing.detail}`);
+      }
+      const failingForeignRunner: CommandRunner = (file, args) => {
+        if (file === 'docker' && args[0] === 'run') {
+          const nameAt = args.indexOf('--name');
+          const name = nameAt >= 0 ? args[nameAt + 1] ?? '' : '';
+          if (name.startsWith('cga-classes-check-foreign-')) {
+            return { status: 1, stdout: '', stderr: 'simulated foreign create failure' };
+          }
+        }
+        return nativeCommand(file, args);
+      };
+      const setup = await setupOwnedResources(failingForeignRunner);
+      assert.equal(setup.dockerOk, false, '部分初始化失败必须标记 setup 未完成');
+      assert.equal(setup.foreign, null, 'foreign 未创建不得产生句柄');
+      assert.ok(setup.setupError, '必须保留初始化失败原因');
+      if (existing.state === 'absent') {
+        assert.ok(setup.legacy?.created === true, '自建 legacy 句柄必须保留（created:true）');
+      } else {
+        assert.ok(setup.legacy?.created === false, '既有 legacy 必须保持 created:false');
+      }
+      const { outcomes } = await cleanupOwnedResources(setup);
+      if (setup.legacy?.created) {
+        const legacyOutcome = outcomes.find(
+          (entry) => entry.name === 'legacy-container-released-by-id-and-label'
+        );
+        assert.ok(legacyOutcome?.report.ok, `真实 legacy 必须被清理：${legacyOutcome?.report.detail}`);
+        assert.equal(
+          inspectOwnedContainer(setup.legacy.id, LEGACY_LABEL, nativeCommand).state,
+          'absent',
+          '自建 legacy 清理后必须不存在'
+        );
+        return `部分初始化失败（foreign 创建失败）后，自建 legacy ${setup.legacy.id.slice(0, 12)}… 已按 ID+标签清理`;
+      }
+      assert.equal(outcomes.length, 0, '既有 legacy（created:false）不得进入删除步骤');
+      assert.equal(
+        inspectOwnedContainer(setup.legacy!.id, LEGACY_LABEL, nativeCommand).state,
+        'verified',
+        '既有 legacy 必须保持'
+      );
+      return '部分初始化失败（foreign 创建失败）后，既有 legacy（created:false）保持不变';
+    });
+  }
+
+  let resourceSetup: ResourceSetup = {
+    dockerOk: false,
+    legacy: null,
+    foreign: null,
+    setupError: null,
+  };
+  if (dockerOk) {
+    preexisting.push(...listContainerIds());
+    resourceSetup = await setupOwnedResources();
+    if (!resourceSetup.dockerOk) {
+      record('real-counterexample-setup', false, resourceSetup.setupError ?? '自有资源初始化失败');
       dockerOk = false;
     }
   }
 
-  const legacyTarget: LegacyContainer | null = dockerOk ? legacy : null;
-  const foreignTarget: ForeignRun | null = dockerOk ? foreign : null;
+  // 清理依据是实际持有的句柄与所有权，不受 dockerOk / 后续步骤是否成功影响
+  const legacyTarget: LegacyContainer | null = resourceSetup.legacy;
+  const foreignTarget: ForeignRun | null = resourceSetup.foreign;
 
   try {
     if (legacyTarget) {
@@ -823,66 +1295,60 @@ async function main(): Promise<void> {
           await sentinel.close();
         }
         const output = `${run.stdout}\n${run.stderr}`;
-        assert.notEqual(run.status, 0, '初始化失败必须以非零退出码结束');
-        assert.equal(run.timedOut, false, '初始化失败不应触发超时路径');
-        assert.ok(!run.stdout.includes('"result":"PASS"'), '初始化失败不得报告 PASS');
-        const report = parseReport(run.stderr, 'FAIL');
-        assert.equal(report.phase, 'database-init', '失败报告缺少明确阶段');
-        assert.equal(report.passed, 3);
-        assert.equal(report.total, 15);
-        assert.ok(
-          report.container !== null && /^[0-9a-f]{64}$/i.test(report.container),
-          '失败报告须携带本轮已核验容器 ID'
-        );
-        assert.deepEqual(report.cleanupIssues, [], '本轮清理必须成功');
-        assert.equal(sentinel.connections(), 0, '外部 URL 哨兵被连接，说明仍在使用外部库');
-        // 残留判定只针对本轮登记资源（不再检查整个标签命名空间）
-        assert.equal(run.resources.length, 1, '必须收到本轮最小结构化资源报告');
-        assert.equal(run.resources[0].container_id, report.container, '资源报告与失败报告容器一致');
-        assertRegisteredResourceAbsent(run.resources[0]);
-        const compensationIssues: string[] = [];
-        await compensateRegisteredResources(run, (label, detail) =>
-          compensationIssues.push(`${label}: ${detail}`)
-        );
-        assert.deepEqual(compensationIssues, [], '父检查补偿清理不得产生问题');
-        assertSameLabelForeignAlive(foreignTarget);
-        const legacyNow = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, nativeCommand);
-        assert.ok(legacyNow.state === 'verified', `旧固定名容器状态=${legacyNow.state}`);
-        assert.equal(legacyNow.id, legacyTarget.id, '旧固定名容器被删除或重建');
-        assertNoSecretLeak(output);
-        return `phase=${report.phase} passed=${report.passed} 登记容器已清理 哨兵连接=0 旧固定名与同标签异RUN容器保留`;
+        await runWithRegisteredCleanup(run, () => {
+          assert.notEqual(run.status, 0, '初始化失败必须以非零退出码结束');
+          assert.equal(run.timedOut, false, '初始化失败不应触发超时路径');
+          assert.ok(!run.stdout.includes('"result":"PASS"'), '初始化失败不得报告 PASS');
+          const report = parseReport(run.stderr, 'FAIL');
+          assert.equal(report.phase, 'database-init', '失败报告缺少明确阶段');
+          assert.equal(report.passed, 3);
+          assert.equal(report.total, 15);
+          assert.ok(
+            report.container !== null && /^[0-9a-f]{64}$/i.test(report.container),
+            '失败报告须携带本轮已核验容器 ID'
+          );
+          assert.deepEqual(report.cleanupIssues, [], '本轮清理必须成功');
+          assert.equal(sentinel.connections(), 0, '外部 URL 哨兵被连接，说明仍在使用外部库');
+          // 残留判定只针对本轮登记资源（不再检查整个标签命名空间）
+          assert.equal(run.resources.length, 1, '必须收到本轮最小结构化资源报告');
+          assert.equal(run.resources[0].container_id, report.container, '资源报告与失败报告容器一致');
+          assertRegisteredResourceAbsent(run.resources[0]);
+          assertSameLabelForeignAlive(foreignTarget);
+          const legacyNow = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, nativeCommand);
+          assert.ok(legacyNow.state === 'verified', `旧固定名容器状态=${legacyNow.state}`);
+          assert.equal(legacyNow.id, legacyTarget.id, '旧固定名容器被删除或重建');
+          assertNoSecretLeak(output);
+        });
+        return `phase=database-init passed=3 登记容器已清理 哨兵连接=0 旧固定名与同标签异RUN容器保留`;
       });
 
       await counterexample('real-assert-failure-cleans-up-and-keeps-others', async () => {
         const run = await runCheckChild({ [FAULT_ENV]: 'assert' });
         const output = `${run.stdout}\n${run.stderr}`;
-        assert.notEqual(run.status, 0, '断言失败必须以非零退出码结束');
-        assert.equal(run.timedOut, false, '断言失败不应触发超时路径');
-        assert.ok(!run.stdout.includes('"result":"PASS"'), '断言失败不得报告 PASS');
-        const report = parseReport(run.stderr, 'FAIL');
-        assert.equal(report.phase, 'checks', '失败报告缺少明确阶段');
-        assert.equal(report.passed, 4);
-        assert.equal(report.total, 15);
-        assert.ok(
-          report.container !== null && /^[0-9a-f]{64}$/i.test(report.container),
-          '失败报告须携带本轮已核验容器 ID'
-        );
-        assert.deepEqual(report.cleanupIssues, [], '本轮清理必须成功');
-        assert.equal(run.resources.length, 1, '必须收到本轮最小结构化资源报告');
-        assert.equal(run.resources[0].container_id, report.container, '资源报告与失败报告容器一致');
-        assertRegisteredResourceAbsent(run.resources[0]);
-        const compensationIssues: string[] = [];
-        await compensateRegisteredResources(run, (label, detail) =>
-          compensationIssues.push(`${label}: ${detail}`)
-        );
-        assert.deepEqual(compensationIssues, [], '父检查补偿清理不得产生问题');
-        assertSameLabelForeignAlive(foreignTarget);
-        const legacyNow = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, nativeCommand);
-        assert.ok(legacyNow.state === 'verified', `旧固定名容器状态=${legacyNow.state}`);
-        assert.equal(legacyNow.id, legacyTarget.id, '旧固定名容器被删除或重建');
-        assertForeignContainersAlive(preexisting);
-        assertNoSecretLeak(output);
-        return `phase=${report.phase} passed=${report.passed} 登记容器已清理 他人容器 ${preexisting.length} 个与同标签异RUN容器全部保留`;
+        await runWithRegisteredCleanup(run, () => {
+          assert.notEqual(run.status, 0, '断言失败必须以非零退出码结束');
+          assert.equal(run.timedOut, false, '断言失败不应触发超时路径');
+          assert.ok(!run.stdout.includes('"result":"PASS"'), '断言失败不得报告 PASS');
+          const report = parseReport(run.stderr, 'FAIL');
+          assert.equal(report.phase, 'checks', '失败报告缺少明确阶段');
+          assert.equal(report.passed, 4);
+          assert.equal(report.total, 15);
+          assert.ok(
+            report.container !== null && /^[0-9a-f]{64}$/i.test(report.container),
+            '失败报告须携带本轮已核验容器 ID'
+          );
+          assert.deepEqual(report.cleanupIssues, [], '本轮清理必须成功');
+          assert.equal(run.resources.length, 1, '必须收到本轮最小结构化资源报告');
+          assert.equal(run.resources[0].container_id, report.container, '资源报告与失败报告容器一致');
+          assertRegisteredResourceAbsent(run.resources[0]);
+          assertSameLabelForeignAlive(foreignTarget);
+          const legacyNow = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, nativeCommand);
+          assert.ok(legacyNow.state === 'verified', `旧固定名容器状态=${legacyNow.state}`);
+          assert.equal(legacyNow.id, legacyTarget.id, '旧固定名容器被删除或重建');
+          assertForeignContainersAlive(preexisting);
+          assertNoSecretLeak(output);
+        });
+        return `phase=checks passed=4 登记容器已清理 他人容器 ${preexisting.length} 个与同标签异RUN容器全部保留`;
       });
 
       await counterexample('timeout-hang-after-container-compensates', async () => {
@@ -890,67 +1356,55 @@ async function main(): Promise<void> {
           { [FAULT_ENV]: 'hang-after-container' },
           { timeoutMs: 45_000 }
         );
-        assert.equal(run.timedOut, true, '容器登记后挂起必须在短超时内触发终止');
-        assert.ok(run.treeStop, '超时必须执行进程树终止与核验');
-        assert.equal(run.treeStop.ok, true, `进程树终止必须核实退出：${run.treeStop.detail}`);
-        assert.match(
-          run.treeStop.detail,
-          /已核实|已退出/,
-          '必须区分“已发送终止请求”与“已核实进程树退出”'
-        );
-        assert.ok(!run.stdout.includes('"result":"PASS"'), '挂起子任务不得报告 PASS');
-        assert.equal(run.resources.length, 1, '必须收到最小结构化资源报告');
-        const resource = run.resources[0];
-        assert.match(resource.container_id, /^[0-9a-f]{64}$/i, '资源报告必须携带已核验容器 ID');
-        assert.equal(resource.phase, 'database-start');
-        assert.equal(resource.label_key, OWNERSHIP_LABEL);
-        assert.ok(resource.run_id.length > 0, '资源报告必须携带 RUN_ID');
-        assert.ok(
-          resource.container_name.startsWith('cga-classes-check-'),
-          `资源报告容器名异常：${resource.container_name}`
-        );
-        // 父进程补偿清理：只按已核实 ID + 所有权，不按端口/名称强杀
-        const compensationIssues: string[] = [];
-        await compensateRegisteredResources(run, (label, detail) =>
-          compensationIssues.push(`${label}: ${detail}`)
-        );
-        assert.deepEqual(compensationIssues, [], '超时后补偿清理必须成功');
-        assertRegisteredResourceAbsent(resource);
+        const captured: { resource: HarnessResourceReport | null } = { resource: null };
+        await runWithRegisteredCleanup(run, () => {
+          assert.equal(run.timedOut, true, '容器登记后挂起必须在短超时内触发终止');
+          assert.ok(run.treeStop, '超时必须执行进程树终止与核验');
+          assert.equal(run.treeStop.ok, true, `进程树终止必须核实退出：${run.treeStop.detail}`);
+          assert.match(
+            run.treeStop.detail,
+            /已核实|已退出/,
+            '必须区分“已发送终止请求”与“已核实进程树退出”'
+          );
+          assert.ok(!run.stdout.includes('"result":"PASS"'), '挂起子任务不得报告 PASS');
+          assert.equal(run.resources.length, 1, '必须收到最小结构化资源报告');
+          const resource = run.resources[0];
+          assert.match(resource.container_id, /^[0-9a-f]{64}$/i, '资源报告必须携带已核验容器 ID');
+          assert.equal(resource.phase, 'database-start');
+          assert.equal(resource.label_key, OWNERSHIP_LABEL);
+          assert.ok(resource.run_id.length > 0, '资源报告必须携带 RUN_ID');
+          assert.ok(
+            resource.container_name.startsWith('cga-classes-check-'),
+            `资源报告容器名异常：${resource.container_name}`
+          );
+          captured.resource = resource;
+        });
+        assert.ok(captured.resource, '资源报告必须存在');
+        assertRegisteredResourceAbsent(captured.resource);
         assertSameLabelForeignAlive(foreignTarget);
         const legacyNow = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, nativeCommand);
         assert.equal(legacyNow.state, 'verified', '旧固定名容器保持');
         assertNoSecretLeak(`${run.stdout}\n${run.stderr}`);
-        return `短超时触发；${run.treeStop.detail}；登记容器 ${resource.container_id.slice(0, 12)}… 已补偿清理`;
+        return `短超时触发；${run.treeStop?.detail ?? ''}；登记容器 ${captured.resource.container_id.slice(0, 12)}… 已补偿清理`;
       });
     }
   } finally {
-    if (legacyTarget?.created && legacyTarget.runId) {
-      const target: LegacyContainer = legacyTarget;
-      await counterexample('legacy-container-released-by-id-and-label', () => {
-        const removal = removeOwnedContainer(target.id, {
-          fallbackName: LEGACY_NAME,
-          runId: target.runId ?? '',
-          labelKey: LEGACY_LABEL,
-        });
-        assert.equal(removal.ok, true, removal.detail);
-        const after = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, nativeCommand);
-        assert.equal(after.state, 'absent', '本轮创建的旧名容器收尾必须删除');
-        return `已按 ID+标签回收：${removal.detail}`;
+    const { outcomes, issues } = await cleanupOwnedResources({
+      legacy: legacyTarget,
+      foreign: foreignTarget,
+    });
+    for (const outcome of outcomes) {
+      await counterexample(outcome.name, () => {
+        assert.equal(outcome.report.ok, true, outcome.report.detail);
+        const after = inspectOwnedContainer(outcome.resourceId, outcome.labelKey, nativeCommand);
+        assert.equal(after.state, 'absent', '收尾清理后资源必须不存在');
+        return `已按 ID+标签回收：${outcome.report.detail}`;
       });
     }
-    if (foreignTarget) {
-      const target: ForeignRun = foreignTarget;
-      await counterexample('same-label-foreign-container-released-by-creator', () => {
-        const removal = removeOwnedContainer(target.id, {
-          fallbackName: target.name,
-          runId: target.runId,
-          labelKey: OWNERSHIP_LABEL,
-        });
-        assert.equal(removal.ok, true, removal.detail);
-        const after = inspectOwnedContainer(target.id, OWNERSHIP_LABEL, nativeCommand);
-        assert.equal(after.state, 'absent', '测试装置创建的异 RUN 容器收尾必须删除');
-        return `已按 ID + 对应标签回收：${removal.detail}`;
-      });
+    const outcomeNames = new Set(outcomes.map((entry) => entry.name));
+    for (const issue of issues) {
+      const label = issue.split(':')[0] ?? 'cleanup';
+      if (!outcomeNames.has(label)) record('owned-resource-cleanup-issue', false, issue);
     }
   }
 
