@@ -98,6 +98,7 @@ async function runWithMocks(): Promise<number> {
     profileCalls: 0,
     profileResult: { status: "updated", growthProfile: { summary: "小结" } } as Record<string, unknown>,
     guideResponse: { revision: 1, links: [{ link_id: "link-1" }] },
+    guideResponseError: null as Error | null,
     mutationResult: { observation: makeObservation({ status: "confirmed" }), revision: 1, links: [] },
     applyCalls: 0,
     applyError: null as Error | null,
@@ -121,7 +122,10 @@ async function runWithMocks(): Promise<number> {
       getChild: async () => makeChild(),
       listObservations: async () => [],
       updateObservationAgentContext: async () => state.observation,
-      buildGuideResponseLinks: async () => state.guideResponse,
+      buildGuideResponseLinks: async () => {
+        if (state.guideResponseError) throw state.guideResponseError;
+        return state.guideResponse;
+      },
       applyGuideEvidenceMutation: async (...args: unknown[]) => {
         state.applyCalls += 1;
         state.confirmArgs = args;
@@ -302,6 +306,43 @@ async function runWithMocks(): Promise<number> {
   ok(profileFailBody.profileUpdateStatus === "failed", "如实返回小结失败");
   ok((profileFailBody.guideEvidence as { status: string })?.status === "applied", "关联仍然生效");
   state.profileResult = { status: "updated", growthProfile: { summary: "小结" } };
+
+  /* ---- 4b) 归档与关联成功 → 响应详情补查失败仍明确表达已保存 ---- */
+  state.observation = makeObservation();
+  state.confirmCalls = 0;
+  state.profileCalls = 0;
+  state.guideResponseError = new Error("详情补查失败");
+  const detailFailResponse = await confirmRoute.POST(
+    request("POST", {
+      content: { ...DRAFT },
+      guide_decisions: {
+        expected_guide_revision: 0,
+        decisions: [
+          {
+            item_id: "item.moe.language.listening_speaking.1.3-4.1",
+            support: "single_event",
+            basis: [{ observation_id: "obs-1", quote: "请你先玩。", quote_source: "raw_text" }],
+          },
+        ],
+      },
+    }, COOKIE),
+    params("obs-1"),
+  );
+  const detailFailBody = (await detailFailResponse.json()) as Record<string, unknown>;
+  assert.equal(detailFailResponse.status, 200, "详情补查失败不得把已提交成功改报 500");
+  ok(state.confirmCalls === 1, "归档与关联仍只提交一次");
+  const detailFailGuide = detailFailBody.guideEvidence as {
+    status: string;
+    links?: unknown[];
+    detail_unavailable?: boolean;
+    message?: string;
+  };
+  ok(detailFailGuide?.status === "applied", "仍明确表达关联已保存");
+  ok(detailFailGuide?.detail_unavailable === true, "显式标识详情暂不可读");
+  ok(detailFailGuide?.links === undefined, "不得用空 links 冒充详情读取成功");
+  ok(Boolean(detailFailGuide?.message?.includes("不要重复提交")), "提示不诱导重复提交");
+  ok(detailFailBody.profileUpdateStatus === "updated", "详情补查失败不影响成长小结执行");
+  state.guideResponseError = null;
 
   /* ---- 5) 未携带 guide_decisions 时行为兼容 ---- */
   state.observation = makeObservation();

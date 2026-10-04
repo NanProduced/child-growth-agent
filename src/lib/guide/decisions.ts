@@ -73,6 +73,32 @@ export class GuideEvidenceCatalogError extends Error {
   }
 }
 
+/** 确认时依据无法核对或版本不一致（含沿用旧快照时来源版本漂移） */
+export class GuideEvidenceBasisExpiredError extends Error {
+  code = "basis_expired" as const;
+  link_id?: string;
+  item_id?: string;
+  constructor(message: string, refs: { link_id?: string; item_id?: string } = {}) {
+    super(message);
+    this.name = "GuideEvidenceBasisExpiredError";
+    this.link_id = refs.link_id;
+    this.item_id = refs.item_id;
+  }
+}
+
+/**
+ * 宿主观察守门：独立 confirm / reject / withdraw 只能作用于已归档观察。
+ * 与来源核对分离——依据来源合法也不能绕过宿主状态（suggest 仍可产生待核对建议）。
+ */
+export function hostObservationConflictError(
+  status: ObservationStatus,
+): GuideEvidenceConflictError | null {
+  if (status === "confirmed") return null;
+  return new GuideEvidenceConflictError(
+    "该观察尚未确认归档，不能独立执行关联确认/拒绝/撤回；请先归档观察，或在归档时一并提交关联决定。",
+  );
+}
+
 /** 依据来源（服务端读取；当前观察在确认事务中以“即将归档”的版本覆盖） */
 export interface DecisionSourceObservation {
   id: string;
@@ -90,6 +116,11 @@ export interface ApplyDecisionsContext {
   itemById: (itemId: string) => GuidePerformanceItem | null;
   sourceById: Map<string, DecisionSourceObservation>;
   now: string;
+  /**
+   * 本次同事务归档的宿主观察 id；该来源在本事务中首次获得 confirmed_at，
+   * 沿用其空版本快照属于合法首次归档，而不是版本漂移。
+   */
+  confirmingObservationId?: string | null;
 }
 
 export interface ApplyDecisionsResult {
@@ -135,6 +166,7 @@ function normalizedNote(value: string | undefined | null): string | null {
 function buildBasis(
   input: GuideEvidenceBasisInputParsed,
   ctx: ApplyDecisionsContext,
+  savedBasis: GuideEvidenceBasis[] | null,
 ): GuideEvidenceBasis {
   const source = ctx.sourceById.get(input.observation_id);
   if (!source) {
@@ -150,6 +182,12 @@ function buildBasis(
   }
   if (!parseIsoDateStrict(source.observed_at)) {
     throw new GuideEvidenceInvalidError("依据来源的观察日期不可靠，不能作为证据。");
+  }
+  if (!source.confirmed_at || !Number.isFinite(Date.parse(source.confirmed_at))) {
+    throw new GuideEvidenceBasisExpiredError(
+      "依据来源缺少可核对的确认时间（版本），不能写入正式依据。",
+      { item_id: input.observation_id },
+    );
   }
   const quoteField = input.quote_field ?? null;
   if (input.quote_source === "raw_text") {
@@ -178,7 +216,7 @@ function buildBasis(
       );
     }
   }
-  return {
+  const fresh: GuideEvidenceBasis = {
     observation_id: source.id,
     observed_at: source.observed_at,
     quote: input.quote.trim(),
@@ -187,6 +225,72 @@ function buildBasis(
     class_context: source.class_context_snapshot,
     source_confirmed_at: source.confirmed_at,
   };
+
+  const saved = findSavedBasis(savedBasis, input, fresh.quote);
+  const savedSource = saved ?? findSavedSourceBasis(savedBasis, input.observation_id);
+  if (!savedSource) return fresh;
+  // 日期一致性独立核对：任何沿用（含首次归档豁免版本时）都不得跳过日期
+  if (savedSource.observed_at !== fresh.observed_at) {
+    throw new GuideEvidenceBasisExpiredError(
+      "沿用的依据来源观察日期已变化，旧快照不能静默刷新；请重新核对来源或明确改用新依据。",
+      { item_id: savedSource.observation_id },
+    );
+  }
+  // 版本核对仍按来源进行：首次归档豁免只处理“空版本 → 首次 confirmed_at”
+  const firstArchive =
+    ctx.confirmingObservationId === savedSource.observation_id &&
+    savedSource.source_confirmed_at === null;
+  if (!firstArchive) {
+    const versionConsistent =
+      savedSource.source_confirmed_at !== null &&
+      sameTimestamp(savedSource.source_confirmed_at, fresh.source_confirmed_at);
+    if (!versionConsistent) {
+      throw new GuideEvidenceBasisExpiredError(
+        "沿用的依据来源在建议后已更新（版本变化），旧快照不能静默刷新；请重新核对来源或明确改用新依据。",
+        { item_id: savedSource.observation_id },
+      );
+    }
+  }
+  // 仅完整定位（observation_id + quote + quote_source + quote_field）一致时复用保存快照；
+  // 教师明确更换字段或片段属于修改，必须写入新定位，不得吞掉或误用第一个旧依据
+  if (!saved || firstArchive) return fresh;
+  return {
+    observation_id: saved.observation_id,
+    observed_at: saved.observed_at,
+    quote: saved.quote,
+    quote_source: saved.quote_source,
+    quote_field: saved.quote_field,
+    class_context: saved.class_context,
+    source_confirmed_at: saved.source_confirmed_at,
+  };
+}
+
+/** 完整定位匹配：同一来源、同一片段、同一出处、同一字段 */
+function findSavedBasis(
+  savedBasis: GuideEvidenceBasis[] | null,
+  input: GuideEvidenceBasisInputParsed,
+  quote: string,
+): GuideEvidenceBasis | null {
+  if (!savedBasis) return null;
+  const quoteField = input.quote_source === "raw_text" ? null : (input.quote_field ?? null);
+  return (
+    savedBasis.find(
+      (entry) =>
+        entry.observation_id === input.observation_id &&
+        entry.quote === quote &&
+        entry.quote_source === input.quote_source &&
+        (entry.quote_field ?? null) === quoteField,
+    ) ?? null
+  );
+}
+
+/** 同一来源的任一条旧依据：仅用于版本/日期守门，不用于复用快照 */
+function findSavedSourceBasis(
+  savedBasis: GuideEvidenceBasis[] | null,
+  observationId: string,
+): GuideEvidenceBasis | null {
+  if (!savedBasis) return null;
+  return savedBasis.find((entry) => entry.observation_id === observationId) ?? null;
 }
 
 function sustainedConditionMet(
@@ -211,8 +315,11 @@ function prepareConfirm(
   targetIndex: number | null,
   item: GuidePerformanceItem,
   ctx: ApplyDecisionsContext,
+  savedLink: RuntimeLink | null,
 ): PreparedConfirm {
-  const basis = decision.basis.map((input) => buildBasis(input, ctx));
+  const basis = decision.basis.map((input) =>
+    buildBasis(input, ctx, savedLink ? savedLink.basis : null),
+  );
   const support = decision.support;
   const sustainedNote = decision.sustained_note ?? null;
   if (support === "sustained" && !sustainedConditionMet(support, basis, sustainedNote)) {
@@ -271,6 +378,12 @@ function prepareDecision(
       );
     }
     const target = links[targetIndex];
+    if (target.catalog_version !== GUIDE_CATALOG_VERSION) {
+      throw new GuideEvidenceCatalogError(
+        "该关联来自旧目录版本，不能因条目仍存在于新目录就默认兼容；请重新手动关联当前目录条目。",
+        target.item_id,
+      );
+    }
     const item = ctx.itemById(target.item_id);
     if (!item) {
       throw new GuideEvidenceCatalogError(
@@ -278,7 +391,7 @@ function prepareDecision(
         target.item_id,
       );
     }
-    return prepareConfirm(decision, targetIndex, item, ctx);
+    return prepareConfirm(decision, targetIndex, item, ctx, target);
   }
 
   const item = ctx.itemById(decision.item_id);
@@ -288,7 +401,7 @@ function prepareDecision(
       decision.item_id,
     );
   }
-  return prepareConfirm(decision, null, item, ctx);
+  return prepareConfirm(decision, null, item, ctx, null);
 }
 
 interface BasisIdentity {

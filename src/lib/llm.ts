@@ -171,7 +171,8 @@ const STEPFUN_RESPONSE_FORMATS: Record<LlmResponseType, object> = {
       },
     },
   },
-  // 指南证据关联建议：只输出候选条目、理由与可核对引用；quote_field 用 "" 表示 raw_text（null）
+  // 指南证据关联建议：只输出候选条目、理由与可核对引用；quote_field 用 "" 表示 raw_text（null）；
+  // quote_source_id 必须来自服务端提供的观察 id，避免同句多来源时绑定错误
   guide_evidence_suggestion: {
     type: 'json_schema',
     json_schema: {
@@ -188,13 +189,14 @@ const STEPFUN_RESPONSE_FORMATS: Record<LlmResponseType, object> = {
             items: {
               type: 'object',
               additionalProperties: false,
-              required: ['item_id', 'reason', 'quote', 'quote_source', 'quote_field'],
+              required: ['item_id', 'reason', 'quote', 'quote_source', 'quote_field', 'quote_source_id'],
               properties: {
                 item_id: { type: 'string' },
                 reason: { type: 'string' },
                 quote: { type: 'string' },
                 quote_source: { type: 'string', enum: ['raw_text', 'confirmed_content'] },
                 quote_field: { type: 'string', enum: ['highlight_quote', 'highlights', ''] },
+                quote_source_id: { type: 'string' },
               },
             },
           },

@@ -5,11 +5,12 @@ import type { Child, SchoolClass } from "@/lib/types";
 
 import { guideItemById } from "./item-index";
 import {
+  buildBasisView,
+  checkBasis,
   classifyGuideEvidence,
   parseGuideEvidence,
   rollupChildItem,
   rollupClassItem,
-  buildBasisView,
   type ChildItemRollup,
   type EvidenceObservation,
   type LinkEvaluation,
@@ -207,6 +208,12 @@ function collectEvaluationNotices(
       }),
     );
   }
+  // 依据视图始终独立核对；通知只针对正式关联（工作流/旧目录关联由各自通知承担，避免假失败噪声）
+  const emitBasisNotices =
+    (evaluation.link.status === "confirmed_performance" ||
+      evaluation.link.status === "confirmed_clue") &&
+    evaluation.excluded_reason !== "catalog_mismatch";
+  if (!emitBasisNotices) return;
   evaluation.basis_checks.forEach((check, index) => {
     if (check.valid) return;
     const basis = evaluation.link.basis[index];
@@ -224,7 +231,11 @@ function collectEvaluationNotices(
   });
 }
 
-function linkView(evaluation: LinkEvaluation, observationById: Map<string, EvidenceObservation>): EvidenceLinkView {
+function linkView(
+  evaluation: LinkEvaluation,
+  observationById: Map<string, EvidenceObservation>,
+  childId: string,
+): EvidenceLinkView {
   const link: RuntimeLink = evaluation.link;
   return {
     link_id: link.id,
@@ -239,7 +250,7 @@ function linkView(evaluation: LinkEvaluation, observationById: Map<string, Evide
     basis: link.basis.map((basis, index) =>
       buildBasisView(
         basis,
-        evaluation.basis_checks[index] ?? { valid: false, reason: null },
+        evaluation.basis_checks[index] ?? checkBasis(basis, childId, observationById),
         observationById,
       ),
     ),
@@ -267,6 +278,7 @@ function childItemView(
   item: GuidePerformanceItem,
   rollup: ChildItemRollup,
   observationById: Map<string, EvidenceObservation>,
+  childId: string,
 ): ChildGuideItemView {
   const dates = countedObservedAt(rollup.evaluations);
   return {
@@ -276,7 +288,7 @@ function childItemView(
     links: rollup.evaluations
       // 未知状态关联无法在冻结 DTO 中诚实表达，由 unknown_link_status 通知承担显式提示
       .filter((evaluation) => evaluation.link.status !== "unknown")
-      .map((evaluation) => linkView(evaluation, observationById)),
+      .map((evaluation) => linkView(evaluation, observationById, childId)),
     first_observed_at: dates[0] ?? null,
     latest_observed_at: dates[dates.length - 1] ?? null,
   };
@@ -311,7 +323,7 @@ export function buildChildEvidenceBook(input: {
       for (const evaluation of rollup.evaluations) {
         collectEvaluationNotices(evaluation, item.id, input.child.id, "child_history", notices);
       }
-      return childItemView(item, rollup, observationById);
+      return childItemView(item, rollup, observationById, input.child.id);
     }),
   }));
 

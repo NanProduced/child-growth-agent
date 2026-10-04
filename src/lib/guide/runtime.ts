@@ -276,9 +276,9 @@ function quoteVerifiable(observation: EvidenceObservation, basis: RuntimeBasis):
 /**
  * 时间戳等价比较：数据库 to_jsonb 与 JS toISOString 的时区写法不同
  * （`+00:00` 与 `Z`），必须按时刻比较，不能按字符串。
+ * null 或不可解析的值不能证明版本一致（null/null、相同非法字符串都不算一致）。
  */
 export function sameTimestamp(left: string | null, right: string | null): boolean {
-  if (left === right) return true;
   if (left === null || right === null) return false;
   const leftMs = Date.parse(left);
   const rightMs = Date.parse(right);
@@ -353,7 +353,10 @@ export function evaluateLink(
   audience: EvidenceAudience,
   classStage: ClassStage | null,
 ): LinkEvaluation {
-  const basisChecks: BasisCheck[] = [];
+  // 依据有效性独立于工作流状态与口径排除：审计视图始终显示真实核对结果
+  const basisChecks: BasisCheck[] = link.basis.map((basis) =>
+    checkBasis(basis, childId, observationById),
+  );
   if (link.malformed) return excluded(link, "unknown_status", true, basisChecks);
   if (link.catalog_version !== GUIDE_CATALOG_VERSION) {
     return excluded(link, "catalog_mismatch", true, basisChecks);
@@ -365,9 +368,6 @@ export function evaluateLink(
     return excluded(link, "unknown_status", true, basisChecks);
   }
 
-  for (const basis of link.basis) {
-    basisChecks.push(checkBasis(basis, childId, observationById));
-  }
   if (link.basis.length === 0 || basisChecks.some((check) => !check.valid)) {
     return excluded(link, "basis_invalid", true, basisChecks);
   }
@@ -394,7 +394,11 @@ export function evaluateLink(
   }
 
   if (link.status === "confirmed_performance") {
-    if (item.product_rules.evidence_type === "sustained" && link.support !== "sustained") {
+    const rules = item.product_rules;
+    if (link.support === null || link.support === "clue_only") {
+      return excluded(link, "support_insufficient", true, basisChecks);
+    }
+    if (rules.evidence_type === "sustained" && link.support !== "sustained") {
       return excluded(link, "support_insufficient", true, basisChecks);
     }
     if (link.support === "sustained") {
@@ -402,6 +406,9 @@ export function evaluateLink(
       const note = link.sustained_note;
       const noteCoversBasis = Boolean(
         note &&
+          parseIsoDateStrict(note.period_start) &&
+          parseIsoDateStrict(note.period_end) &&
+          note.period_start <= note.period_end &&
           note.description.trim().length >= 10 &&
           link.basis.every(
             (basis) =>
@@ -411,6 +418,12 @@ export function evaluateLink(
       if (days.size < 2 && !noteCoversBasis) {
         return excluded(link, "support_insufficient", true, basisChecks);
       }
+    }
+    if (rules.adult_help === "requires_independence" && link.adult_help_used) {
+      return excluded(link, "support_insufficient", true, basisChecks);
+    }
+    if (link.adult_help_used && !link.teacher_note) {
+      return excluded(link, "support_insufficient", true, basisChecks);
     }
   }
 
@@ -463,17 +476,34 @@ export function rollupChildItem(input: {
     }
   }
 
-  let corruptedContainers = 0;
+  let usableObservations = 0;
+  let containerIntegrityIssue = false;
   for (const observation of input.observations) {
-    if (classifyGuideEvidence(observation.guide_evidence) !== null) corruptedContainers += 1;
+    const parsed = parseGuideEvidence(observation.guide_evidence);
+    if (parsed.kind === "unreadable") {
+      containerIntegrityIssue = true;
+      continue;
+    }
+    if (parsed.kind === "none") {
+      usableObservations += 1;
+      continue;
+    }
+    const usableLinks = parsed.links.filter(
+      (link) => link.status !== "unknown" && !link.malformed,
+    );
+    const brokenLinks = parsed.links.filter(
+      (link) => link.status === "unknown" || link.malformed,
+    );
+    if (parsed.links.length === 0 || usableLinks.length > 0) usableObservations += 1;
+    if (brokenLinks.length > 0) containerIntegrityIssue = true;
   }
 
-  let reliability: EvidenceReliability = evaluations.some((entry) => entry.integrity_issue)
-    ? "partial"
-    : "reliable";
-  if (corruptedContainers > 0) {
-    const readable = input.observations.length - corruptedContainers;
-    reliability = readable === 0 ? "unavailable" : "partial";
+  let reliability: EvidenceReliability =
+    evaluations.some((entry) => entry.integrity_issue) || containerIntegrityIssue
+      ? "partial"
+      : "reliable";
+  if (input.observations.length > 0 && usableObservations === 0) {
+    reliability = "unavailable";
   }
 
   const counted = evaluations.filter((entry) => entry.counts_toward_status);
@@ -522,7 +552,14 @@ export function rollupClassItem(input: {
     counts[rollup.status] += 1;
     reliabilities.push(rollup.reliability);
   }
-  const reliability = worstReliability(reliabilities);
+  // 班级汇总：保留已核验结果、名单分母与受限对象；只有全部幼儿都不可读才 unavailable，
+  // 混合可读/不可读按 partial（计数为下限），不机械采用“任一子项 unavailable → 整体 unavailable”。
+  const reliability: EvidenceReliability =
+    reliabilities.length > 0 && reliabilities.every((value) => value === "unavailable")
+      ? "unavailable"
+      : reliabilities.some((value) => value !== "reliable")
+        ? "partial"
+        : "reliable";
   const total = input.children.length;
   const confirmed_ratio =
     reliability === "reliable" && input.item.product_rules.counts_in_behavior_stats && total > 0
@@ -578,7 +615,12 @@ export function buildMutationLinkViews(
       const item = itemById(link.item_id);
       const evaluation = item
         ? evaluateLink(link, item, childId, observationById, scope, "child_history", null)
-        : excluded(link, "catalog_mismatch", true, []);
+        : excluded(
+            link,
+            "catalog_mismatch",
+            true,
+            link.basis.map((basis) => checkBasis(basis, childId, observationById)),
+          );
       return {
         link_id: link.id,
         item_id: link.item_id,
@@ -591,7 +633,7 @@ export function buildMutationLinkViews(
         basis: link.basis.map((basis, index) =>
           buildBasisView(
             basis,
-            evaluation.basis_checks[index] ?? { valid: false, reason: null },
+            evaluation.basis_checks[index] ?? checkBasis(basis, childId, observationById),
             observationById,
           ),
         ),
@@ -611,4 +653,27 @@ export function buildMutationLinkViews(
 /** 解析快照为可写快照；无法核实返回 null（历史未知，不补造） */
 export function parseSnapshotForWrite(value: unknown): ObservationClassContextSnapshot | null {
   return parseClassContext(value);
+}
+
+/**
+ * AI 建议保存前的来源快照核对：来源仍存在、日期一致、版本与生成时一致。
+ * - 生成时来源未归档（source_confirmed_at=null）：只接受仍未归档且无确认时间的来源；
+ *   来源若已归档则属于迟到变化，不写入旧建议。
+ * - 生成时来源已确认：当前仍为 confirmed 且 confirmed_at 与快照一致。
+ */
+export function suggestionSourceSnapshotStillMatches(
+  snapshot: {
+    source_observation_id: string;
+    observed_at: string;
+    source_confirmed_at: string | null;
+  },
+  observationById: Map<string, EvidenceObservation>,
+): boolean {
+  const source = observationById.get(snapshot.source_observation_id);
+  if (!source) return false;
+  if (source.observed_at !== snapshot.observed_at) return false;
+  if (snapshot.source_confirmed_at === null) {
+    return source.status !== "confirmed" && source.confirmed_at === null;
+  }
+  return source.status === "confirmed" && sameTimestamp(snapshot.source_confirmed_at, source.confirmed_at);
 }
