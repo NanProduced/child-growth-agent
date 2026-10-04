@@ -372,6 +372,65 @@ async function cleanupOwnedResources(
   return { outcomes, issues };
 }
 
+function describeCleanupFailures(
+  outcomes: ResourceCleanupOutcome[],
+  issues: string[]
+): string {
+  const failedNames = new Set(outcomes.filter((entry) => !entry.report.ok).map((entry) => entry.name));
+  const parts = outcomes
+    .filter((entry) => !entry.report.ok)
+    .map((entry) => `${entry.name}: ${entry.report.detail}（资源 ${entry.resourceId}）`);
+  for (const issue of issues) {
+    const name = issue.split(':')[0] ?? '';
+    if (!failedNames.has(name)) parts.push(issue);
+  }
+  return parts.join('；');
+}
+
+interface PartialInitCallerResult {
+  setup: ResourceSetup;
+  outcomes: ResourceCleanupOutcome[];
+}
+
+/**
+ * 部分初始化检查的调用方控制流：取得 setup 后立即进入受 finally 保护的检查区域。
+ * 任何断言失败都执行 cleanupOwnedResources(setup)；原失败与清理失败分别保留、互不覆盖。
+ */
+async function runPartialInitCaller(options: {
+  setupRunner: CommandRunner;
+  cleanupRunner?: CommandRunner;
+  check: (setup: ResourceSetup) => void | Promise<void>;
+}): Promise<PartialInitCallerResult> {
+  const setup = await setupOwnedResources(options.setupRunner);
+  let bodyError: unknown = null;
+  let outcomes: ResourceCleanupOutcome[] = [];
+  const cleanupIssues: string[] = [];
+  try {
+    await options.check(setup);
+  } catch (error) {
+    bodyError = error;
+  } finally {
+    try {
+      const result = await cleanupOwnedResources(setup, options.cleanupRunner ?? options.setupRunner);
+      outcomes = result.outcomes;
+      cleanupIssues.push(...result.issues);
+    } catch (error) {
+      cleanupIssues.push(`cleanup-threw: ${messageOf(error)}`);
+    }
+  }
+  const cleanupFailed = cleanupIssues.length > 0 || outcomes.some((entry) => !entry.report.ok);
+  if (bodyError !== null && cleanupFailed) {
+    throw new Error(
+      `${messageOf(bodyError)}；清理问题（资源引用保留）：${describeCleanupFailures(outcomes, cleanupIssues)}`
+    );
+  }
+  if (bodyError !== null) throw bodyError;
+  if (cleanupFailed) {
+    throw new Error(`清理失败（资源引用保留）：${describeCleanupFailures(outcomes, cleanupIssues)}`);
+  }
+  return { setup, outcomes };
+}
+
 interface Sentinel {
   url: string;
   connections: () => number;
@@ -1208,6 +1267,206 @@ async function main(): Promise<void> {
     return '一个清理失败不跳过另一个：整体非成功且保留引用';
   });
 
+  await counterexample('partial-init-caller-cleans-on-assert-failure', async () => {
+    const replacementId = 'd'.repeat(64);
+    let legacyInspectCount = 0;
+    let replacementExists = false;
+    let replacementLabel: string | null = null;
+    let rmIssued = 0;
+    const runner: CommandRunner = (file, args) => {
+      if (file !== 'docker') {
+        return { status: 127, stdout: '', stderr: 'unsupported', error: 'unsupported' };
+      }
+      const [sub, ...rest] = args;
+      if (sub === 'inspect') {
+        const target = rest[rest.length - 1] ?? '';
+        if (target === LEGACY_NAME) {
+          legacyInspectCount += 1;
+          if (legacyInspectCount === 1) {
+            // 调用方首次看到旧容器
+            return {
+              status: 0,
+              stdout: JSON.stringify({
+                Id: 'e'.repeat(64),
+                Config: { Labels: { [LEGACY_LABEL]: 'pre-existing-run' } },
+              }),
+              stderr: '',
+            };
+          }
+          // 原所有者随后移除 → setup 将自建 replacement
+          return { status: 1, stdout: '', stderr: `Error: No such object: ${target}` };
+        }
+        if (target === replacementId && replacementExists) {
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              Id: replacementId,
+              Config: { Labels: { [LEGACY_LABEL]: replacementLabel ?? '' } },
+            }),
+            stderr: '',
+          };
+        }
+        return { status: 1, stdout: '', stderr: `Error: No such object: ${target}` };
+      }
+      if (sub === 'run') {
+        const nameAt = rest.indexOf('--name');
+        const name = nameAt >= 0 ? rest[nameAt + 1] ?? '' : '';
+        if (name.startsWith('cga-classes-check-foreign-')) {
+          return { status: 1, stdout: '', stderr: 'simulated foreign create failure' };
+        }
+        const labelAt = rest.indexOf('--label');
+        const rawLabel = labelAt >= 0 ? rest[labelAt + 1] ?? '' : '';
+        replacementLabel = rawLabel.includes('=') ? rawLabel.slice(rawLabel.indexOf('=') + 1) : null;
+        replacementExists = true;
+        return { status: 0, stdout: replacementId, stderr: '' };
+      }
+      if (sub === 'rm') {
+        rmIssued += 1;
+        replacementExists = false;
+        return { status: 0, stdout: replacementId, stderr: '' };
+      }
+      return { status: 1, stdout: '', stderr: `unsupported subcommand: ${sub}` };
+    };
+
+    // 调用方第一次 inspect：看到旧固定名容器（竞态前）
+    const firstInspection = inspectOwnedContainer(LEGACY_NAME, LEGACY_LABEL, runner);
+    assert.equal(firstInspection.state, 'verified', '竞态前应看到旧容器');
+
+    let thrown: unknown = null;
+    try {
+      await runPartialInitCaller({
+        setupRunner: runner,
+        check: (setup) => {
+          assert.equal(setup.dockerOk, false, '部分初始化失败必须标记 setup 未完成');
+          assert.ok(setup.legacy?.created === false, '既有 legacy 必须保持 created:false');
+        },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown, '竞态下检查必须失败');
+    assert.match(messageOf(thrown), /既有 legacy 必须保持 created:false/, '原断言失败仍可见');
+    assert.equal(rmIssued, 1, '断言失败后 cleanup 仍必须执行');
+    assert.equal(replacementExists, false, '本轮自建 replacement 不残留');
+    return '竞态断言失败后仍按句柄清理 replacement，原失败可见且非 PASS';
+  });
+
+  await counterexample('partial-init-caller-keeps-existing-on-assert-failure', async () => {
+    const existingId = 'f'.repeat(64);
+    let rmIssued = 0;
+    const runner: CommandRunner = (file, args) => {
+      if (file !== 'docker') {
+        return { status: 127, stdout: '', stderr: 'unsupported', error: 'unsupported' };
+      }
+      const [sub, ...rest] = args;
+      if (sub === 'inspect') {
+        const target = rest[rest.length - 1] ?? '';
+        if (target === LEGACY_NAME || target === existingId) {
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              Id: existingId,
+              Config: { Labels: { [LEGACY_LABEL]: 'preexisting-run' } },
+            }),
+            stderr: '',
+          };
+        }
+        return { status: 1, stdout: '', stderr: `Error: No such object: ${target}` };
+      }
+      if (sub === 'run') {
+        return { status: 1, stdout: '', stderr: 'simulated run failure' };
+      }
+      if (sub === 'rm') {
+        rmIssued += 1;
+        return { status: 0, stdout: existingId, stderr: '' };
+      }
+      return { status: 1, stdout: '', stderr: `unsupported subcommand: ${sub}` };
+    };
+    let thrown: unknown = null;
+    try {
+      await runPartialInitCaller({
+        setupRunner: runner,
+        check: (setup) => {
+          assert.ok(setup.legacy?.created === false, '既有 legacy 保持 created:false');
+          assert.fail('检查阶段失败注入');
+        },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown, '检查失败必须整体失败');
+    assert.match(messageOf(thrown), /检查阶段失败注入/, '原失败保留');
+    assert.equal(rmIssued, 0, 'created:false 不得发出删除动作');
+    assert.equal(
+      inspectOwnedContainer(existingId, LEGACY_LABEL, runner).state,
+      'verified',
+      '既有容器保持原样'
+    );
+    return 'created:false + 检查失败：既有容器保持且不发出删除';
+  });
+
+  await counterexample('partial-init-caller-preserves-both-failures', async () => {
+    const replacementId = '1'.repeat(64);
+    let replacementExists = false;
+    let replacementLabel: string | null = null;
+    let rmIssued = 0;
+    const runner: CommandRunner = (file, args) => {
+      if (file !== 'docker') {
+        return { status: 127, stdout: '', stderr: 'unsupported', error: 'unsupported' };
+      }
+      const [sub, ...rest] = args;
+      if (sub === 'inspect') {
+        const target = rest[rest.length - 1] ?? '';
+        if (target === replacementId && replacementExists) {
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              Id: replacementId,
+              Config: { Labels: { [LEGACY_LABEL]: replacementLabel ?? '' } },
+            }),
+            stderr: '',
+          };
+        }
+        return { status: 1, stdout: '', stderr: `Error: No such object: ${target}` };
+      }
+      if (sub === 'run') {
+        const nameAt = rest.indexOf('--name');
+        const name = nameAt >= 0 ? rest[nameAt + 1] ?? '' : '';
+        if (name.startsWith('cga-classes-check-foreign-')) {
+          return { status: 1, stdout: '', stderr: 'simulated foreign create failure' };
+        }
+        const labelAt = rest.indexOf('--label');
+        const rawLabel = labelAt >= 0 ? rest[labelAt + 1] ?? '' : '';
+        replacementLabel = rawLabel.includes('=') ? rawLabel.slice(rawLabel.indexOf('=') + 1) : null;
+        replacementExists = true;
+        return { status: 0, stdout: replacementId, stderr: '' };
+      }
+      if (sub === 'rm') {
+        rmIssued += 1;
+        return { status: 1, stdout: '', stderr: 'simulated removal denied' };
+      }
+      return { status: 1, stdout: '', stderr: `unsupported subcommand: ${sub}` };
+    };
+    let thrown: unknown = null;
+    try {
+      await runPartialInitCaller({
+        setupRunner: runner,
+        check: () => {
+          assert.fail('检查阶段失败注入');
+        },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    const message = messageOf(thrown);
+    assert.match(message, /检查阶段失败注入/, '原失败保留');
+    assert.match(message, /removal denied/, '清理失败保留');
+    assert.ok(message.includes(replacementId), '失败资源 ID 保留');
+    assert.equal(rmIssued, 1, '清理确实尝试执行');
+    assert.equal(replacementExists, true, '清理失败资源保持不动');
+    return `原失败与清理失败并存且资源引用保留：${message.slice(0, 110)}…`;
+  });
+
   let dockerOk = false;
   await counterexample('docker-daemon-available', () => {
     const probe = nativeCommand('docker', ['version']);
@@ -1233,16 +1492,20 @@ async function main(): Promise<void> {
         }
         return nativeCommand(file, args);
       };
-      const setup = await setupOwnedResources(failingForeignRunner);
-      assert.equal(setup.dockerOk, false, '部分初始化失败必须标记 setup 未完成');
-      assert.equal(setup.foreign, null, 'foreign 未创建不得产生句柄');
-      assert.ok(setup.setupError, '必须保留初始化失败原因');
-      if (existing.state === 'absent') {
-        assert.ok(setup.legacy?.created === true, '自建 legacy 句柄必须保留（created:true）');
-      } else {
-        assert.ok(setup.legacy?.created === false, '既有 legacy 必须保持 created:false');
-      }
-      const { outcomes } = await cleanupOwnedResources(setup);
+      // 调用方控制流：取得 setup 后立即进入 try/finally，断言失败也执行本轮资源清理
+      const { setup, outcomes } = await runPartialInitCaller({
+        setupRunner: failingForeignRunner,
+        check: (candidate) => {
+          assert.equal(candidate.dockerOk, false, '部分初始化失败必须标记 setup 未完成');
+          assert.equal(candidate.foreign, null, 'foreign 未创建不得产生句柄');
+          assert.ok(candidate.setupError, '必须保留初始化失败原因');
+          if (existing.state === 'absent') {
+            assert.ok(candidate.legacy?.created === true, '自建 legacy 句柄必须保留（created:true）');
+          } else {
+            assert.ok(candidate.legacy?.created === false, '既有 legacy 必须保持 created:false');
+          }
+        },
+      });
       if (setup.legacy?.created) {
         const legacyOutcome = outcomes.find(
           (entry) => entry.name === 'legacy-container-released-by-id-and-label'
