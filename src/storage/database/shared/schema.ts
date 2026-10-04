@@ -144,3 +144,95 @@ export const observations = pgTable(
     index("observations_child_observed_idx").on(t.child_id, t.observed_at),
   ],
 );
+
+/**
+ * 账号（AUTH1）：role ∈ admin/teacher；status ∈ active/disabled；停用不做物理删除。
+ * username 存规范化结果；password_hash 使用固定 scrypt 格式。
+ */
+export const appAccounts = pgTable(
+  "app_accounts",
+  {
+    id: varchar("id", { length: 36 })
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    username: varchar("username", { length: 64 }).notNull(),
+    display_name: varchar("display_name", { length: 50 }).notNull(),
+    password_hash: text("password_hash").notNull(),
+    role: varchar("role", { length: 10 }).notNull(),
+    status: varchar("status", { length: 10 }).notNull().default("active"),
+    password_changed_at: timestamp("password_changed_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    disabled_at: timestamp("disabled_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updated_at: timestamp("updated_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("app_accounts_username_unique").on(t.username),
+    index("app_accounts_role_idx").on(t.role),
+    index("app_accounts_status_idx").on(t.status),
+  ],
+);
+
+/**
+ * 会话（AUTH1）：数据库只存令牌 SHA-256 哈希；固定绝对期限；撤销只写 revoked 字段，
+ * 不做物理删除。GET / 获取 CSRF 一律不续期、不写库。
+ */
+export const appSessions = pgTable(
+  "app_sessions",
+  {
+    id: varchar("id", { length: 36 })
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    account_id: varchar("account_id", { length: 36 })
+      .notNull()
+      .references(() => appAccounts.id, { onDelete: "cascade" }),
+    token_hash: varchar("token_hash", { length: 64 }).notNull(),
+    created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    expires_at: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revoked_at: timestamp("revoked_at", { withTimezone: true }),
+    revoked_reason: varchar("revoked_reason", { length: 30 }),
+  },
+  (t) => [
+    uniqueIndex("app_sessions_token_hash_unique").on(t.token_hash),
+    index("app_sessions_account_id_idx").on(t.account_id),
+    index("app_sessions_expires_at_idx").on(t.expires_at),
+  ],
+);
+
+/**
+ * 教师任教关系（AUTH1）：与 child_class_enrollments 不同关系，撤销只写 removed_at，
+ * 不删除历史、不改变幼儿归属或观察发生时快照。
+ * 同一 (account_id, class_id) 至多一条 removed_at IS NULL 的当前关系。
+ */
+export const teacherClassAssignments = pgTable(
+  "teacher_class_assignments",
+  {
+    id: varchar("id", { length: 36 })
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    account_id: varchar("account_id", { length: 36 })
+      .notNull()
+      .references(() => appAccounts.id, { onDelete: "cascade" }),
+    class_id: varchar("class_id", { length: 36 })
+      .notNull()
+      .references(() => classes.id, { onDelete: "restrict" }),
+    assigned_at: timestamp("assigned_at", { withTimezone: true }).defaultNow().notNull(),
+    assigned_by_account_id: varchar("assigned_by_account_id", { length: 36 }).references(
+      () => appAccounts.id,
+      { onDelete: "set null" },
+    ),
+    removed_at: timestamp("removed_at", { withTimezone: true }),
+    removed_by_account_id: varchar("removed_by_account_id", { length: 36 }).references(
+      () => appAccounts.id,
+      { onDelete: "set null" },
+    ),
+  },
+  (t) => [
+    uniqueIndex("teacher_class_assignments_current_unique")
+      .on(t.account_id, t.class_id)
+      .where(sql`removed_at IS NULL`),
+    index("teacher_class_assignments_account_idx").on(t.account_id),
+    index("teacher_class_assignments_class_idx").on(t.class_id),
+  ],
+);
