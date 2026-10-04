@@ -477,10 +477,16 @@ export const FIXTURE_HOME_STATES: HomeV2Data[] = [
 export interface FixturePrimaryActionCase {
   name: string;
   viewer: "teacher" | "admin";
-  /** null=数据读取失败（未获取） */
-  counts: { confirmations: number; supplements: number; organizes: number } | null;
-  class_count: number;
-  child_count: number;
+  /** null=整体未获取；字段为 null=该数量未获取，不得当作 0 */
+  counts: {
+    confirmations: number | null;
+    supplements: number | null;
+    organizes: number | null;
+  } | null;
+  /** null=未获取（读取失败），不是 0 */
+  class_count: number | null;
+  /** null=未获取（读取失败），不是 0 */
+  child_count: number | null;
   expected: HomePrimaryActionCode;
 }
 
@@ -549,5 +555,64 @@ export const FIXTURE_PRIMARY_ACTION_CASES: FixturePrimaryActionCase[] = [
     class_count: 3,
     child_count: 9,
     expected: "manage_school",
+  },
+  {
+    /** 主评审反例：三类待办已知为 0，但幼儿数未获取：不得默认 start_observation */
+    name: "child-count-unknown-retry",
+    viewer: "teacher",
+    counts: { confirmations: 0, supplements: 0, organizes: 0 },
+    class_count: 1,
+    child_count: null,
+    expected: "retry",
+  },
+  {
+    name: "class-count-unknown-retry",
+    viewer: "teacher",
+    counts: { confirmations: 0, supplements: 0, organizes: 0 },
+    class_count: null,
+    child_count: null,
+    expected: "retry",
+  },
+  {
+    /** 已知待确认不因无关的班级/幼儿统计读取失败而被屏蔽 */
+    name: "known-confirmations-with-unknown-range",
+    viewer: "teacher",
+    counts: { confirmations: 1, supplements: null, organizes: null },
+    class_count: null,
+    child_count: null,
+    expected: "process_confirmations",
+  },
+  {
+    name: "known-supplements-with-unknown-range",
+    viewer: "teacher",
+    counts: { confirmations: 0, supplements: 2, organizes: null },
+    class_count: null,
+    child_count: null,
+    expected: "supplement_observation",
+  },
+  {
+    name: "known-organizes-with-unknown-range",
+    viewer: "teacher",
+    counts: { confirmations: 0, supplements: 0, organizes: 3 },
+    class_count: null,
+    child_count: null,
+    expected: "organize_draft",
+  },
+  {
+    /** 更高优先级待办数量未知：不得当作 0 继续选择较低优先级动作 */
+    name: "unknown-higher-priority-retry",
+    viewer: "teacher",
+    counts: { confirmations: null, supplements: 2, organizes: 0 },
+    class_count: 1,
+    child_count: 3,
+    expected: "retry",
+  },
+  {
+    name: "unknown-supplements-blocks-start",
+    viewer: "teacher",
+    counts: { confirmations: 0, supplements: null, organizes: 0 },
+    class_count: 1,
+    child_count: 3,
+    expected: "retry",
   },
 ];

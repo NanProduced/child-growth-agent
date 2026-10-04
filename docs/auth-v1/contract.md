@@ -1,8 +1,8 @@
-# 单园所账号与授权 v1 契约（AUTH0-R1 返修候选）
+# 单园所账号与授权 v1 契约（AUTH0-R2 返修候选）
 
-- 状态：**返修候选，等待主评审**。基线：`734f572925e7c298f2226679c00e3e4e978068b2`（上一轮冻结候选，已被主评审指出启动、授权守门与首页范围问题，**不是获批实装基线**）；工作树分支 `codex/auth0-contract`（独立工作树，不整合其他分支）。
+- 状态：**返修候选，等待主评审**。基线：`cea871f91795460ac219cf0920f94d2adc0550be`（R1 返修候选；本轮只修主评审复现的三个参考算法边界：模型等待归属前提、JSON 媒体类型精确匹配、首页局部未知计数）；工作树分支 `codex/auth0-contract`（独立工作树，不整合其他分支）。
 - 本轮范围：只修订契约、共享类型、纯 fixture 与参考检查；不实现真实认证、不建表/不迁移、不调用模型、不改页面。
-- 冻结文件：`src/lib/accounts/types.ts`、`src/lib/home-v2/types.ts`、本文件、`docs/auth-v1/ownership.md`、`docs/auth-v1/auth0-r1-delivery.md`、`src/lib/accounts/__fixtures__/contract-fixtures.ts`、`src/lib/home-v2/__fixtures__/contract-fixtures.ts`、`scripts/check-auth-contract.ts`。
+- 冻结文件：`src/lib/accounts/types.ts`、`src/lib/home-v2/types.ts`、本文件、`docs/auth-v1/ownership.md`、`docs/auth-v1/auth0-r1-delivery.md`、`docs/auth-v1/auth0-r2-delivery.md`、`src/lib/accounts/__fixtures__/contract-fixtures.ts`、`src/lib/home-v2/__fixtures__/contract-fixtures.ts`、`scripts/check-auth-contract.ts`。
 - 必守不变量：`raw_text` 不可静默改写；观察状态机与 `ai_draft`/`confirmed_content` 分离不变；G0 指南三状态、✓、目录及证据有效性规则全部不变；G0 冻结文件零修改；角色、账号状态与班级范围只来自服务端；无默认生产密码；旧 `TEACHER_PASSCODE` 不作为新账号密码。
 
 ---
@@ -50,7 +50,7 @@
 `POST /api/auth/login` 是登录前接口，**不要求尚不存在的会话绑定 CSRF 令牌**：
 
 1. 严格验证可信公开源的 `Origin`；**可信源只来自部署配置**（`TRUSTED_ORIGIN_SOURCE = "deployment_config"`），**禁止**用请求 `Host` / `X-Forwarded-*` 推导可信源。
-2. 只接受 `Content-Type: application/json`。
+2. 只接受媒体类型主体**精确等于** `application/json`：类型/子类型大小写不敏感，允许 `charset=utf-8` 等合法参数；`application/jsonp`、`application/json-seq`、`application/jsonx`、其他媒体类型与空值一律拒绝（不做前缀匹配）。
 3. 要求固定自定义请求头 `x-cga-auth-request: 1`（`AUTH_LOGIN_HEADER_NAME/VALUE`）。
 4. 不开放跨域凭证访问；未登录状态不允许任何业务写操作。
 5. 跨源、`Origin=null`、缺少同源证明、缺少自定义头、普通表单（form-urlencoded 等）一律拒绝，拒绝原因固定为 `LOGIN_GUARD_FAILURES`：`origin_untrusted` / `same_origin_proof_missing` / `auth_request_header_missing` / `content_type_rejected`。
@@ -153,10 +153,11 @@
 - `AUTH_DENY_ERROR_CODE` 固定映射拒绝原因 → 错误码，HTTP 状态必须一致；`forbidden_role` / `out_of_scope` 均为 403。
 - 授权失败不包装为空列表、无记录或依据失效；**409 业务冲突不吞掉**。
 
-## 6. 模型等待期间的重核（R1 新增，AUTH1/AUTH2 必需行为）
+## 6. 模型等待期间的重核（R1 新增、R2 修正归属前提，AUTH1/AUTH2 必需行为）
 
 - 模型调用在**事务外**执行，不持有数据库锁；
 - 模型返回后、正式落库前必须重新核对（`MODEL_WAIT_RECHECK_POINTS`）：`session_valid`、`account_active`、`role_and_action_permission`、`assignment_current`、`child_current_attribution`、`target_observation_revision`、`attempt_owner`；
+- **归属前提比较（R2）**：必须比较请求开始时与保存前的幼儿当前归属；**即使转班后仍在同一教师负责范围内，也不得保存旧请求结果**，返回 409 `state_conflict` 且零写入；比较必须来自 before/after 事实，不得只依赖 `event === "child_transferred"` 标签；当前授权已经失效时保留原 401/403/503 拒绝语义；不修改观察的发生时班级快照；
 - 写入与撤销/停用/转班之间需要**共同事务协调**，不能只依赖请求开始时的一次授权；
 - 不接受客户端 `Principal` 或长期缓存范围作为最终授权；
 - **新会话/新账号不能代替原发起者承接旧请求**（`principal_replaced` → 409 冲突，零写入）；
@@ -192,7 +193,7 @@
 | `admin.password.reset` | `/api/admin/teachers/[id]/password-reset` | 重置并撤销全部会话 |
 | ~~`admin.initialize`~~ | **已撤销** | 改为部署者非公网脚本 |
 
-### 7.3 首页 v2 契约（R1 修正）
+### 7.3 首页 v2 契约（R1 修正、R2 补局部未知）
 
 - `HomeViewer` 四态由服务端判定；未登录文案统一为“**园所账号登录**”。
 - `HomeScopeSummary.class_count/child_count` 与 `HomeClassSummary` 各计数、`HomePendingCounts` 均区分 `null=未获取（读取失败）` 与 `0=真实零值`。
@@ -200,6 +201,7 @@
 - `pending` 仅包含**当前具有教学操作权限**的记录；转走幼儿的历史只读记录不进入待办与计数，历史只读入口留在班级历史页面；当前负责幼儿的转入前历史可展示且保留发生时班级。
 - 管理员没有教学权限，`pending` 为空、待办计数为 0（全园观察仍在班级页只读浏览）。
 - 主行动单一且固定优先级：**待确认 → 待补充 → 待整理 → 建档 / 新记录**；未分配班级只提供等待分配，不提供建班捷径；已分配无幼儿时提供建档入口。
+- **局部未知（R2）**：参考输入与正式 DTO 可空口径一致；`null` 不得转成 `0`；依赖班级/幼儿数量判断建档或新记录时数量未知 → `retry`；已知且优先级明确的待办仍可处理（不因无关的班级/幼儿统计读取失败而被屏蔽）；更高优先级待办数量未知时，不得当作零继续选择较低优先级动作。
 - `data_unavailable` 与 `empty_*` 语义分开；不得把读取失败显示为普通 0 或空数据。
 
 ## 8. 旧入口切换与增量接口改造（本轮只列清单）
@@ -228,19 +230,29 @@
 | 8 | 合法创建观察 / 已有观察确认 | `observation.write`+child、`observation.confirm`+observation 允许 | `teacher-a-write-observation-for-current-child` 等 |
 | 9 | 授权错误码缺失 | `forbidden_role`/`out_of_scope` 存在于错误码与 403 映射 | `AUTH_DENY_ERROR_CODE` 检查 |
 | 10 | 密码参数过时/被请求控制 | N=32768, r=8, p=3, maxmem=64MiB，密码不 trim | 密码契约检查 |
-| 11 | 模型等待期间撤权/停用/转班 | 返回后重核，拒绝旧请求保存；修订/归属变化 409 零写入 | `FIXTURE_MODEL_WAIT_CASES` |
+| 11 | 模型等待期间撤权/停用/转班 | 返回后重核，拒绝旧请求保存；修订变化 409 零写入 | `FIXTURE_MODEL_WAIT_CASES` |
 | 12 | 当前负责幼儿的转入前历史被排除 | 不因发生班级排除，按当前归属可读可操作 | `current-responsible-reads-prior-class-history`、教师 B 首页 |
 | 13 | 转走幼儿历史进入可操作待办 | 历史只读排除在待办与计数外 | 教师 A 首页候选过滤 |
 | 14 | 无分配/无幼儿/无观察/读取失败混为 0 | 四种语义分离，null=未获取 | 首页四态 fixture |
 | 15 | 多个主行动并列或优先级错乱 | 单一主行动固定优先级 | `FIXTURE_PRIMARY_ACTION_CASES` |
 | — | 保留的旧反例 | 未登录/未知身份/撤权/作者≠授权/停用历史/错误≠空/空范围≠全园/管理员教学拒绝/G2 409 | 原 fixture 集合 |
 
+R2 新增边界（主评审复现）：
+
+| # | 反例 | 规则 | Fixture / 检查 |
+|---|---|---|---|
+| 16 | 教师同时负责 A、B，幼儿 A→B 后原请求仍保存 | before/after 归属事实比较；仍授权也必须 409 零写入 | `child-transferred-within-scope-conflicts` |
+| 17 | 归属事实已变但事件标签为 `none` | 只看事实不看标签 | `attribution-changed-with-none-label-conflicts` |
+| 18 | `Content-Type: application/jsonp` 被前缀放行 | 媒体类型主体精确匹配，允许参数与大小写 | `jsonp-prefix-rejected`、`json-seq-rejected`、`jsonx-rejected`、`json-with-charset-accepted` |
+| 19 | 局部未知计数（child_count=null）默认进入 `start_observation` | 未知不等于 0；依赖数量未知 → `retry` | `child-count-unknown-retry`、`class-count-unknown-retry` |
+| 20 | 高优先级待办数量未知被跳过 | 已知待办可处理，未知高优先级不得跳过 | `unknown-higher-priority-retry`、`known-confirmations-with-unknown-range` |
+
 ## 11. Fixture 与最小检查
 
 - Fixture（纯数据）：`src/lib/accounts/__fixtures__/contract-fixtures.ts`（授权、登录保护、CSRF、退出、初始化、模型等待、密码、接口 DTO）；`src/lib/home-v2/__fixtures__/contract-fixtures.ts`（首页各状态、可操作待办候选、主行动用例）。
 - 检查：`pnpm exec tsx scripts/check-auth-contract.ts`（离线，只读 fixture，输出 `reference_only: true`）。
   - 参考算法忠实于本契约；**不能替代真实认证、真实数据库、事务交错与浏览器验收**。
-  - 当前输出：`{ passed: 33, total: 33, reference_only: true }`。
+  - 当前输出：`{ passed: 36, total: 36, reference_only: true }`。
 
 ## 12. 验收与已知限制
 

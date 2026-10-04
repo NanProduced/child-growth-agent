@@ -67,6 +67,7 @@ import {
   AUTH_DENY_ERROR_CODE,
   AUTH_DENY_HTTP_STATUS,
   AUTH_ERROR_HTTP_STATUS,
+  AUTH_LOGIN_CONTENT_TYPE,
   AUTH_LOGIN_HEADER_VALUE,
   AUTH_SESSION_TTL_SECONDS,
   AUTH_STATE_KINDS,
@@ -121,7 +122,7 @@ import {
 } from "../src/lib/home-v2/types";
 
 /**
- * AUTH0-R1 契约最小检查：只读 fixture，不连数据库、不调用模型、不实现认证。
+ * AUTH0-R2 契约最小检查：只读 fixture，不连数据库、不调用模型、不实现认证。
  * 运行：pnpm exec tsx scripts/check-auth-contract.ts
  *
  * 本文件的参考算法忠实于 `docs/auth-v1/contract.md`，用于验证 fixture 与规则一致性；
@@ -279,6 +280,13 @@ type LoginGuardResult =
         | "content_type_rejected";
     };
 
+/** 媒体类型主体精确匹配 application/json：大小写不敏感，允许 charset 等参数，不做前缀匹配 */
+function isJsonMediaType(value: string | null): boolean {
+  if (value === null) return false;
+  const essence = value.split(";", 1)[0]?.trim().toLowerCase();
+  return essence === AUTH_LOGIN_CONTENT_TYPE;
+}
+
 /** 可信源只来自部署配置；Host / Forwarded / Sec-Fetch 请求头不参与可信源判定 */
 function evaluateLoginGuard(facts: {
   origin: string | null;
@@ -294,7 +302,7 @@ function evaluateLoginGuard(facts: {
   if (facts.auth_request_header !== AUTH_LOGIN_HEADER_VALUE) {
     return { accepted: false, failure: "auth_request_header_missing" };
   }
-  if (!facts.content_type || !facts.content_type.toLowerCase().startsWith("application/json")) {
+  if (!isJsonMediaType(facts.content_type)) {
     return { accepted: false, failure: "content_type_rejected" };
   }
   return { accepted: true };
@@ -322,6 +330,11 @@ function evaluateBootstrap(entry: { context: string; admins_exist: boolean }) {
   return { accepted: true, error: null };
 }
 
+/** 请求开始与保存前的幼儿当前归属必须一致；比较 before/after 事实，不依赖事件标签 */
+function modelWaitAttributionChanged(entry: (typeof FIXTURE_MODEL_WAIT_CASES)[number]): boolean {
+  return currentClassOf(entry.before.resource) !== currentClassOf(entry.after.resource);
+}
+
 function evaluateModelWait(entry: (typeof FIXTURE_MODEL_WAIT_CASES)[number]) {
   if (entry.event === "observation_changed") {
     return { write: false, outcome: "conflict" as const, error: "state_conflict" as const };
@@ -329,10 +342,15 @@ function evaluateModelWait(entry: (typeof FIXTURE_MODEL_WAIT_CASES)[number]) {
   if (entry.event === "principal_replaced") {
     return { write: false, outcome: "conflict" as const, error: "attempt_owner_mismatch" as const };
   }
+  // 先做保存前授权重核：失效时保留 401/403/503 语义
   const decision = evaluateAccess(entry.after);
   if (!decision.allowed) {
     assert.ok("deny" in decision, "模型等待重核失败必须是显式拒绝");
     return { write: false, outcome: "denied" as const, deny: decision.deny };
+  }
+  // 授权仍有效但归属前提变化：即使仍在同一教师范围内，也不得保存旧请求结果
+  if (modelWaitAttributionChanged(entry)) {
+    return { write: false, outcome: "conflict" as const, error: "state_conflict" as const };
   }
   return { write: true, outcome: "saved" as const };
 }
@@ -382,10 +400,17 @@ function computeOperablePending(auth: AuthState, candidates: FixtureHomeCandidat
 function nextPrimaryAction(entry: FixturePrimaryActionCase) {
   if (entry.counts === null) return "retry";
   if (entry.viewer === "admin") return "manage_school";
+  // 高优先级待办数量未知：不得当作 0 继续选择较低优先级动作
+  if (entry.counts.confirmations === null) return "retry";
   if (entry.counts.confirmations > 0) return "process_confirmations";
+  if (entry.counts.supplements === null) return "retry";
   if (entry.counts.supplements > 0) return "supplement_observation";
+  if (entry.counts.organizes === null) return "retry";
   if (entry.counts.organizes > 0) return "organize_draft";
+  // 待办全部已知为 0，才依据范围数量决定建档/新记录；未知不等零
+  if (entry.class_count === null) return "retry";
   if (entry.class_count === 0) return "await_class_assignment";
+  if (entry.child_count === null) return "retry";
   if (entry.child_count === 0) return "create_profile";
   return "start_observation";
 }
@@ -895,7 +920,7 @@ function main(): void {
   for (const entry of FIXTURE_MODEL_WAIT_CASES) {
     const result = evaluateModelWait(entry);
     assert.deepEqual(result, entry.expected, `${entry.name}: 模型等待重核结果不一致`);
-    if (entry.event !== "none") {
+    if (entry.event !== "none" || modelWaitAttributionChanged(entry)) {
       assert.equal(result.write, false, `${entry.name}: 等待期间发生变化必须零写入`);
     }
   }
@@ -1079,7 +1104,120 @@ function main(): void {
   assert.ok(FIXTURE_LOGIN_RESPONSE.session && !("token" in FIXTURE_LOGIN_RESPONSE.session));
   passed += 1;
 
-  console.log(JSON.stringify({ passed, total: 33, reference_only: true }));
+  /* 34) JSON 媒体类型精确匹配：允许合法参数与大小写，拒绝相似前缀、其他类型与空值 */
+  const mediaTypeCases: Array<[string, boolean]> = [
+    ["application/json", true],
+    ["application/json; charset=utf-8", true],
+    ["Application/JSON", true],
+    ["application/jsonp", false],
+    ["application/json-seq", false],
+    ["application/jsonx", false],
+    ["text/plain", false],
+    ["", false],
+  ];
+  for (const [contentType, accepted] of mediaTypeCases) {
+    const result = evaluateLoginGuard({
+      origin: FIXTURE_TRUSTED_ORIGINS[0],
+      auth_request_header: AUTH_LOGIN_HEADER_VALUE,
+      content_type: contentType,
+    });
+    assert.equal(result.accepted, accepted, `媒体类型 ${JSON.stringify(contentType)} 判定不一致`);
+  }
+  const mediaTypeFixtureNames = [
+    "json-with-charset-accepted",
+    "json-case-insensitive-accepted",
+    "jsonp-prefix-rejected",
+    "json-seq-rejected",
+    "jsonx-rejected",
+    "text-plain-rejected",
+    "empty-content-type-rejected",
+  ];
+  for (const name of mediaTypeFixtureNames) {
+    assert.ok(
+      FIXTURE_LOGIN_GUARD_CASES.some((entry) => entry.name === name),
+      `fixture 缺少媒体类型场景 ${name}`,
+    );
+  }
+  passed += 1;
+
+  /* 35) 模型等待归属前提：比较 before/after 事实，不依赖事件标签 */
+  const modelWaitFixtureNames = [
+    "child-transferred-within-scope-conflicts",
+    "attribution-changed-with-none-label-conflicts",
+    "child-transferred-during-wait",
+  ];
+  for (const name of modelWaitFixtureNames) {
+    assert.ok(
+      FIXTURE_MODEL_WAIT_CASES.some((entry) => entry.name === name),
+      `fixture 缺少模型等待场景 ${name}`,
+    );
+  }
+  const withinScopeTransfer = FIXTURE_MODEL_WAIT_CASES.find(
+    (entry) => entry.name === "child-transferred-within-scope-conflicts",
+  );
+  assert.ok(withinScopeTransfer, "A→B 同教师转班反例必须存在");
+  assert.deepEqual(evaluateModelWait(withinScopeTransfer), {
+    write: false,
+    outcome: "conflict",
+    error: "state_conflict",
+  });
+  const noneLabelAttributionChange = FIXTURE_MODEL_WAIT_CASES.find(
+    (entry) => entry.name === "attribution-changed-with-none-label-conflicts",
+  );
+  assert.ok(noneLabelAttributionChange, "事件标签 none 但事实变化的反例必须存在");
+  assert.deepEqual(evaluateModelWait(noneLabelAttributionChange), {
+    write: false,
+    outcome: "conflict",
+    error: "state_conflict",
+  });
+  const stableAttribution = FIXTURE_MODEL_WAIT_CASES.find((entry) => entry.name === "no-change-saves");
+  assert.ok(stableAttribution);
+  assert.deepEqual(evaluateModelWait(stableAttribution), { write: true, outcome: "saved" });
+  const outOfScopeTransfer = FIXTURE_MODEL_WAIT_CASES.find(
+    (entry) => entry.name === "child-transferred-during-wait",
+  );
+  assert.ok(outOfScopeTransfer);
+  assert.deepEqual(evaluateModelWait(outOfScopeTransfer), {
+    write: false,
+    outcome: "denied",
+    deny: "out_of_scope",
+  });
+  passed += 1;
+
+  /* 36) 首页局部未知计数：null 不转 0；已知待办可处理；高优先级未知不跳过 */
+  const partialPrimaryNames = [
+    "child-count-unknown-retry",
+    "class-count-unknown-retry",
+    "known-confirmations-with-unknown-range",
+    "known-supplements-with-unknown-range",
+    "known-organizes-with-unknown-range",
+    "unknown-higher-priority-retry",
+    "unknown-supplements-blocks-start",
+  ];
+  for (const name of partialPrimaryNames) {
+    assert.ok(
+      FIXTURE_PRIMARY_ACTION_CASES.some((entry) => entry.name === name),
+      `fixture 缺少局部未知主行动场景 ${name}`,
+    );
+  }
+  for (const name of partialPrimaryNames) {
+    const entry = FIXTURE_PRIMARY_ACTION_CASES.find((candidate) => candidate.name === name);
+    assert.ok(entry);
+    assert.equal(nextPrimaryAction(entry), entry.expected, `${name}: 局部未知计数主行动不一致`);
+  }
+  const childCountUnknown = FIXTURE_PRIMARY_ACTION_CASES.find(
+    (entry) => entry.name === "child-count-unknown-retry",
+  );
+  assert.ok(childCountUnknown && childCountUnknown.child_count === null);
+  assert.equal(nextPrimaryAction(childCountUnknown), "retry");
+  const knownConfirmationRangeUnknown = FIXTURE_PRIMARY_ACTION_CASES.find(
+    (entry) => entry.name === "known-confirmations-with-unknown-range",
+  );
+  assert.ok(knownConfirmationRangeUnknown?.counts);
+  assert.equal(nextPrimaryAction(knownConfirmationRangeUnknown), "process_confirmations");
+  passed += 1;
+
+  console.log(JSON.stringify({ passed, total: 36, reference_only: true }));
 }
 
 main();
