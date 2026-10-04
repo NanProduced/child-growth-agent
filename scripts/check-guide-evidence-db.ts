@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "pg";
 
 import {
+  assertCleanupComplete,
   modelGuardEnv,
   restoreGeneratedArtifacts,
   runCleanupSteps,
@@ -1331,9 +1332,7 @@ async function main(): Promise<void> {
     if (cleanupIssues.length > 0) console.error(`清理问题：${cleanupIssues.join("；")}`);
     throw failure;
   }
-  if (cleanupIssues.length > 0) {
-    throw new Error(`本轮资源清理失败，存在残留：${cleanupIssues.join("；")}`);
-  }
+  assertCleanupComplete(cleanupIssues);
   console.log(
     JSON.stringify({
       passed: directPassed + httpPassed,

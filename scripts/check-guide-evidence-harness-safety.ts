@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  assertCleanupComplete,
   defaultProcessProbe,
   inspectOwnedContainer,
   modelGuardEnv,
@@ -23,10 +24,13 @@ import {
   trackChildProcess,
   waitForChildExit,
   waitForVerifiedService,
+  type ArtifactFs,
+  type ChildExit,
   type CleanupReport,
   type CommandResult,
   type CommandRunner,
   type ProcessProbe,
+  type TrackedChild,
 } from "./harness-safety";
 
 /**
@@ -34,9 +38,12 @@ import {
  *
  * 覆盖：
  * - A 就绪身份：外部占位 200 / 子进程立即退出 / 端口竞争 / 正常本轮服务 / 核验中途失败；
- * - B 进程清理：正常结束 / 已退出不强杀 / taskkill 失败 / 创建身份无法核实 / 拒绝强杀 / 残留后代 / 多步清理互不跳过；
+ * - B 进程清理：正常结束 / 已退出不强杀 / taskkill 失败 / 创建身份无法核实 / 拒绝强杀 / 残留后代 / 多步清理互不跳过 /
+ *   根消失但已知后代存活 / 已知后代身份无法核实 / PID 复用不误杀 / 失败报告 → 非零退出闸门（B8–B13，内存替身）；
  * - C Docker 三态：daemon 不可用 / rm 失败后也不可用 / 明确不存在 / 标签不匹配 / 合法自有容器删除；
- * - D 生成物快照恢复；E 模型守门计数；F 实库装置接线（禁止回到旧不安全模式）；
+ * - D 生成物快照恢复：读取失败 fail-fast / 枚举失败 / 恢复阶段读取失败 / 明确不存在与新文件清理 / 精确恢复
+ *   （D3 真实临时目录，D4–D11 内存替身，不改动真实配置）；
+ * - E 模型守门计数；F 实库装置接线（禁止回到旧不安全模式，快照先于服务/数据库）；
  * - L Docker 实测：异标签容器保留、本轮容器清理、启动失败路径清理、既有容器不受影响。
  *
  * 运行：pnpm tsx scripts/check-guide-evidence-harness-safety.ts
@@ -235,7 +242,25 @@ async function runWiringChecks(): Promise<void> {
     ok(!/containerIdOf/.test(source), "不再存在把 inspect 失败当不存在的 containerIdOf");
     ok(!/server\.killed/.test(source), "不再用 server.killed 推断进程存活");
     ok(!/spawnSync\(\s*"taskkill"/.test(source), "不再直接 taskkill，必须走 stopTrackedChildTree");
-    ok(source.includes("本轮资源清理失败"), "清理问题必须导致非零退出，不得被成功输出吞掉");
+    ok(source.includes("assertCleanupComplete(cleanupIssues)"), "清理问题必须走共享闸门并非零退出");
+  });
+  await check("F3 实库装置消费失败报告：快照 fail-fast、恢复问题、清理闸门", () => {
+    const source = fs.readFileSync(DB_CHECK_FILE, "utf8");
+    const snapshotIndex = source.indexOf("snapshotGeneratedArtifacts(ROOT)");
+    const guardIndex = source.indexOf("startModelRequestGuard()");
+    const databaseIndex = source.indexOf("startIsolatedPostgres({");
+    ok(snapshotIndex >= 0 && guardIndex >= 0 && databaseIndex >= 0, "关键调用均存在");
+    ok(
+      snapshotIndex < guardIndex && snapshotIndex < databaseIndex,
+      "快照先于守门/数据库：快照失败即 fail-fast，不启动服务或数据库",
+    );
+    ok(source.includes("artifactReport.issues.length > 0"), "生成物恢复问题转为非成功报告");
+    ok(source.includes("httpAudit.stop = report"), "进程树清理报告被主装置记录消费");
+    ok(source.includes("assertCleanupComplete(cleanupIssues)"), "主装置最终闸门会非零退出");
+    ok(
+      /process\.exitCode\s*=\s*1/.test(source),
+      "main 顶层 catch 设置非零退出码",
+    );
   });
 }
 
@@ -338,6 +363,41 @@ async function runReadinessChecks(): Promise<void> {
 }
 
 /* ------------------------------ B 进程清理 ------------------------------ */
+
+interface FakeProcessState {
+  alive: Set<number>;
+  created: Map<number, string | null>;
+  parents: Map<number, number>;
+}
+
+function fakeProbe(state: FakeProcessState): ProcessProbe {
+  return {
+    creationTime: (pid) => (state.alive.has(pid) ? state.created.get(pid) ?? null : null),
+    isAlive: (pid) => state.alive.has(pid),
+    parentMap: () => new Map(state.parents),
+  };
+}
+
+function fakeTrackedChild(
+  pid: number,
+  startedAt: string | null,
+  exit: ChildExit | null = null,
+): TrackedChild {
+  return {
+    pid,
+    proc: {} as unknown as ChildProcess,
+    startedAt,
+    spawnError: null,
+    exit,
+    logFile: null,
+  } as TrackedChild;
+}
+
+function expectPid(actual: number, expected: number): void {
+  if (actual !== expected) {
+    throw new Error(`终止命令目标错误：期望 ${expected}，实际 ${actual}`);
+  }
+}
 
 async function runProcessCleanupChecks(): Promise<void> {
   currentSection = "B";
@@ -451,6 +511,148 @@ async function runProcessCleanupChecks(): Promise<void> {
     ok(notes[1]?.includes("failed-report"), notes[1] ?? "");
     ok(notes[2]?.includes("step-3") && notes[2].includes("超时"), notes[2] ?? "");
   });
+
+  await check("B8 kill 失败且根消失：已知存活子进程必须报告非成功", async () => {
+    const state: FakeProcessState = {
+      alive: new Set([9000, 9001]),
+      created: new Map([[9000, "T0"], [9001, "T1"]]),
+      parents: new Map([[9001, 9000]]),
+    };
+    const killCalls: number[] = [];
+    const report = await stopTrackedChildTree(fakeTrackedChild(9000, "T0"), {
+      probe: fakeProbe(state),
+      kill: (pid) => {
+        killCalls.push(pid);
+        state.alive.delete(9000);
+        return { status: 1, stdout: "", stderr: "simulated taskkill failure" };
+      },
+    });
+    ok(!report.ok, "根消失不等于树已清理，不得报成功");
+    ok(report.detail.includes("9001"), `报告列出待人工核实的资源：${report.detail}`);
+    ok(/taskkill failure|失败/.test(report.detail), `保留终止命令失败原因：${report.detail}`);
+    eq(killCalls, [9000], "只对已核实根 PID 发出终止命令，不盲目追加强杀");
+  });
+
+  await check("B9 kill 返回成功但已知子进程仍存活：报告非成功", async () => {
+    const state: FakeProcessState = {
+      alive: new Set([9100, 9101]),
+      created: new Map([[9100, "T0"], [9101, "T1"]]),
+      parents: new Map([[9101, 9100]]),
+    };
+    const report = await stopTrackedChildTree(fakeTrackedChild(9100, "T0"), {
+      probe: fakeProbe(state),
+      kill: (pid) => {
+        expectPid(pid, 9100);
+        state.alive.delete(9100);
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    ok(!report.ok, "已记录后代仍存活必须非成功");
+    ok(report.detail.includes("9101"), report.detail);
+  });
+
+  await check("B10 根与已知子树全部消失：确认成功", async () => {
+    const state: FakeProcessState = {
+      alive: new Set([9200, 9201, 9202]),
+      created: new Map([[9200, "T0"], [9201, "T1"], [9202, "T2"]]),
+      parents: new Map([[9201, 9200], [9202, 9201]]),
+    };
+    const report = await stopTrackedChildTree(fakeTrackedChild(9200, "T0"), {
+      probe: fakeProbe(state),
+      kill: (pid) => {
+        expectPid(pid, 9200);
+        state.alive.clear();
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    ok(report.ok, report.detail);
+    ok(/2 个|后代/.test(report.detail), `成功报告应包含子树核实信息：${report.detail}`);
+  });
+
+  await check("B11 根已退出且后代身份无法核实：非成功且不强杀", async () => {
+    const state: FakeProcessState = {
+      alive: new Set([9301]),
+      created: new Map([[9301, null]]),
+      parents: new Map([[9301, 9300]]),
+    };
+    let killCalls = 0;
+    const report = await stopTrackedChildTree(
+      fakeTrackedChild(9300, "T0", { code: 1, signal: null, atMs: 1 }),
+      {
+        probe: fakeProbe(state),
+        kill: () => {
+          killCalls += 1;
+          return { status: 0, stdout: "", stderr: "" };
+        },
+      },
+    );
+    ok(!report.ok, "身份无法核实的后代不得当作已清理");
+    ok(report.detail.includes("9301"), report.detail);
+    eq(killCalls, 0, "拒绝按旧 PID 强杀");
+  });
+
+  await check("B12 后代 PID 被复用：不得误杀新进程，按已清理处理", async () => {
+    const state: FakeProcessState = {
+      alive: new Set([9400, 9401]),
+      created: new Map([[9400, "T0"], [9401, "T1"]]),
+      parents: new Map([[9401, 9400]]),
+    };
+    const report = await stopTrackedChildTree(fakeTrackedChild(9400, "T0"), {
+      probe: fakeProbe(state),
+      kill: (pid) => {
+        expectPid(pid, 9400);
+        state.alive.delete(9400);
+        state.created.set(9401, "T-NEW-REUSED");
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    ok(report.ok, `PID 复用不得当作残留：${report.detail}`);
+  });
+
+  await check("B13 主装置消费链：失败报告 → 清理问题 → 非零退出闸门", async () => {
+    const state: FakeProcessState = {
+      alive: new Set([9000, 9001]),
+      created: new Map([[9000, "T0"], [9001, "T1"]]),
+      parents: new Map([[9001, 9000]]),
+    };
+    const cleanupNotes: string[] = [];
+    const captured: { report: CleanupReport | null } = { report: null };
+    await runCleanupSteps(
+      [
+        {
+          label: "http-server",
+          run: async () => {
+            captured.report = await stopTrackedChildTree(fakeTrackedChild(9000, "T0"), {
+              probe: fakeProbe(state),
+              kill: () => {
+                state.alive.delete(9000);
+                return { status: 1, stdout: "", stderr: "simulated failure" };
+              },
+            });
+            return captured.report;
+          },
+        },
+        {
+          label: "later-step",
+          run: () => {
+            cleanupNotes.push("later-step-ran");
+          },
+        },
+      ],
+      (label, detail) => cleanupNotes.push(`${label}: ${detail}`),
+    );
+    ok(captured.report !== null && !captured.report.ok, "失败报告被 runCleanupSteps 判为非成功");
+    ok(cleanupNotes.includes("later-step-ran"), "前一步清理失败不跳过后续自有资源");
+    let gateError: Error | null = null;
+    try {
+      assertCleanupComplete(cleanupNotes.filter((entry) => entry.includes(":")));
+    } catch (caught) {
+      gateError = caught instanceof Error ? caught : new Error(String(caught));
+    }
+    ok(gateError !== null, "主流程闸门必须抛出（非零退出）");
+    ok(/simulated failure|9001/.test(gateError?.message ?? ""), `闸门保留资源引用：${gateError?.message}`);
+    assertCleanupComplete([]);
+  });
 }
 
 /* ------------------------------ C Docker 三态 ------------------------------ */
@@ -562,6 +764,64 @@ async function runDockerTriStateChecks(): Promise<void> {
 
 /* ------------------------------ D 生成物恢复 ------------------------------ */
 
+interface MemoryArtifactFs {
+  ops: ArtifactFs;
+  files: Map<string, string>;
+  readErrors: Map<string, string>;
+  listErrors: Map<string, string>;
+  listResults: Map<string, string[] | null>;
+  calls: {
+    reads: string[];
+    writes: string[];
+    removes: string[];
+    lists: string[];
+    ensureDirs: string[];
+  };
+}
+
+function memoryArtifactFs(): MemoryArtifactFs {
+  const files = new Map<string, string>();
+  const readErrors = new Map<string, string>();
+  const listErrors = new Map<string, string>();
+  const listResults = new Map<string, string[] | null>();
+  const calls = {
+    reads: [] as string[],
+    writes: [] as string[],
+    removes: [] as string[],
+    lists: [] as string[],
+    ensureDirs: [] as string[],
+  };
+  const simulated = (code: string) => Object.assign(new Error(`simulated ${code}`), { code });
+  const ops: ArtifactFs = {
+    readText(absolute) {
+      calls.reads.push(absolute);
+      const error = readErrors.get(absolute);
+      if (error) throw simulated(error);
+      const content = files.get(absolute);
+      if (content === undefined) throw simulated("ENOENT");
+      return content;
+    },
+    writeText(absolute, content) {
+      calls.writes.push(absolute);
+      files.set(absolute, content);
+    },
+    removeFile(absolute) {
+      calls.removes.push(absolute);
+      if (!files.delete(absolute)) throw simulated("ENOENT");
+    },
+    ensureDir(absolute) {
+      calls.ensureDirs.push(absolute);
+    },
+    listTypeFiles(absolute) {
+      calls.lists.push(absolute);
+      const error = listErrors.get(absolute);
+      if (error) throw simulated(error);
+      return listResults.has(absolute) ? listResults.get(absolute) ?? null : null;
+    },
+  };
+  return { ops, files, readErrors, listErrors, listResults, calls };
+}
+
 async function runArtifactChecks(): Promise<void> {
   currentSection = "D";
   await check("D1 只恢复/删除本轮导致的变化，不覆盖运行前已有改动", () => {
@@ -606,6 +866,170 @@ async function runArtifactChecks(): Promise<void> {
     eq(fs.readFileSync(file, "utf8"), "UNTOUCHED", "内容不变");
     eq(fs.statSync(file).mtimeMs, before, "mtime 不变");
     fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  await check("D3 快照读取失败不得当作不存在：fail-fast 且不改动原路径", () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "g5-artifacts-"));
+    const tsconfig = path.join(tempRoot, "tsconfig.json");
+    fs.mkdirSync(tsconfig);
+    let error: Error | null = null;
+    try {
+      snapshotGeneratedArtifacts(tempRoot);
+    } catch (caught) {
+      error = caught instanceof Error ? caught : new Error(String(caught));
+    }
+    ok(error !== null, "快照无法建立时必须抛出，而不是把读取失败记为不存在");
+    ok(/tsconfig\.json/.test(error?.message ?? ""), `错误包含资源引用：${error?.message}`);
+    ok(fs.statSync(tsconfig).isDirectory(), "原路径保持不变");
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  await check("D4 快照 tsconfig EACCES：fail-fast，读取失败不得记为不存在", () => {
+    const mem = memoryArtifactFs();
+    const root = path.join(os.tmpdir(), "g5-mem-root");
+    const tsconfig = path.join(root, "tsconfig.json");
+    mem.files.set(tsconfig, "ORIGINAL_TSCONFIG");
+    mem.readErrors.set(tsconfig, "EACCES");
+    let error: Error | null = null;
+    try {
+      snapshotGeneratedArtifacts(root, mem.ops);
+    } catch (caught) {
+      error = caught instanceof Error ? caught : new Error(String(caught));
+    }
+    ok(error !== null, "快照必须 fail-fast");
+    ok(/EACCES/.test(error?.message ?? "") && /tsconfig\.json/.test(error?.message ?? ""), `错误保真：${error?.message}`);
+    eq(mem.calls.writes.length, 0, "覆盖调用为 0");
+    eq(mem.calls.removes.length, 0, "删除调用为 0");
+    eq(mem.files.get(tsconfig), "ORIGINAL_TSCONFIG", "原内容保持不变");
+  });
+
+  await check("D5 快照 next-env I/O 错误：fail-fast，不记为不存在", () => {
+    const mem = memoryArtifactFs();
+    const root = path.join(os.tmpdir(), "g5-mem-root");
+    const nextEnv = path.join(root, "next-env.d.ts");
+    mem.files.set(nextEnv, "ORIGINAL_NEXT_ENV");
+    mem.readErrors.set(nextEnv, "EIO");
+    let error: Error | null = null;
+    try {
+      snapshotGeneratedArtifacts(root, mem.ops);
+    } catch (caught) {
+      error = caught instanceof Error ? caught : new Error(String(caught));
+    }
+    ok(error !== null && /EIO/.test(error.message), `I/O 错误必须 fail-fast：${error?.message}`);
+    eq(mem.calls.removes.length, 0, "删除调用为 0");
+    eq(mem.files.get(nextEnv), "ORIGINAL_NEXT_ENV", "原内容保持不变");
+  });
+
+  await check("D6 快照类型目录枚举失败：fail-fast，不得当作空目录", () => {
+    const mem = memoryArtifactFs();
+    const root = path.join(os.tmpdir(), "g5-mem-root");
+    const typeDir = path.join(root, ".next", "types");
+    mem.listErrors.set(typeDir, "EACCES");
+    let error: Error | null = null;
+    try {
+      snapshotGeneratedArtifacts(root, mem.ops);
+    } catch (caught) {
+      error = caught instanceof Error ? caught : new Error(String(caught));
+    }
+    ok(error !== null && /目录枚举失败/.test(error.message), `枚举失败必须 fail-fast：${error?.message}`);
+    eq(mem.calls.writes.length, 0, "覆盖调用为 0");
+    eq(mem.calls.removes.length, 0, "删除调用为 0");
+  });
+
+  await check("D7 恢复阶段读取失败：记录问题、不删除/不覆盖、原文件保持改动后状态", () => {
+    const mem = memoryArtifactFs();
+    const root = path.join(os.tmpdir(), "g5-mem-root");
+    const nextEnv = path.join(root, "next-env.d.ts");
+    const tsconfig = path.join(root, "tsconfig.json");
+    mem.files.set(nextEnv, "ORIGINAL_NEXT_ENV");
+    mem.files.set(tsconfig, "ORIGINAL_TSCONFIG");
+    const snapshot = snapshotGeneratedArtifacts(root, mem.ops);
+    mem.files.set(tsconfig, "CHANGED_BY_RUN");
+    mem.readErrors.set(tsconfig, "EACCES");
+    const report = restoreGeneratedArtifacts(snapshot, root, mem.ops);
+    ok(report.issues.some((entry) => entry.includes("tsconfig.json") && entry.includes("EACCES")), `问题记录：${report.issues.join("；")}`);
+    eq(mem.calls.writes.length, 0, "覆盖调用为 0");
+    eq(mem.calls.removes.length, 0, "删除调用为 0");
+    eq(mem.files.get(tsconfig), "CHANGED_BY_RUN", "恢复阶段未改动该文件");
+    eq(mem.files.get(nextEnv), "ORIGINAL_NEXT_ENV", "其他文件保持原状");
+  });
+
+  await check("D8 真正缺失且本轮新建的文件可清理，明确不存在不被误判", () => {
+    const mem = memoryArtifactFs();
+    const root = path.join(os.tmpdir(), "g5-mem-root");
+    const nextEnv = path.join(root, "next-env.d.ts");
+    const tsconfig = path.join(root, "tsconfig.json");
+    const typeDir = path.join(root, ".next", "types");
+    const newType = path.join(typeDir, "new.ts");
+    mem.files.set(tsconfig, "ORIGINAL_TSCONFIG");
+    mem.listResults.set(typeDir, []);
+    const snapshot = snapshotGeneratedArtifacts(root, mem.ops);
+    eq(snapshot.files.get(nextEnv)?.state, "absent", "未读取到且 ENOENT：记录为明确不存在");
+    mem.files.set(nextEnv, "CREATED_BY_RUN");
+    mem.files.set(newType, "CREATED_BY_RUN");
+    mem.listResults.set(typeDir, [newType]);
+    const report = restoreGeneratedArtifacts(snapshot, root, mem.ops);
+    ok(report.removed.some((entry) => entry.includes("next-env.d.ts")), `本轮新建 next-env 被清理：${report.removed.join(",")}`);
+    ok(report.removed.some((entry) => entry.includes("new.ts")), `本轮新建类型文件被清理：${report.removed.join(",")}`);
+    eq(report.issues, [], "无问题");
+    eq(mem.files.get(tsconfig), "ORIGINAL_TSCONFIG", "原有文件不受影响");
+  });
+
+  await check("D9 恢复阶段目录枚举失败：记录问题并跳过该目录删除", () => {
+    const mem = memoryArtifactFs();
+    const root = path.join(os.tmpdir(), "g5-mem-root");
+    const typeDir = path.join(root, ".next", "types");
+    mem.listResults.set(typeDir, []);
+    const snapshot = snapshotGeneratedArtifacts(root, mem.ops);
+    mem.listErrors.set(typeDir, "EACCES");
+    const report = restoreGeneratedArtifacts(snapshot, root, mem.ops);
+    ok(report.issues.some((entry) => entry.includes("目录枚举失败")), `问题记录：${report.issues.join("；")}`);
+    eq(mem.calls.removes.length, 0, "枚举失败时删除调用为 0");
+  });
+
+  await check("D10 恢复阶段新增文件无法读取：记录问题且不删除", () => {
+    const mem = memoryArtifactFs();
+    const root = path.join(os.tmpdir(), "g5-mem-root");
+    const typeDir = path.join(root, ".next", "types");
+    const newType = path.join(typeDir, "new.ts");
+    mem.listResults.set(typeDir, []);
+    const snapshot = snapshotGeneratedArtifacts(root, mem.ops);
+    mem.files.set(newType, "CREATED_BY_RUN");
+    mem.listResults.set(typeDir, [newType]);
+    mem.readErrors.set(newType, "EACCES");
+    const report = restoreGeneratedArtifacts(snapshot, root, mem.ops);
+    ok(report.issues.some((entry) => entry.includes("new.ts")), `问题记录：${report.issues.join("；")}`);
+    eq(mem.calls.removes, [], "无法核实的新增文件不得删除");
+    eq(mem.files.get(newType), "CREATED_BY_RUN", "文件保持不变");
+  });
+
+  await check("D11 已有文件被本轮修改：按快照精确恢复", () => {
+    const mem = memoryArtifactFs();
+    const root = path.join(os.tmpdir(), "g5-mem-root");
+    const nextEnv = path.join(root, "next-env.d.ts");
+    mem.files.set(nextEnv, "ORIGINAL_NEXT_ENV");
+    const snapshot = snapshotGeneratedArtifacts(root, mem.ops);
+    mem.files.set(nextEnv, "CHANGED_BY_RUN");
+    const report = restoreGeneratedArtifacts(snapshot, root, mem.ops);
+    eq(mem.files.get(nextEnv), "ORIGINAL_NEXT_ENV", "内容精确恢复");
+    ok(report.restored.some((entry) => entry.includes("next-env.d.ts")), report.restored.join(","));
+    eq(report.issues, [], "无问题");
+  });
+
+  await check("D12 快照收录运行前已有类型文件：被本轮删除后恢复，不被当新增文件误删", () => {
+    const mem = memoryArtifactFs();
+    const root = path.join(os.tmpdir(), "g5-mem-root");
+    const typeDir = path.join(root, ".next", "types");
+    const oldType = path.join(typeDir, "old.ts");
+    mem.files.set(oldType, "PRE_EXISTING_TYPE");
+    mem.listResults.set(typeDir, [oldType]);
+    const snapshot = snapshotGeneratedArtifacts(root, mem.ops);
+    eq(snapshot.files.get(oldType)?.state, "present", "已有类型文件进入快照");
+    mem.files.delete(oldType);
+    const report = restoreGeneratedArtifacts(snapshot, root, mem.ops);
+    eq(mem.files.get(oldType), "PRE_EXISTING_TYPE", "被本轮删除的已有类型文件恢复");
+    eq(report.removed, [], "不得作为新增文件删除");
+    ok(report.restored.some((entry) => entry.includes("old.ts")), report.restored.join(","));
   });
 }
 

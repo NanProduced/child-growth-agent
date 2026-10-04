@@ -250,15 +250,18 @@ export interface ChildExit {
   atMs: number;
 }
 
-export interface TrackedChild {
+export interface TrackedProcess {
   pid: number;
-  proc: ChildProcess;
   /** spawn 时记录的创建身份（防 PID 复用）；null 表示未记录/无法核实 */
   startedAt: string | null;
   spawnError: string | null;
   exit: ChildExit | null;
   logFile: string | null;
   stopped?: CleanupReport;
+}
+
+export interface TrackedChild extends TrackedProcess {
+  proc: ChildProcess;
 }
 
 export function trackChildProcess(
@@ -286,7 +289,7 @@ export function trackChildProcess(
   return child;
 }
 
-export function childExitLabel(child: TrackedChild): string {
+export function childExitLabel(child: TrackedProcess): string {
   if (child.spawnError) return `spawn error: ${child.spawnError}`;
   if (!child.exit) return "仍在运行";
   const code = child.exit.code === null ? "null" : String(child.exit.code);
@@ -294,7 +297,7 @@ export function childExitLabel(child: TrackedChild): string {
   return `exit=${code} signal=${signal}`;
 }
 
-export function readLogTail(child: TrackedChild, lines = 20): string {
+export function readLogTail(child: TrackedProcess, lines = 20): string {
   if (!child.logFile || !fs.existsSync(child.logFile)) return "";
   try {
     return fs
@@ -308,12 +311,12 @@ export function readLogTail(child: TrackedChild, lines = 20): string {
   }
 }
 
-function logSuffix(child: TrackedChild): string {
+function logSuffix(child: TrackedProcess): string {
   const tail = readLogTail(child);
   return tail ? `\n日志尾部：\n${tail}` : "";
 }
 
-export async function waitForChildExit(child: TrackedChild, timeoutMs: number): Promise<boolean> {
+export async function waitForChildExit(child: TrackedProcess, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (!child.exit && Date.now() < deadline) {
     await sleep(200);
@@ -348,7 +351,7 @@ async function waitUntilGone(
   }
 }
 
-function verifyExitedTree(child: TrackedChild, probe: ProcessProbe): CleanupReport {
+function verifyExitedTree(child: TrackedProcess, probe: ProcessProbe): CleanupReport {
   if (child.pid <= 0) return { ok: true, detail: "未产生子进程 PID，无需清理" };
   if (probe.isAlive(child.pid)) {
     return {
@@ -376,12 +379,51 @@ function verifyExitedTree(child: TrackedChild, probe: ProcessProbe): CleanupRepo
   };
 }
 
+interface DescendantRecord {
+  pid: number;
+  startedAt: string | null;
+}
+
+function captureDescendants(
+  rootPid: number,
+  probe: ProcessProbe,
+): { ok: true; descendants: DescendantRecord[] } | { ok: false; detail: string } {
+  const parents = probe.parentMap();
+  if (!parents) {
+    return { ok: false, detail: "无法读取进程父子关系，本轮子树清理结果无法核实" };
+  }
+  return {
+    ok: true,
+    descendants: collectDescendants(rootPid, parents).map((pid) => ({
+      pid,
+      startedAt: probe.creationTime(pid),
+    })),
+  };
+}
+
+/** 仍存活或身份无法核实的已记录后代；创建身份不符按 PID 复用处理 */
+function stillAliveDescendants(records: DescendantRecord[], probe: ProcessProbe): number[] {
+  const alive: number[] = [];
+  for (const record of records) {
+    if (!probe.isAlive(record.pid)) continue;
+    if (record.startedAt === null) {
+      alive.push(record.pid);
+      continue;
+    }
+    const current = probe.creationTime(record.pid);
+    if (current === null || current === record.startedAt) alive.push(record.pid);
+  }
+  return alive;
+}
+
 /**
  * 只终止仍可核实属于本轮的子进程树：
- * 先核对 PID + 创建时间；已退出的进程绝不按旧 PID 强杀；无法核实即失败。
+ * - 先核对根 PID + 创建时间；已退出/身份无法核实的进程绝不按旧 PID 强杀；
+ * - 终止前记录已知后代（PID + 创建身份），终止后逐一核实；
+ * - 终止命令失败、根未退出、任何已知后代仍存活或无法核实 → 非成功并列出资源引用。
  */
 export async function stopTrackedChildTree(
-  child: TrackedChild,
+  child: TrackedProcess,
   options: { kill?: KillTree; probe?: ProcessProbe; waitMs?: number } = {},
 ): Promise<CleanupReport> {
   if (child.stopped?.ok) return child.stopped;
@@ -407,24 +449,39 @@ export async function stopTrackedChildTree(
         detail: `PID ${child.pid} 创建身份不一致（可能已被复用），拒绝强杀`,
       };
     } else {
+      const subtree = captureDescendants(child.pid, probe);
       const killResult = kill(child.pid);
-      if (killResult.status !== 0 && probe.isAlive(child.pid)) {
-        report = {
-          ok: false,
-          detail: `终止进程树失败：${killResult.stderr || killResult.stdout || killResult.error || `exit=${killResult.status}`}`,
-        };
+      const rootGone = await waitUntilGone(probe, child.pid, child.startedAt, waitMs);
+      const problems: string[] = [];
+      if (killResult.status !== 0) {
+        problems.push(
+          `终止命令返回失败：${killResult.stderr || killResult.stdout || killResult.error || `exit=${killResult.status}`}`,
+        );
+      }
+      if (!rootGone) problems.push(`PID ${child.pid} 仍在运行`);
+      let subtreeDetail = "；未能读取进程关系，本轮子树清理无法核实";
+      if (subtree.ok) {
+        const alive = stillAliveDescendants(subtree.descendants, probe);
+        if (alive.length > 0) {
+          problems.push(
+            `已记录的后代仍存活或身份无法核实：PID ${alive.join(",")}；拒绝按旧 PID 强杀，待人工核实`,
+          );
+        } else {
+          subtreeDetail = `；已核实 ${subtree.descendants.length} 个已记录后代退出`;
+        }
       } else {
-        const gone = await waitUntilGone(probe, child.pid, child.startedAt, waitMs);
-        report = gone
+        problems.push(subtree.detail);
+      }
+      report =
+        problems.length === 0
           ? {
               ok: true,
-              detail:
-                process.platform === "win32"
-                  ? `已按 PID ${child.pid} + 创建身份核验终止本轮进程树`
-                  : `已终止根进程 PID ${child.pid}；非 Windows 平台未验证后代清理`,
+              detail: `已按 PID ${child.pid} + 创建身份核验终止本轮进程树${subtreeDetail}`,
             }
-          : { ok: false, detail: `已发出终止命令，但 PID ${child.pid} 仍在运行` };
-      }
+          : {
+              ok: false,
+              detail: `${problems.join("；")}（本轮根 PID ${child.pid}）`,
+            };
     }
   }
   child.stopped = report;
@@ -832,51 +889,129 @@ export async function runCleanupSteps(
 
 /* ------------------------------ 生成物快照与恢复 ------------------------------ */
 
+/**
+ * 文件状态三态：已读取 / 明确不存在 / 无法核实。
+ * 只有 ENOENT/ENOTDIR 才算明确不存在；权限、I/O 等其他失败一律无法核实。
+ */
+export type ArtifactFileState =
+  | { state: "present"; content: string }
+  | { state: "absent" }
+  | { state: "unverifiable"; detail: string };
+
+/** 生成物文件系统操作；测试可注入内存替身，语义与 Node 实现一致 */
+export interface ArtifactFs {
+  readText(absolute: string): string;
+  writeText(absolute: string, content: string): void;
+  removeFile(absolute: string): void;
+  ensureDir(absolute: string): void;
+  /** 递归枚举目录下 .ts 文件；目录不存在返回 null；枚举失败抛出 */
+  listTypeFiles(absolute: string): string[] | null;
+}
+
+function fsErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+function fsErrorDetail(error: unknown): string {
+  if (error instanceof Error) {
+    const code = fsErrorCode(error);
+    return code ? `${error.message} (${code})` : error.message;
+  }
+  return String(error);
+}
+
+function isAbsentError(error: unknown): boolean {
+  const code = fsErrorCode(error);
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function readArtifactState(ops: ArtifactFs, absolute: string): ArtifactFileState {
+  try {
+    return { state: "present", content: ops.readText(absolute) };
+  } catch (error) {
+    if (isAbsentError(error)) return { state: "absent" };
+    return { state: "unverifiable", detail: `${absolute}: ${fsErrorDetail(error)}` };
+  }
+}
+
+const nodeArtifactFs: ArtifactFs = {
+  readText: (absolute) => fs.readFileSync(absolute, "utf8"),
+  writeText: (absolute, content) => fs.writeFileSync(absolute, content),
+  removeFile: (absolute) => fs.rmSync(absolute),
+  ensureDir: (absolute) => {
+    fs.mkdirSync(absolute, { recursive: true });
+  },
+  listTypeFiles(dir) {
+    try {
+      fs.accessSync(dir);
+    } catch (error) {
+      if (isAbsentError(error)) return null;
+      throw error;
+    }
+    const result: string[] = [];
+    const walk = (current: string): void => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(current, { withFileTypes: true });
+      } catch (error) {
+        if (isAbsentError(error)) return; // 枚举期间目录消失：按无内容处理
+        throw error;
+      }
+      for (const entry of entries) {
+        const absolute = path.join(current, entry.name);
+        if (entry.isDirectory()) walk(absolute);
+        else if (entry.isFile() && entry.name.endsWith(".ts")) result.push(absolute);
+      }
+    };
+    walk(dir);
+    return result;
+  },
+};
+
 export interface GeneratedArtifactSnapshot {
-  files: Map<string, string | null>;
+  files: Map<string, ArtifactFileState>;
 }
 
 const GENERATED_ARTIFACT_FILES = ["next-env.d.ts", "tsconfig.json"];
 const GENERATED_ARTIFACT_DIRS = [".next/types", ".next/dev/types"];
 
-function listTypeFiles(dir: string): string[] {
-  const result: string[] = [];
-  const walk = (current: string): void => {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const absolute = path.join(current, entry.name);
-      if (entry.isDirectory()) walk(absolute);
-      else if (entry.isFile() && entry.name.endsWith(".ts")) result.push(absolute);
-    }
-  };
-  walk(dir);
-  return result;
-}
-
-function readTextOrNull(absolute: string): string | null {
-  try {
-    return fs.readFileSync(absolute, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-/** 快照 next-env.d.ts / tsconfig.json 与 .next 类型生成物；不触碰 .next 其他内容 */
-export function snapshotGeneratedArtifacts(root: string): GeneratedArtifactSnapshot {
-  const files = new Map<string, string | null>();
+/**
+ * 快照 next-env.d.ts / tsconfig.json 与 .next 类型生成物；不触碰 .next 其他内容。
+ * 任一文件无法读取或目录无法枚举时 fail-fast（抛出），不把读取失败当作不存在。
+ */
+export function snapshotGeneratedArtifacts(
+  root: string,
+  ops: ArtifactFs = nodeArtifactFs,
+): GeneratedArtifactSnapshot {
+  const files = new Map<string, ArtifactFileState>();
+  const problems: string[] = [];
   for (const relative of GENERATED_ARTIFACT_FILES) {
     const absolute = path.join(root, relative);
-    files.set(absolute, readTextOrNull(absolute));
+    const state = readArtifactState(ops, absolute);
+    if (state.state === "unverifiable") problems.push(state.detail);
+    files.set(absolute, state);
   }
   for (const relative of GENERATED_ARTIFACT_DIRS) {
-    for (const absolute of listTypeFiles(path.join(root, relative))) {
-      files.set(absolute, readTextOrNull(absolute));
+    const absolute = path.join(root, relative);
+    let listed: string[] | null;
+    try {
+      listed = ops.listTypeFiles(absolute);
+    } catch (error) {
+      problems.push(`${absolute}: 目录枚举失败（${fsErrorDetail(error)}）`);
+      continue;
     }
+    for (const file of listed ?? []) {
+      const state = readArtifactState(ops, file);
+      if (state.state === "unverifiable") problems.push(state.detail);
+      files.set(file, state);
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `无法建立生成物快照（fail-fast，不继续启动服务/数据库/执行恢复删除）：${problems.join("；")}`,
+    );
   }
   return { files };
 }
@@ -887,47 +1022,81 @@ export interface ArtifactRestoreReport {
   issues: string[];
 }
 
-/** 只处理本轮导致的变化：改回的按快照写回，新建的删除，运行前已有改动不覆盖 */
+/** 只处理本轮已核实的生成物变化：改回的按快照写回，本轮新建的删除，无法核实的不动并记录 */
 export function restoreGeneratedArtifacts(
   snapshot: GeneratedArtifactSnapshot,
   root: string,
+  ops: ArtifactFs = nodeArtifactFs,
 ): ArtifactRestoreReport {
   const restored: string[] = [];
   const removed: string[] = [];
   const issues: string[] = [];
   for (const [absolute, before] of snapshot.files) {
-    const current = readTextOrNull(absolute);
-    if (before === null) {
-      if (current !== null) {
+    const relative = path.relative(root, absolute);
+    const current = readArtifactState(ops, absolute);
+    if (current.state === "unverifiable") {
+      issues.push(`恢复前无法读取，保持原状（不删除/不覆盖）：${current.detail}`);
+      continue;
+    }
+    if (before.state === "unverifiable") {
+      issues.push(`快照状态无法核实，保持原状：${before.detail}`);
+      continue;
+    }
+    if (before.state === "absent") {
+      if (current.state === "present") {
         try {
-          fs.rmSync(absolute);
-          removed.push(path.relative(root, absolute));
+          ops.removeFile(absolute);
+          removed.push(relative);
         } catch (error) {
-          issues.push(`${path.relative(root, absolute)}：${error instanceof Error ? error.message : String(error)}`);
+          issues.push(`删除本轮新建文件失败：${relative}: ${fsErrorDetail(error)}`);
         }
       }
       continue;
     }
-    if (current !== before) {
-      try {
-        fs.mkdirSync(path.dirname(absolute), { recursive: true });
-        fs.writeFileSync(absolute, before);
-        restored.push(path.relative(root, absolute));
-      } catch (error) {
-        issues.push(`${path.relative(root, absolute)}：${error instanceof Error ? error.message : String(error)}`);
-      }
+    if (current.state === "present" && current.content === before.content) continue;
+    try {
+      ops.ensureDir(path.dirname(absolute));
+      ops.writeText(absolute, before.content);
+      restored.push(relative);
+    } catch (error) {
+      issues.push(`恢复失败，保持原状：${relative}: ${fsErrorDetail(error)}`);
     }
   }
-  for (const relative of GENERATED_ARTIFACT_DIRS) {
-    for (const absolute of listTypeFiles(path.join(root, relative))) {
+  for (const dirRelative of GENERATED_ARTIFACT_DIRS) {
+    const dirAbsolute = path.join(root, dirRelative);
+    let listed: string[] | null;
+    try {
+      listed = ops.listTypeFiles(dirAbsolute);
+    } catch (error) {
+      issues.push(
+        `恢复阶段目录枚举失败，跳过该目录新增文件清理：${dirAbsolute}: ${fsErrorDetail(error)}`,
+      );
+      continue;
+    }
+    for (const absolute of listed ?? []) {
       if (snapshot.files.has(absolute)) continue;
+      const current = readArtifactState(ops, absolute);
+      if (current.state === "unverifiable") {
+        issues.push(`新增文件状态无法核实，不删除：${current.detail}`);
+        continue;
+      }
+      if (current.state === "absent") continue;
       try {
-        fs.rmSync(absolute);
+        ops.removeFile(absolute);
         removed.push(path.relative(root, absolute));
       } catch (error) {
-        issues.push(`${path.relative(root, absolute)}：${error instanceof Error ? error.message : String(error)}`);
+        issues.push(`删除本轮新建类型文件失败：${path.relative(root, absolute)}: ${fsErrorDetail(error)}`);
       }
     }
   }
   return { restored, removed, issues };
+}
+
+/* ------------------------------ 清理完成闸门 ------------------------------ */
+
+/** 主流程清理闸门：存在失败/未核实状态即抛错（非零退出），不得把“已调用清理”当成功 */
+export function assertCleanupComplete(cleanupIssues: string[]): void {
+  if (cleanupIssues.length > 0) {
+    throw new Error(`本轮资源清理失败，存在残留或未核实状态：${cleanupIssues.join("；")}`);
+  }
 }
