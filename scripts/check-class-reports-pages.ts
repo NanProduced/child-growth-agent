@@ -4,11 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { isValidElement, type ReactElement } from 'react';
 
 import type { Child, Observation, ObservationDraft, SchoolClass } from '../src/lib/types';
+import type { Principal } from '../src/lib/accounts/types';
 
 /**
  * 班级详情 / 成长回顾的隔离 fixture 检查：
- * 每个场景在独立子进程里 mock @/lib/queries，直接调用页面组件并遍历 JSX 树，
- * 不连接托管数据库、不渲染客户端组件。
+ * 每个场景在独立子进程里显式替换授权与原始/范围查询，调用页面并遍历 JSX 树。
+ * 仅证明 JSX 业务语义，不连接数据库/模型、不渲染客户端组件、不证明真实认证。
+ * 真实认证另由主任务的 19 Next HTTP / 107 DB 检查覆盖。
  */
 
 const CLASS: SchoolClass = {
@@ -152,7 +154,37 @@ type ModuleMock = {
 
 async function mockQueries(exports: Record<string, unknown>): Promise<void> {
   const { mock } = await import('node:test');
-  (mock as unknown as ModuleMock).module('@/lib/queries', { exports });
+  const modules = mock as unknown as ModuleMock;
+  const { AccountsError } = await import('../src/lib/accounts/errors');
+  const { mapAccountsError } = await import('../src/lib/accounts/guards');
+  const principal: Principal = {
+    account_id: 'offline-teacher', username: 'offline-teacher', display_name: '离线教师',
+    role: 'teacher', account_status: 'active', scope: { kind: 'classes', class_ids: [CLASS.id, OTHER_CLASS.id] },
+  };
+  const authorizedRead = async <T>(_request: unknown, ...args: [unknown, unknown, (viewer: Principal) => Promise<T>]) => {
+    void _request;
+    return args[2](principal);
+  };
+  const authorizedAccess = {
+    requireServerAccess: async () => principal,
+    withBusinessRead: authorizedRead,
+  };
+  modules.module('@/lib/auth', { exports: { ...authorizedAccess, AccountsError, mapAccountsError } });
+  modules.module('@/lib/accounts/access', { exports: authorizedAccess });
+  modules.module('@/lib/queries', { exports });
+  modules.module('@/lib/accounts/scoped-queries', {
+    exports: {
+      scopedGetClass: exports.getClass,
+      scopedGetClassChildren: exports.getClassChildren,
+      scopedListChildren: exports.listChildren,
+      scopedListObservations: async (...args: unknown[]) => {
+        const list = exports.listObservations as (...queryArgs: unknown[]) => Promise<Observation[]>;
+        return (await list(...args)).map((observation) => ({
+          ...observation, access_projection: 'full', can_write: true,
+        }));
+      },
+    },
+  });
 }
 
 async function renderClassPage(queries: Record<string, unknown>): Promise<unknown> {
@@ -404,7 +436,7 @@ async function main(): Promise<void> {
   if (failures.length > 0) {
     throw new Error(`失败场景：${failures.join('、')}`);
   }
-  console.log(JSON.stringify({ passed: names.length, total: names.length }));
+  console.log(JSON.stringify({ passed: names.length, total: names.length, jsx_fixtures: true, authorization_substituted: true, real_auth: false }));
 }
 
 void main();

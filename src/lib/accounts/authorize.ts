@@ -21,7 +21,7 @@ export function isLegalAccessCombination(
   action: AccessAction,
   resourceKind: AccessResource["kind"],
 ): boolean {
-  return (ACTION_RESOURCE_KINDS[action] as readonly string[]).includes(resourceKind);
+  return ACTION_RESOURCE_KINDS[action]?.includes(resourceKind) ?? false;
 }
 
 export function isTeachingAccessAction(action: AccessAction): boolean {
@@ -110,6 +110,9 @@ export function authorizeAuthState(
   action: AccessAction,
   resource: AccessResource,
 ): AccessDecision {
+  if (!isLegalAccessCombination(action, resource.kind)) {
+    return { allowed: false, invalid_request: ACCESS_INVALID_COMBINATION_ERROR };
+  }
   if (auth.kind === "unavailable") return { allowed: false, deny: "identity_unavailable" };
   if (auth.kind !== "authenticated") return { allowed: false, deny: "unauthenticated" };
   return authorizeAction(auth.principal, action, resource);

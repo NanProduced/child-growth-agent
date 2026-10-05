@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { withBusinessRead, AccountsError } from "@/lib/auth";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
@@ -20,8 +21,12 @@ export default async function ClassEvidencePage({ params, searchParams }: {
   const retryHref = evidencePageHref(`${backHref}/evidence`, search);
   let result: Awaited<ReturnType<typeof loadClassEvidenceOverview>>;
   try {
-    result = await loadClassEvidenceOverview(id, evidencePageQuery(search));
-  } catch {
+    result = await withBusinessRead(undefined, "class.read", { kind: "class", class_id: id }, () => loadClassEvidenceOverview(id, evidencePageQuery(search)));
+  } catch (error) {
+    if (error instanceof AccountsError) {
+      if (error.code === "not_found") notFound();
+      throw error;
+    }
     return <EvidenceReadError backHref={backHref} retryHref={retryHref} message="暂时无法读取班级证据。请重新读取；读取失败不代表统计为零。" />;
   }
   if (!result.ok) {

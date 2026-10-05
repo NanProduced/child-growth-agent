@@ -35,6 +35,7 @@ import {
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
+import { fetchWithAccountAuth } from "@/lib/accounts/client";
 import { ageText, classLabel, formatDateCn } from '@/lib/format';
 import { CLASS_STAGES, CLASS_STAGE_LABELS, type Child, type SchoolClass } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -117,7 +118,7 @@ function ErrorText({ message }: { message?: string }) {
 
 export default function NewChildPage() {
   const router = useRouter();
-  const { loading: authLoading, configured, isTeacher } = useTeacher();
+  const { loading: authLoading, configured, canCreateProfiles } = useTeacher();
 
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormState>({
@@ -200,7 +201,7 @@ export default function NewChildPage() {
     setSubmitting(true);
     try {
       const payload = normalize(form);
-      const res = await fetch('/api/children', {
+      const res = await fetchWithAccountAuth('/api/children', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -237,14 +238,14 @@ export default function NewChildPage() {
     );
   }
 
-  if (!configured || !isTeacher) {
+  if (!configured || !canCreateProfiles) {
     return (
       <div className="mx-auto max-w-lg py-10">
         <Alert>
           <LogIn className="size-4" />
-          <AlertTitle>需要教师登录</AlertTitle>
+          <AlertTitle>需要园所账号登录</AlertTitle>
           <AlertDescription>
-            建立成长档案属于写操作，需教师身份验证。请点击右上角「教师登录」输入通行口令后再来。
+            建立成长档案属于写操作，需教师身份验证。请点击右上角「园所账号登录」输入账号密码后再来。
           </AlertDescription>
         </Alert>
       </div>

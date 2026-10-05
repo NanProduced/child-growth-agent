@@ -1,7 +1,7 @@
 import { HeaderUtils } from "coze-coding-dev-sdk";
 import { NextRequest, NextResponse } from "next/server";
 
-import { requireTeacher } from "@/lib/auth";
+import { runBusinessWrite, AccountsError, mapAccountsError } from "@/lib/auth";
 import {
   GuideEvidenceBasisExpiredError,
   GuideEvidenceCatalogError,
@@ -42,9 +42,6 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const guard = requireTeacher(request);
-  if (guard) return guard;
-
   const { id } = await params;
   const body = await request.json().catch(() => null);
   const parsed = guideEvidenceMutationSchema.safeParse(body);
@@ -57,6 +54,7 @@ export async function POST(
   }
 
   try {
+    return await runBusinessWrite(request, "guide.decide", { kind: "observation", observation_id: id }, async () => {
     const observation = await getObservation(id);
     if (!observation) {
       return errorResponse(404, "not_found", "观察记录不存在");
@@ -99,7 +97,9 @@ export async function POST(
       revision: result.revision,
       links: result.links,
     });
+    });
   } catch (error) {
+    if (error instanceof AccountsError) return mapAccountsError(error);
     if (error instanceof GuideEvidenceInvalidError) {
       return errorResponse(400, "invalid_request", error.message, {
         link_id: error.link_id,

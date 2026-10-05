@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { AccountsError } from '@/lib/accounts/errors';
 import Link from 'next/link';
 import { ArrowUpRight, Leaf, Sprout, UserPlus } from 'lucide-react';
 
@@ -8,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { hasCurrentActivitySupport } from '@/lib/activity-support';
 import { classLabel } from '@/lib/format';
-import { listChildren, listObservations } from '@/lib/queries';
+import { scopedListChildren as listChildren, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
 import { activitySupportSchema } from '@/lib/validation';
 import type { ActivitySupport, Child, Observation } from '@/lib/types';
 
@@ -97,6 +98,7 @@ export default async function ActivitiesPage() {
       listObservations({ limit: 1000 }),
     ]);
   } catch (e) {
+    if (e instanceof AccountsError) throw e;
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
 

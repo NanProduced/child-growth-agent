@@ -27,6 +27,7 @@ import {
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
+import { fetchWithAccountAuth } from "@/lib/accounts/client";
 import {
   fetchClassContextState,
   isAbortError,
@@ -114,7 +115,7 @@ export default function NewObservationPage() {
     let alive = true;
     setClassesLoading(true);
     setClassesError(null);
-    fetch('/api/classes')
+    fetch('/api/classes?catalog=true')
       .then(async (r) => {
         const data = (await r.json().catch(() => null)) as { classes?: unknown } | null;
         if (!r.ok) {
@@ -216,7 +217,7 @@ export default function NewObservationPage() {
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      const res = await fetch('/api/observations', {
+      const res = await fetchWithAccountAuth('/api/observations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -274,7 +275,7 @@ export default function NewObservationPage() {
           <LogIn className="size-4" />
           <AlertTitle>需要教师身份</AlertTitle>
           <AlertDescription>
-            录入观察属于写操作，需教师身份验证。请点击右上角「教师登录」输入通行口令后再来。
+            录入观察属于写操作，需教师身份验证。请点击右上角「园所账号登录」输入账号密码后再来。
             访客模式可浏览档案与已归档记录。
           </AlertDescription>
         </Alert>

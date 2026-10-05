@@ -74,29 +74,60 @@
 
 **已从 supabase-js（PostgREST）切换为 pg 直连**。原因：平台托管数据库未注册 PostgREST 网关，supabase-js 无法连接；项目也未建立平台数据库集成授权。
 
-- 连接层：`src/storage/database/pg-client.ts` —— pg Pool 单例（挂 `globalThis` 防 HMR 重复建池），提供 `query<T>()` / `queryOne<T>()` 助手
-- 数据层：`src/lib/queries.ts` —— 9 个函数，SQL 用 `to_jsonb(table.*) AS data` 序列化（保持与 PostgREST 一致的 JSON 形态：时间戳为 ISO 字符串、jsonb 直传），错误文案与原实现一致
+- 连接层：`src/storage/database/pg-client.ts` —— pg Pool 单例（挂 `globalThis` 防 HMR 重复建池），提供 `query<T>()` / `queryOne<T>()` 助手与共享保存/读取上下文（业务写必须经过事务 hook）
+- 数据层：`src/lib/queries.ts` —— 班级、幼儿、分班、观察、确认与指南证据读写等原语，SQL 用 `to_jsonb(table.*) AS data` 序列化（时间戳为 ISO 字符串、jsonb 直传）
 - 依赖：`pg`；`@supabase/supabase-js` 已移除；`supabase-client.ts` 已删除
-- 表结构参考：`src/storage/database/shared/schema.ts`（children / observations，外键 cascade，4 个索引）
+- 表结构参考：`src/storage/database/shared/schema.ts`（children / classes / child_class_enrollments / observations / app_accounts / app_sessions / teacher_class_assignments）
+
+## 账号与授权（AUTH v1，本地候选，尚未部署）
+
+- 授权入口：`src/lib/accounts/access.ts`（`resolveServerAuth` / `requireServerAccess` / `withBusinessRead` / `runBusinessWrite`）与 `src/lib/accounts/scoped-queries.ts`（`scoped*` 读函数）；`src/lib/auth.ts` 只重导出并向后兼容旧调用。权限契约见 `docs/auth-v1/contract.md`，接入清单见 `docs/auth-v1/business-access-home.md`。
+- 服务端是唯一授权事实：UI 隐藏按钮不构成授权；禁止缓存 Principal、禁止信任客户端声明的角色/班级/归属；资源归属必须每次从数据库重查。
+- 登录：`/api/auth/login` 使用账号口令（scrypt + 随机盐）与数据库会话（HttpOnly 同源 Cookie、会话绑定 CSRF、固定期限、GET 不续期）；管理端教师管理在 `/admin/teachers` 与 `/api/admin/teachers/*`。
+- 旧 `TEACHER_PASSCODE` 口令 Cookie 不再授权新业务，仅保留失败兼容入口；不应作为新版授权或部署前提。
+- 错误语义：401 未认证、403 无权限、400 非法动作/资源组合、409 业务冲突、503 身份服务不可用（fail closed，配置缺失时同样 503）。
+
+## 指南证据链（G5，读模型/后端已实现）
+
+- 目录、读模型、建议与决定 API、儿童证据册/班级概览只读页面已实现（`src/lib/guide/`、`/api/observations/[id]/guide-evidence`、`/children/[id]/evidence`、`/classes/[id]/evidence`）。
+- **前端关联写闭环仍待完成**：正式页面尚未接入观察与表现条目的手动关联/决定写入；后端已具备该能力，接入时须复用现有授权与事务入口。
+- 活动反馈、学期快照尚未实现，不属于当前 Demo 范围。
 
 ## 环境变量
 
 | 变量 | 用途 | 备注 |
 |---|---|---|
 | `DATABASE_URL` | pg 直连连接串 | 本地优先使用；扣子编程生产环境没有自定义值时回退到平台注入的 `PGDATABASE_URL` |
-| `TEACHER_PASSCODE` | 教师登录口令 | /api/auth/login 校验；本地 `.env` 有联调值 |
+| `AUTH_TRUSTED_ORIGINS` | 可信公开源（逗号分隔，含协议与端口） | AUTH v1 登录与登录后写保护的**必填项**；未配置时一律 fail closed（503），不信任 Host / X-Forwarded-* |
+| `AUTH_SCHOOL_ID` | 单园所标识 | 可选，默认 `single-school` |
+| `AUTH_COOKIE_SECURE` | 会话 Cookie 是否强制 Secure | 可选，留空时按可信源是否全为 https 自动判断 |
+| `AUTH_LOGIN_RATE_LIMIT_MAX` / `AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS` | 登录限流（进程内固定窗口） | 可选，默认 10 次 / 300 秒 |
+| `TEACHER_PASSCODE` | 旧教师口令 | 仅遗留兼容，不再用于 AUTH v1 授权，也不再是部署前提 |
 
 本地 `.env` 不提交（.gitignore 已含）；`.env.example` 只保留变量名和说明。`.coze` 只保存项目与部署元数据，禁止写入数据库连接串、口令、API Key 或其他凭证。部署环境变量统一在扣子编程部署面板配置。
 
+## 迁移
+
+已存在增量迁移文件，**按以下顺序执行**（均可重复执行，先建表/索引/约束再回填）：
+
+1. `scripts/initialize-demo-db.sql` —— 基础 schema + 合成演示数据（在 `INSERT INTO children` 前为纯建表/建索引部分，可按需截取）
+2. `scripts/upgrade-classes.sql` —— 班级、分班与观察发生时班级快照
+3. `scripts/upgrade-guide-evidence-v1.sql` —— 指南证据列（须在 `upgrade-classes.sql` 之后，依赖 observations 与 classes.stage）
+4. `scripts/upgrade-auth-v1.sql` —— 账号、会话、任教关系（AUTH1）
+
+其他按需：`scripts/upgrade-agent-context.sql`、`scripts/upgrade-growth-profile.sql`。建表后的权威形状以 `src/storage/database/shared/schema.ts` 为准；生产库执行前必须核对表、索引与约束（含 `app_accounts_role_check` / `app_accounts_status_check`）已存在。
+
 ## 部署要点
 
-1. 部署前在扣子编程部署面板的"生产环境变量"配置 `DATABASE_URL` 与 `TEACHER_PASSCODE`，缺一不可
+1. 部署前在扣子编程部署面板的"生产环境变量"配置 `DATABASE_URL` 与 `AUTH_TRUSTED_ORIGINS`（新授权必需）；旧 `TEACHER_PASSCODE` 不再作为新版授权或部署前提
 2. AI 整理使用当前选择的 provider；Coze provider 依赖平台注入的 LLM 网关凭证，StepFun provider 依赖本地/生产环境变量中的 StepFun 配置，不能把任何凭证写入仓库
-3. 新数据库需要先完成与 `src/storage/database/shared/schema.ts` 一致的表结构初始化；当前仓库没有可自动执行的迁移文件，部署前必须验证表和索引已存在
+3. 按上节顺序执行/核对迁移；部署前必须验证表和索引已存在
 4. `.coze` 的部署标识是**扣子编程**体系的：`project_id` 必须等于沙箱 `COZE_PROJECT_ID`（当前 `7690843235199139866`，与线上站点埋点上报一致）。初始化快照曾带入旧扣子（低代码平台）的 `project_id`/`app_id`，2025-09 已纠正为扣子编程值并移除无对应概念的 `app_id`——两平台 ID 互不相通，勿混用
 
 ## 测试与验收（踩坑记录）
 
-- **test_run 的每条 command 在隔离环境执行，/tmp 文件不跨命令共享**。带登录态的写接口测试必须单条命令自包含：`curl -s -c /tmp/ck -X POST -d '{"passcode":"..."}' .../api/auth/login > /dev/null && curl -s -b /tmp/ck ...`（同一 command 内先 login 再带 cookie）
-- 联调产生的测试数据要清理干净，演示数据用固定 UUID（a1c1.../b2c2... 前缀）+ is_demo 标记，可精准重置
-- `pnpm lint --quiet` / `pnpm ts-check` 通过 ≠ 功能可用；写接口必须实际 curl 走一遍
+- **test_run 的每条 command 在隔离环境执行，/tmp 文件不跨命令共享**。带登录态的写接口测试必须单条命令自包含（同一 command 内先 login 再带 cookie 访问）；新版登录为账号口令 `/api/auth/login`，不是 `TEACHER_PASSCODE`
+- 联调产生的测试数据要清理干净；隔离测试资源按本轮随机 run ID + 容器标签/数据库身份核验后清理，禁止按端口或名称前缀误杀，端口被占用时应直接退出
+- `scripts/harness-safety.ts` 是已获批的安全装置，保持 blob `6702f2ddf3b436e79f8c92ae8756c33f611a8503` 不变
+- `pnpm lint --quiet` / `pnpm ts-check` 通过 ≠ 功能可用；写接口必须实际走一遍授权链路
+- 真实模型预算受限：模型相关验证使用测试进程内替身并明确标注，不新增产品侧绕过开关；禁止无预算的真实 provider 请求

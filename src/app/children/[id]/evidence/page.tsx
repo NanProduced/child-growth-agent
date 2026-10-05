@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { withBusinessRead, AccountsError } from "@/lib/auth";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
@@ -20,8 +21,12 @@ export default async function ChildEvidencePage({ params, searchParams }: {
   const retryHref = evidencePageHref(`${backHref}/evidence`, search);
   let result: Awaited<ReturnType<typeof loadChildEvidenceBook>>;
   try {
-    result = await loadChildEvidenceBook(id, evidencePageQuery(search));
-  } catch {
+    result = await withBusinessRead(undefined, "child.read", { kind: "child", child_id: id }, () => loadChildEvidenceBook(id, evidencePageQuery(search)));
+  } catch (error) {
+    if (error instanceof AccountsError) {
+      if (error.code === "not_found") notFound();
+      throw error;
+    }
     return <EvidenceReadError backHref={backHref} retryHref={retryHref} message="暂时无法读取观察证据。请重新读取；读取失败不代表没有相关记录。" />;
   }
   if (!result.ok) {

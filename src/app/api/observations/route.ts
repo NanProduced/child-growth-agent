@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireTeacher } from "@/lib/auth";
+import { runBusinessWrite, AccountsError, mapAccountsError } from "@/lib/auth";
 import {
   CLASS_CONTEXT_REASON_MESSAGES,
   buildEnrollmentSnapshot,
@@ -11,16 +11,16 @@ import {
   ObservationContextConflictError,
   createObservation,
   getChild,
-  listObservations,
   type ObservationClassPremise,
 } from "@/lib/queries";
 import type { ObservationClassContextSnapshot } from "@/lib/guide/types";
+import { scopedListObservations } from "@/lib/accounts/scoped-queries";
 import { OBSERVATION_STATUSES, type ObservationStatus } from "@/lib/types";
 import { createObservationSchema } from "@/lib/validation";
 /**
  * 观察记录：
- * - GET 对访客开放（只读），支持 ?child_id= 与 ?status= 过滤；
- * - POST 需教师身份：保存观察原文（raw_text 保存后不可改写）。
+ * - GET 按当前负责幼儿与原班历史裁剪，支持 ?child_id= 与 ?status= 过滤；
+ * - POST 要求教师 observation.write：保存观察原文（保存后不可改写）。
  */
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
@@ -34,9 +34,10 @@ export async function GET(request: NextRequest) {
   }
   const status = requestedStatus as ObservationStatus | undefined;
   try {
-    const observations = await listObservations({ childId, status: status || undefined });
+    const observations = await scopedListObservations({ childId, status: status || undefined }, request);
     return NextResponse.json({ observations });
   } catch (e) {
+    if (e instanceof AccountsError) return mapAccountsError(e);
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "查询观察记录失败" },
       { status: 500 }
@@ -45,9 +46,6 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const guard = requireTeacher(request);
-  if (guard) return guard;
-
   const body = await request.json().catch(() => null);
   const parsed = createObservationSchema.safeParse(body);
   if (!parsed.success) {
@@ -58,6 +56,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    return await runBusinessWrite(request, "observation.write", { kind: "child", child_id: parsed.data.child_id }, async () => {
     const child = await getChild(parsed.data.child_id);
     if (!child) {
       return NextResponse.json({ message: "幼儿不存在" }, { status: 404 });
@@ -124,7 +123,9 @@ export async function POST(request: NextRequest) {
       premise,
     });
     return NextResponse.json({ observation }, { status: 201 });
+    });
   } catch (e) {
+    if (e instanceof AccountsError) return mapAccountsError(e);
     if (e instanceof ObservationContextConflictError) {
       return NextResponse.json(
         { error: "class_context_conflict", message: e.message },

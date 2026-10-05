@@ -22,6 +22,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS app_accounts_username_unique ON app_accounts (
 CREATE INDEX IF NOT EXISTS app_accounts_role_idx ON app_accounts (role);
 CREATE INDEX IF NOT EXISTS app_accounts_status_idx ON app_accounts (status);
 
+-- 旧表也必须验证；遇到脏数据直接失败，禁止默认化、改写或删除账号。
+-- 同一 DO 内添加并验证，任一失败即回滚本块；重复执行不重复添加约束。
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'app_accounts'::regclass AND conname = 'app_accounts_role_check'
+  ) THEN
+    ALTER TABLE app_accounts ADD CONSTRAINT app_accounts_role_check
+      CHECK (role IN ('admin', 'teacher')) NOT VALID;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'app_accounts'::regclass AND conname = 'app_accounts_status_check'
+  ) THEN
+    ALTER TABLE app_accounts ADD CONSTRAINT app_accounts_status_check
+      CHECK (status IN ('active', 'disabled')) NOT VALID;
+  END IF;
+  ALTER TABLE app_accounts VALIDATE CONSTRAINT app_accounts_role_check;
+  ALTER TABLE app_accounts VALIDATE CONSTRAINT app_accounts_status_check;
+END $$;
+
 -- 2) 会话：只存令牌 SHA-256 哈希；撤销只写 revoked_at/revoked_reason
 CREATE TABLE IF NOT EXISTS app_sessions (
   id varchar(36) PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -40,6 +40,7 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
+import { fetchWithAccountAuth } from "@/lib/accounts/client";
 import { formatDateCn, formatDateTimeCn, schoolClassLabel } from '@/lib/format';
 import { followUpRounds } from '@/lib/follow-up';
 import {
@@ -139,7 +140,7 @@ export function ReviewClient({
   async function handleOrganize() {
     setBusy('organize');
     try {
-      const res = await fetch(`/api/observations/${observation.id}/organize`, {
+      const res = await fetchWithAccountAuth(`/api/observations/${observation.id}/organize`, {
         method: 'POST',
       });
       const data = (await res.json().catch(() => ({}))) as {
@@ -167,7 +168,7 @@ export function ReviewClient({
   async function handleFollowUp(action: FollowUpAction) {
     setBusy('follow-up');
     try {
-      const res = await fetch(`/api/observations/${observation.id}/follow-up`, {
+      const res = await fetchWithAccountAuth(`/api/observations/${observation.id}/follow-up`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -210,7 +211,7 @@ export function ReviewClient({
     }
     setBusy('confirm');
     try {
-      const res = await fetch(`/api/observations/${observation.id}/confirm`, {
+      const res = await fetchWithAccountAuth(`/api/observations/${observation.id}/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -256,7 +257,7 @@ export function ReviewClient({
     if (!form || !clarifyContent.trim()) return;
     setBusy('confirm');
     try {
-      const res = await fetch(`/api/observations/${observation.id}/confirm`, {
+      const res = await fetchWithAccountAuth(`/api/observations/${observation.id}/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -384,8 +385,8 @@ export function ReviewClient({
           <AlertTitle>访客只读模式</AlertTitle>
           <AlertDescription>
             {configured
-              ? '生成 AI 整理与确认归档需要教师身份：请点击右上角「教师登录」输入通行口令。'
-              : '服务端尚未配置教师口令（TEACHER_PASSCODE），写入与 AI 调用已默认禁用；配置环境变量并重启后可用。'}
+              ? '生成 AI 整理与确认归档需要教师身份：请点击右上角「园所账号登录」输入账号密码。'
+              : '服务端尚未配置教师口令（AUTH_TRUSTED_ORIGINS），写入与 AI 调用已默认禁用；配置环境变量并重启后可用。'}
           </AlertDescription>
         </Alert>
       ) : null}

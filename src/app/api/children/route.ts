@@ -1,14 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireTeacher } from "@/lib/auth";
-import { createChild, findClassesByName, getClass, listChildren } from "@/lib/queries";
+import { runBusinessWrite, AccountsError, mapAccountsError } from "@/lib/auth";
+import { createChild } from "@/lib/queries";
+import { scopedListChildren, scopedListClasses } from "@/lib/accounts/scoped-queries";
 import type { SchoolClass } from "@/lib/types";
 import { createChildSchema } from "@/lib/validation";
 
-/** 幼儿档案：读取对访客开放（只读），新增需教师身份（服务端校验） */
-export async function GET() {
+/** 幼儿档案：读取按当前任教范围；建档按目标班级授权（管理员也可建档）。 */
+export async function GET(request: NextRequest) {
   try {
-    return NextResponse.json({ children: await listChildren() });
+    return NextResponse.json({ children: await scopedListChildren(request) });
   } catch (e) {
+    if (e instanceof AccountsError) return mapAccountsError(e);
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "查询幼儿档案失败" },
       { status: 500 }
@@ -17,9 +19,6 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const guard = requireTeacher(request);
-  if (guard) return guard;
-
   const body = await request.json().catch(() => null);
   const parsed = createChildSchema.safeParse(body);
   if (!parsed.success) {
@@ -30,10 +29,11 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const target = await resolveClassForChild(parsed.data);
+    const target = await resolveClassForChild(parsed.data, request);
     if ("message" in target) {
       return NextResponse.json({ message: target.message }, { status: target.status });
     }
+    return await runBusinessWrite(request, "child.create_profile", { kind: "class", class_id: target.class.id }, async () => {
     const child = await createChild({
       name: parsed.data.name,
       gender: parsed.data.gender,
@@ -43,7 +43,9 @@ export async function POST(request: NextRequest) {
       note: parsed.data.note,
     });
     return NextResponse.json({ child }, { status: 201 });
+    });
   } catch (e) {
+    if (e instanceof AccountsError) return mapAccountsError(e);
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "新增幼儿失败" },
       { status: 500 }
@@ -60,9 +62,10 @@ export async function POST(request: NextRequest) {
 async function resolveClassForChild(input: {
   class_id?: string;
   class_name?: string;
-}): Promise<{ class: SchoolClass } | { status: number; message: string }> {
+}, request: NextRequest): Promise<{ class: SchoolClass } | { status: number; message: string }> {
+  const catalog = await scopedListClasses({ catalog: true }, request);
   if (input.class_id) {
-    const found = await getClass(input.class_id);
+    const found = catalog.find((klass) => klass.id === input.class_id);
     if (!found) return { status: 404, message: "班级不存在" };
     if (!found.is_active) {
       return { status: 400, message: `班级「${found.name}」已停用，无法新增幼儿` };
@@ -73,7 +76,7 @@ async function resolveClassForChild(input: {
   const name = input.class_name?.trim();
   if (!name) return { status: 400, message: "请选择班级：提交 class_id 或班级名称" };
 
-  const matches = await findClassesByName(name);
+  const matches = catalog.filter((klass) => klass.name === name).slice(0, 2);
   if (matches.length === 0) {
     return { status: 400, message: `未找到班级「${name}」，请先创建班级后再新增幼儿` };
   }

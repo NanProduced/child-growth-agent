@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Client } from "pg";
+import { checkInitialAdminRace, checkLoginMutationOrders } from "./check-auth-core-repairs";
 
 import {
   assertCleanupComplete,
@@ -45,9 +46,9 @@ import { safeQueryOne } from "../src/lib/accounts/pool-safety";
  * 本检查不覆盖业务路由接入（AUTH2），也不声称整个应用已受新认证保护。
  */
 
-const RUN_ID = `auth1-${Date.now().toString(36)}-${crypto.randomBytes(3).toString("hex")}`;
-const LABEL_KEY = "cga.auth1.check";
-const CONTAINER_NAME = `cga-auth1-${RUN_ID}`;
+const RUN_ID = `home-auth-core-${Date.now().toString(36)}-${crypto.randomBytes(6).toString("hex")}`;
+const LABEL_KEY = "cga.home.auth.core.check";
+const CONTAINER_NAME = `cga-${RUN_ID}`;
 const DB_NAME = "cga_auth1_check";
 const STUDENT_PASSWORD = "Student-Password-1!";
 const ADMIN_USERNAME = "checkadmin";
@@ -275,7 +276,7 @@ async function applySqlFile(client: Client, file: string): Promise<void> {
   await client.query(sql);
 }
 
-async function databaseChecks(schoolId: string): Promise<void> {
+async function databaseChecks(schoolId: string, observer: Client): Promise<void> {
   const adminExistsBefore = await safeQueryOne<{ exists: boolean }>(
     `SELECT EXISTS (SELECT 1 FROM app_accounts WHERE role = 'admin') AS exists`,
   );
@@ -285,27 +286,20 @@ async function databaseChecks(schoolId: string): Promise<void> {
   const { createInitialAdmin, adminExists, createTeacherWithAssignments } = await import(
     "../src/lib/accounts/repository"
   );
-  const bootstrapInput = async (username: string) => ({
+  const [adminHashA, adminHashB] = await Promise.all([
+    hashPassword(ADMIN_PASSWORD), hashPassword(ADMIN_PASSWORD),
+  ]);
+  const bootstrapInput = (username: string, passwordHash: string) => ({
     username,
     displayName: `管理员-${username}`,
-    passwordHash: await hashPassword(ADMIN_PASSWORD),
+    passwordHash,
   });
-  const [first, second] = await Promise.allSettled([
-    createInitialAdmin(await bootstrapInput(ADMIN_USERNAME), schoolId),
-    createInitialAdmin(await bootstrapInput(`${ADMIN_USERNAME}-b`), schoolId),
+  await checkInitialAdminRace(observer, schoolId, [
+    bootstrapInput(ADMIN_USERNAME, adminHashA), bootstrapInput(`${ADMIN_USERNAME}-b`, adminHashB),
   ]);
-  const fulfilled = [first, second].filter((result) => result.status === "fulfilled");
-  const rejected = [first, second].filter((result) => result.status === "rejected");
-  assert.equal(fulfilled.length, 1, "并发初始化只允许一个成功");
-  assert.equal(rejected.length, 1, "另一个必须失败");
-  assert.equal(
-    (rejected[0] as PromiseRejectedResult).reason?.code,
-    "admin_already_initialized",
-    "冲突沿用 admin_already_initialized 语义",
-  );
   assert.equal(await adminExists(), true);
   await assert.rejects(
-    () => bootstrapInput(`${ADMIN_USERNAME}-c`).then((input) => createInitialAdmin(input, schoolId)),
+    () => createInitialAdmin(bootstrapInput(`${ADMIN_USERNAME}-c`, adminHashA), schoolId),
     (error: unknown) => (error as { code?: string }).code === "admin_already_initialized",
     "已有管理员不得重复创建",
   );
@@ -446,6 +440,12 @@ async function databaseChecks(schoolId: string): Promise<void> {
     assert.deepEqual(before, after, "读取既有会话不修改会话行");
   }
   passed += 1;
+
+  // 真实双连接：第一事务取得行锁后暂停，核实第二事务被该 PID 阻塞再释放。
+  // 两个密码哈希已在交错开始前准备；固定覆盖登录先/重置先、登录先/停用先。
+  await checkLoginMutationOrders(observer, schoolId, adminId, teacherHashA, newHash,
+    STUDENT_PASSWORD, "Student-Password-2!");
+  passed += 1;
 }
 
 /* ------------------------------ 真实 HTTP ------------------------------ */
@@ -516,7 +516,7 @@ async function loginHttp(
 }
 
 async function httpChecks(context: HttpContext): Promise<void> {
-  const { base, origin } = context;
+  const { base } = context;
   // 14) 登录前保护（真实 HTTP）
   const jsonp = await loginHttp(context, ADMIN_USERNAME, ADMIN_PASSWORD, { contentType: "application/jsonp" });
   assert.equal(jsonp.status, 400);
@@ -639,7 +639,6 @@ async function httpChecks(context: HttpContext): Promise<void> {
   const teacherLogin = await loginHttp(context, "dbteacher", "Student-Password-2!");
   assert.equal(teacherLogin.status, 200);
   const teacherCookie = cookieHeader(teacherLogin.setCookies, "cga_session");
-  const teacherCsrf = bodyAs<{ csrf: { token: string } }>(teacherLogin).csrf.token;
   assert.ok(teacherCookie);
   const teacherList = await api(context, "/api/admin/teachers", { cookie: teacherCookie });
   assert.equal(teacherList.status, 403);
@@ -815,69 +814,7 @@ async function httpChecks(context: HttpContext): Promise<void> {
   assert.equal(logoutNoSession.status, 200);
   passed += 1;
 
-  // 25) 受控并发：登录与重置/停用交错，不签发基于旧前提的会话
-  const { createTeacherWithAssignments } = await import("../src/lib/accounts/repository");
-  const adminRow = await safeQueryOne<{ id: string }>(`SELECT id FROM app_accounts WHERE role = 'admin' LIMIT 1`);
-  assert.ok(adminRow);
-  for (let trial = 0; trial < 2; trial += 1) {
-    const username = `interleave-reset-${trial}`;
-    const account = await createTeacherWithAssignments({
-      username,
-      displayName: `交错重置 ${trial}`,
-      passwordHash: await hashPassword(STUDENT_PASSWORD),
-      classIds: [],
-      assignedBy: adminRow.id,
-    });
-    const [loginResult, resetResult]: [ApiResponse, ApiResponse] = await Promise.all([
-      loginHttp(context, username, STUDENT_PASSWORD),
-      api(context, `/api/admin/teachers/${account.account_id}/password-reset`, {
-        method: "POST",
-        json: { account_id: account.account_id, new_password: `Rotated-Password-${trial}!` },
-        cookie: adminCookie,
-        csrf: adminCsrf,
-      }),
-    ]);
-    assert.equal(resetResult.status, 200);
-    assert.ok([200, 401].includes(loginResult.status), "登录要么失败要么成功");
-    if (loginResult.status === 200) {
-      const issuedSessionId = bodyAs<{ session: { session_id: string } }>(loginResult).session.session_id;
-      const row = await safeQueryOne<{ revoked_at: Date | null }>(
-        `SELECT revoked_at FROM app_sessions WHERE id = $1`,
-        [issuedSessionId],
-      );
-      assert.ok(row && row.revoked_at !== null, "重置交错后旧密码签发的会话必须已被撤销");
-    }
-  }
-  for (let trial = 0; trial < 2; trial += 1) {
-    const username = `interleave-disable-${trial}`;
-    const account = await createTeacherWithAssignments({
-      username,
-      displayName: `交错停用 ${trial}`,
-      passwordHash: await hashPassword(STUDENT_PASSWORD),
-      classIds: [],
-      assignedBy: adminRow.id,
-    });
-    const [loginResult, disableResult]: [ApiResponse, ApiResponse] = await Promise.all([
-      loginHttp(context, username, STUDENT_PASSWORD),
-      api(context, `/api/admin/teachers/${account.account_id}`, {
-        method: "PATCH",
-        json: { account_id: account.account_id, status: "disabled" },
-        cookie: adminCookie,
-        csrf: adminCsrf,
-      }),
-    ]);
-    assert.equal(disableResult.status, 200);
-    assert.ok([200, 403].includes(loginResult.status), "登录要么被停用拒绝要么成功");
-    if (loginResult.status === 200) {
-      const issuedSessionId = bodyAs<{ session: { session_id: string } }>(loginResult).session.session_id;
-      const row = await safeQueryOne<{ revoked_at: Date | null }>(
-        `SELECT revoked_at FROM app_sessions WHERE id = $1`,
-        [issuedSessionId],
-      );
-      assert.ok(row && row.revoked_at !== null, "停用交错后签发的会话必须已撤销");
-    }
-  }
-  passed += 1;
+  // 四种受控锁顺序在 databaseChecks 中完成；HTTP Promise.all 不作为交错证据。
 
   assert.ok(base.startsWith("http://127.0.0.1"), "只服务回环地址");
 }
@@ -885,6 +822,7 @@ async function httpChecks(context: HttpContext): Promise<void> {
 /* --------------------------------- 主流程 --------------------------------- */
 
 async function main(): Promise<void> {
+  const databaseOnly = process.argv.includes("--database-only");
   const cleanupIssues: string[] = [];
   const note = (label: string, detail: string) => {
     cleanupIssues.push(`${label}: ${detail}`);
@@ -902,6 +840,7 @@ async function main(): Promise<void> {
     await offlineChecks();
 
     guard = await startModelRequestGuard();
+    Object.assign(process.env, modelGuardEnv(guard));
     db = await startIsolatedPostgres({
       runId: RUN_ID,
       containerName: CONTAINER_NAME,
@@ -913,8 +852,8 @@ async function main(): Promise<void> {
 
     delete process.env.PGDATABASE_URL;
     process.env.DATABASE_URL = db.url;
-    const port = await freePort();
-    const origin = `http://127.0.0.1:${port}`;
+    const port = databaseOnly ? 0 : await freePort();
+    const origin = databaseOnly ? "https://home-auth-core.invalid" : `http://127.0.0.1:${port}`;
     process.env.AUTH_TRUSTED_ORIGINS = origin;
     process.env.AUTH_SCHOOL_ID = "check-school";
     process.env.AUTH_COOKIE_SECURE = "false";
@@ -927,68 +866,69 @@ async function main(): Promise<void> {
       await applySqlFile(setupClient, "initialize-demo-db.sql");
       await applySqlFile(setupClient, "upgrade-auth-v1.sql");
       await applySqlFile(setupClient, "upgrade-auth-v1.sql"); // 幂等
+      await databaseChecks("check-school", setupClient);
     } finally {
       await setupClient.end();
     }
 
-    await databaseChecks("check-school");
+    if (!databaseOnly) {
+      // 真实 HTTP：next dev（仅回环），模型出口改道守门，生成物快照后恢复
+      artifacts = snapshotGeneratedArtifacts(ROOT);
+      const require = createRequire(import.meta.url);
+      const nextBin = require.resolve("next/dist/bin/next");
+      const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
+      const childEnv: NodeJS.ProcessEnv = {
+        ...modelGuardEnv(guard, process.env),
+        DATABASE_URL: db.url,
+        AUTH_TRUSTED_ORIGINS: origin,
+        AUTH_SCHOOL_ID: "check-school",
+        AUTH_COOKIE_SECURE: "false",
+        AUTH_LOGIN_RATE_LIMIT_MAX: "3",
+        AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS: "300",
+      };
+      delete childEnv.PGDATABASE_URL;
+      const child = spawn(process.execPath, [nextBin, "dev", "-H", "127.0.0.1", "-p", String(port)], {
+        cwd: ROOT,
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      child.stdout?.pipe(logStream);
+      child.stderr?.pipe(logStream);
+      server = trackChildProcess(child, { logFile: LOG_FILE });
+      await waitForVerifiedService({ base: origin, port, child: server, timeoutMs: 180_000 });
 
-    // 真实 HTTP：next dev（仅回环），模型出口改道守门，生成物快照后恢复
-    artifacts = snapshotGeneratedArtifacts(ROOT);
-    const require = createRequire(import.meta.url);
-    const nextBin = require.resolve("next/dist/bin/next");
-    const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
-    const childEnv: NodeJS.ProcessEnv = {
-      ...modelGuardEnv(guard, process.env),
-      DATABASE_URL: db.url,
-      AUTH_TRUSTED_ORIGINS: origin,
-      AUTH_SCHOOL_ID: "check-school",
-      AUTH_COOKIE_SECURE: "false",
-      AUTH_LOGIN_RATE_LIMIT_MAX: "3",
-      AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS: "300",
-    };
-    delete childEnv.PGDATABASE_URL;
-    const child = spawn(process.execPath, [nextBin, "dev", "-H", "127.0.0.1", "-p", String(port)], {
-      cwd: ROOT,
-      env: childEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    child.stdout?.pipe(logStream);
-    child.stderr?.pipe(logStream);
-    server = trackChildProcess(child, { logFile: LOG_FILE });
-    await waitForVerifiedService({ base: origin, port, child: server, timeoutMs: 180_000 });
+      // 管理员已由数据库级初始化创建
+      const adminLogin = await loginHttp({ base: origin, origin, adminCookie: "", adminCsrf: "" }, ADMIN_USERNAME, ADMIN_PASSWORD);
+      assert.equal(adminLogin.status, 200, `管理员 HTTP 登录失败：${JSON.stringify(adminLogin.body)}`);
+      const adminCookie = cookieHeader(adminLogin.setCookies, "cga_session");
+      const adminCsrf = bodyAs<{ csrf: { token: string } }>(adminLogin).csrf.token;
+      assert.ok(adminCookie);
+      const context: HttpContext = { base: origin, origin, adminCookie, adminCsrf };
 
-    // 管理员已由数据库级初始化创建
-    const adminLogin = await loginHttp({ base: origin, origin, adminCookie: "", adminCsrf: "" }, ADMIN_USERNAME, ADMIN_PASSWORD);
-    assert.equal(adminLogin.status, 200, `管理员 HTTP 登录失败：${JSON.stringify(adminLogin.body)}`);
-    const adminCookie = cookieHeader(adminLogin.setCookies, "cga_session");
-    const adminCsrf = bodyAs<{ csrf: { token: string } }>(adminLogin).csrf.token;
-    assert.ok(adminCookie);
-    const context: HttpContext = { base: origin, origin, adminCookie, adminCsrf };
+      await httpChecks(context);
 
-    await httpChecks(context);
-
-    // 26) 数据库不可用：503 identity_unavailable，不降级匿名
-    // 先关闭本检查进程的连接池（不再需要直连查询），再停止数据库；
-    // 服务端子进程的连接失效由 pool-safety 的监听器兜底，查询路径 fail closed。
-    if (globalThis.__pgPool) {
-      await globalThis.__pgPool.end();
-      globalThis.__pgPool = undefined;
+      // 26) 数据库不可用：503 identity_unavailable，不降级匿名
+      // 先关闭本检查进程的连接池（不再需要直连查询），再停止数据库；
+      // 服务端子进程的连接失效由 pool-safety 的监听器兜底，查询路径 fail closed。
+      if (globalThis.__pgPool) {
+        await globalThis.__pgPool.end();
+        globalThis.__pgPool = undefined;
+      }
+      const teardownReport = db.teardown();
+      assert.equal(teardownReport.ok, true, `停止隔离数据库失败：${teardownReport.detail}`);
+      db = null;
+      const downStatus = await api(context, "/api/auth/status", { cookie: adminCookie });
+      assert.equal(downStatus.status, 503);
+      assert.deepEqual(bodyAs<{ state: { kind: string; reason?: string } }>(downStatus).state, {
+        kind: "unavailable",
+        reason: "identity_service_unavailable",
+      });
+      const downLogin = await loginHttp(context, ADMIN_USERNAME, ADMIN_PASSWORD);
+      assert.equal(downLogin.status, 503);
+      assert.equal(bodyAs<{ error: string }>(downLogin).error, "identity_unavailable");
+      passed += 1;
     }
-    const teardownReport = db.teardown();
-    assert.equal(teardownReport.ok, true, `停止隔离数据库失败：${teardownReport.detail}`);
-    db = null;
-    const downStatus = await api(context, "/api/auth/status", { cookie: adminCookie });
-    assert.equal(downStatus.status, 503);
-    assert.deepEqual(bodyAs<{ state: { kind: string; reason?: string } }>(downStatus).state, {
-      kind: "unavailable",
-      reason: "identity_service_unavailable",
-    });
-    const downLogin = await loginHttp(context, ADMIN_USERNAME, ADMIN_PASSWORD);
-    assert.equal(downLogin.status, 503);
-    assert.equal(bodyAs<{ error: string }>(downLogin).error, "identity_unavailable");
-    passed += 1;
 
     assert.equal(guard.hits, 0, "不得触达真实模型 provider");
     completed = true;
@@ -1012,6 +952,15 @@ async function main(): Promise<void> {
             if (!artifacts) return;
             const report = restoreGeneratedArtifacts(artifacts, ROOT);
             for (const issue of report.issues) note("generated-artifacts", issue);
+          },
+        },
+        {
+          label: "app-pool",
+          run: async () => {
+            if (globalThis.__pgPool) {
+              await globalThis.__pgPool.end();
+              globalThis.__pgPool = undefined;
+            }
           },
         },
         {
@@ -1049,7 +998,7 @@ async function main(): Promise<void> {
       total: passed,
       offline: true,
       real_db: true,
-      real_http: true,
+      real_http: !databaseOnly,
       controlled_concurrency: true,
       model_requests: 0,
     }),

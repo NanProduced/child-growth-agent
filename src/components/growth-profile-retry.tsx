@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { useTeacher } from '@/components/teacher-provider';
+import { fetchWithAccountAuth } from "@/lib/accounts/client";
 
 export function GrowthProfileRetry({
   childId,
@@ -27,7 +28,7 @@ export function GrowthProfileRetry({
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`/api/children/${encodeURIComponent(childId)}/growth-profile`, {
+      const response = await fetchWithAccountAuth(`/api/children/${encodeURIComponent(childId)}/growth-profile`, {
         method: 'POST',
       });
       const data = (await response.json().catch(() => ({}))) as { message?: string };

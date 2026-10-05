@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useTeacher } from '@/components/teacher-provider';
+import { fetchWithAccountAuth } from "@/lib/accounts/client";
 import type { ActivitySupport } from '@/lib/types';
 
 type ActivitySupportSectionProps = {
@@ -121,7 +122,7 @@ export function ActivitySupportSection({
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`/api/children/${encodeURIComponent(childId)}/activity-support`, {
+      const response = await fetchWithAccountAuth(`/api/children/${encodeURIComponent(childId)}/activity-support`, {
         method: 'POST',
       });
       const data = (await response.json().catch(() => ({}))) as {
@@ -163,7 +164,7 @@ export function ActivitySupportSection({
             className="w-full sm:w-auto"
             disabled={busy || authLoading || !teacherReady}
             onClick={() => void handleGenerate()}
-            title={!teacherReady && !authLoading ? '请先进入教师模式' : undefined}
+            title={!teacherReady && !authLoading ? '请先进入园所账号' : undefined}
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : support ? <RefreshCw className="size-4" /> : <Sparkles className="size-4" />}
             {busy ? '正在生成…' : support ? '重新生成' : '生成活动支持'}
@@ -233,7 +234,7 @@ export function ActivitySupportSection({
                     : teacherReady
                       ? '点击“生成活动支持”，从已确认观察中整理 2～3 个可试试的活动。'
                       : configured
-                        ? '进入教师模式后，可以从已确认观察生成活动支持。'
+                        ? '进入园所账号后，可以从已确认观察生成活动支持。'
                         : '当前未配置教师口令，暂时不能生成活动支持。'}
               </p>
             </div>
