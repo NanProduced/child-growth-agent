@@ -36,6 +36,7 @@ import {
   type PendingDecisionDraft,
 } from "@/lib/guide/decision-draft";
 import {
+  decisionIdentity,
   mutationTargetOutcome,
   parseGuideMutationResponse,
   parseHostObservationResponse,
@@ -136,7 +137,6 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
   const [reading, setReading] = useState(false);
   const [notice, setNotice] = useState<{ severity: "info" | "warning" | "error"; message: string } | null>(null);
   const [unresolved, setUnresolved] = useState<PendingVerification | null>(null);
-  const [savedDetailsPending, setSavedDetailsPending] = useState(false);
   const [rejecting, setRejecting] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState("");
   const [withdrawing, setWithdrawing] = useState<string | null>(null);
@@ -156,7 +156,6 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
     setEditorStamp(null);
     setStaleSaveArmed(false);
     setUnresolved(null);
-    setSavedDetailsPending(false);
     setNotice(null);
     setRejecting(null);
     setWithdrawing(null);
@@ -172,7 +171,6 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
     modeRef.current = props.mode;
     if (stampRef.current === props.serverStamp) return;
     stampRef.current = props.serverStamp;
-    setSavedDetailsPending(false);
     if (props.hostCommitted || (wasPreArchive && props.mode === "archived")) {
       setPending([]);
       setEditing(null);
@@ -220,7 +218,7 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
     (link) => link.status === "rejected" || link.status === "withdrawn",
   );
   const focusOption = props.focusItemId ? itemById.get(props.focusItemId) ?? null : null;
-  const writeLocked = !props.access.can_decide || props.hostBusy || props.hostCommitted || savedDetailsPending || unresolved !== null;
+  const writeLocked = !props.access.can_decide || props.hostBusy || props.hostCommitted || unresolved !== null;
   const editorStaleReason = (() => {
     if (!editing || !editorStamp) return null;
     if (editorStamp.basedOnRevision !== props.revision) return "服务端关联修订已变化，请重新核对依据。";
@@ -363,17 +361,17 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
       setEditorStamp(null);
       return;
     }
-    const target: MutationTarget = {
-      action: "confirm",
-      link_id: editing.link_id,
-      item_id: editing.item_id,
-    };
-    void submitArchivedDecision(editing, target);
+    void submitArchivedDecision(editing);
   }
 
-  async function submitArchivedDecision(draft: DecisionDraft, target: MutationTarget) {
+  async function submitArchivedDecision(draft: DecisionDraft) {
     const item = itemById.get(draft.item_id);
     const health = item ? isHealthReference(item.evidence_type) : false;
+    const decisionInput = draftToDecisionInput(draft);
+    const target: MutationTarget = {
+      action: "confirm",
+      decision: decisionIdentity(decisionInput, draft.item_id),
+    };
     setBusy("submit");
     setNotice(null);
     try {
@@ -383,7 +381,7 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
         body: JSON.stringify({
           action: "confirm",
           expected_guide_revision: props.revision,
-          decisions: [draftToDecisionInput(draft)],
+          decisions: [decisionInput],
         }),
       });
       const rawText = await res.text();
@@ -480,7 +478,7 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
   }
 
   async function submitTerminal(action: "reject" | "withdraw", linkId: string, reason: string) {
-    const target: MutationTarget = { action, link_id: linkId };
+    const target: MutationTarget = { action, link_id: linkId, reason: reason.trim() ? reason.trim() : null };
     setBusy("terminal");
     setNotice(null);
     try {
@@ -563,8 +561,7 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
         return;
       }
       if (!unresolved) {
-        setSavedDetailsPending(true);
-        setNotice({ severity: "info", message: "已请求重新读取服务端状态；详情到达前不能再次写入。" });
+        setNotice({ severity: "info", message: "已请求重新读取服务端状态；详情到达后会更新显示。" });
         router.refresh();
         return;
       }
@@ -577,14 +574,14 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
       const outcome = rawTargetOutcome(read.observation.guide_evidence, unresolved.target);
       if (outcome === "applied") {
         setUnresolved(null);
-        setSavedDetailsPending(true);
         setEditing(null);
         setEditorStamp(null);
         setRejecting(null);
         setWithdrawing(null);
+        // 读取成功即恢复正常操作，不依赖版本戳变化解锁；旧修订的再次写入会被服务端 409 拦下
         setNotice({
           severity: "info",
-          message: "重新读取后确认本次已写入；正在重新读取详情，期间不能再次写入。",
+          message: "重新读取后确认本次已写入；详情将在后续刷新中更新，可继续操作（不会自动重复发送）。",
         });
         router.refresh();
         return;
@@ -683,16 +680,13 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
             </p>
           ) : null}
 
-          {unresolved || savedDetailsPending ? (
+          {unresolved ? (
             <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2" role="status" data-testid="guide-unresolved">
               <p className="flex items-center gap-1.5 text-xs font-medium text-amber-900">
                 <TriangleAlert className="size-3.5" aria-hidden="true" />
-                {unresolved ? "写入结果待核对" : "已写入，详情待重新读取"}
+                写入结果待核对
               </p>
-              <p className="text-xs leading-5 text-amber-900">
-                {unresolved?.message ??
-                  "服务端状态可能已变化；请重新读取核对，读取成功前不会再次写入。"}
-              </p>
+              <p className="text-xs leading-5 text-amber-900">{unresolved.message}</p>
               <Button
                 type="button"
                 variant="outline"
@@ -774,7 +768,7 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
               staleReason={editorStaleReason}
               staleSaveArmed={staleSaveArmed}
               busy={busy !== null || reading || props.hostBusy}
-              disabled={props.hostCommitted || unresolved !== null || savedDetailsPending}
+              disabled={props.hostCommitted || unresolved !== null}
               mode={props.mode}
               onPickerQuery={setPickerQuery}
               onChange={updateEditing}

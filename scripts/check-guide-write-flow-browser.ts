@@ -286,6 +286,7 @@ async function main(): Promise<void> {
       await runReviewIncompleteChecks(context);
       await runRealVersionChangeChecks(context);
       await runHealthReferenceChecks(context);
+      await runIdempotentReadBackChecks(context);
     } finally {
       await browser.close();
     }
@@ -1584,6 +1585,74 @@ async function runHealthReferenceChecks(ctx: TestContext): Promise<void> {
     "real_http+real_db+browser",
   );
   await context.close();
+}
+
+/* --------------------------- R1 返修：幂等读回不锁死 --------------------------- */
+
+async function runIdempotentReadBackChecks(ctx: TestContext): Promise<void> {
+  const observationId = (globalThis as Record<string, unknown>).__mainObservationId as string;
+  const { context, page } = await newAccountContext(ctx, "g6teacher", TEACHER_PASSWORD, {
+    width: 1440,
+    height: 900,
+  });
+  await page.goto(`${ctx.BASE}${reviewUrl(observationId)}`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+  await openAssociation(page);
+  const revisionSql = "SELECT COALESCE((guide_evidence->>'revision')::int,0) AS revision FROM observations WHERE id=$1";
+  const revisionBefore = (await ctx.sql<{ revision: number }>(revisionSql, [observationId])).rows[0].revision;
+
+  // 与健康检查相同内容重复提交：服务端幂等（changed=false，revision 不变），但把响应替换为不可核对
+  await beginEditor(page, "身高和体重");
+  await interceptGuideOnceWithFetch(page);
+  await page.locator('[data-testid="decision-save"]').click();
+  await page.locator("[data-testid=guide-unresolved]").waitFor({ timeout: 30_000 });
+  const revisionAfterIdempotent = (await ctx.sql<{ revision: number }>(revisionSql, [observationId])).rows[0].revision;
+  check(
+    "重复提交触发幂等（revision 不变）且进入待核对",
+    revisionAfterIdempotent === revisionBefore,
+    `${revisionBefore} -> ${revisionAfterIdempotent}`,
+    "real_http+interface_double",
+  );
+
+  await page.unroute("**/api/observations/*/guide-evidence");
+  await page.locator("[data-testid=guide-reconcile]").click();
+  await waitForText(page, "重新读取后确认本次已写入", "idempotent_readback");
+  check(
+    "读回成功且版本未变时锁已释放",
+    (await page.locator("[data-testid=guide-unresolved]").count()) === 0 &&
+      (await page.locator("[data-testid=decision-editor]").count()) === 0,
+    "lock released without version change",
+    "real_http+real_db+browser",
+  );
+
+  // 恢复后可以继续真实操作（撤回该条目），证明未永久锁死
+  const healthLink = page.locator("[data-testid=guide-active-link]").filter({ hasText: "身高和体重" }).first();
+  await healthLink.locator("[data-testid=guide-withdraw]").click();
+  await page.locator('input[placeholder="撤回原因（选填）"]').fill("幂等读回后验证可继续操作。");
+  await page.getByRole("button", { name: "确认撤回" }).click();
+  await waitForText(page, "已撤回这条关联", "idempotent_withdraw");
+  const withdrawn = await ctx.sql<{ links: Array<{ item_id: string; status: string }> }>(
+    "SELECT guide_evidence->'links' AS links FROM observations WHERE id=$1",
+    [observationId],
+  );
+  check(
+    "恢复后继续操作真实落库",
+    (withdrawn.rows[0]?.links ?? []).some((entry) => entry.item_id === HEALTH_ITEM && entry.status === "withdrawn"),
+    "withdraw applied after unlock",
+    "real_http+real_db",
+  );
+  await context.close();
+}
+
+/** 让真实请求发生（幂等写入），但把响应替换为无法核对的 200 {} */
+async function interceptGuideOnceWithFetch(page: Page) {
+  await page.route(
+    "**/api/observations/*/guide-evidence",
+    async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, contentType: "application/json", body: "{}" });
+    },
+    { times: 1 },
+  );
 }
 
 void main().catch((error: unknown) => {

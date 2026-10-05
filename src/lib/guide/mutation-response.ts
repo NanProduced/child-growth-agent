@@ -16,7 +16,7 @@ import {
   GUIDE_EVIDENCE_QUOTE_SOURCES,
   GUIDE_EVIDENCE_SUPPORT_KINDS,
 } from "./types";
-import type { EvidenceLinkView } from "./view-types";
+import type { EvidenceLinkView, GuideEvidenceDecisionInput } from "./view-types";
 
 /**
  * 指南写入结果的响应核对（G6-WRITE1-R1，客户端安全）。
@@ -149,25 +149,28 @@ function parseJson(rawText: string): { ok: true; payload: unknown } | { ok: fals
   }
 }
 
-/** 指南操作（confirm/reject/withdraw/suggest）响应核对；错误文案沿用响应 message */
+/**
+ * 指南操作（confirm/reject/withdraw/suggest）响应核对；错误文案沿用响应 message。
+ * HTTP 状态优先：非 2xx 永远是失败，合法成功形状不能覆盖失败状态。
+ */
 export function parseGuideMutationResponse(
   status: number,
   rawText: string,
   hostObservationId: string,
 ): ParseResult<SanitizedGuideMutation> {
+  const httpFailed = status < 200 || status >= 300;
   const parsed = parseJson(rawText);
+  if (httpFailed) {
+    const { message, error } = parsed.ok
+      ? readMessage(parsed.payload, `操作失败（${status}），请稍后重试。`)
+      : { message: `操作失败（${status}），响应无法解析。`, error: null };
+    return { ok: false, failure: { kind: "http", status, message, error } };
+  }
   if (!parsed.ok) {
-    if (status < 200 || status >= 300) {
-      return { ok: false, failure: { kind: "http", status, message: `操作失败（${status}），响应无法解析。`, error: null } };
-    }
     return { ok: false, failure: { kind: "invalid_json", status, message: "服务端返回了无法解析的数据，不能确认本次写入结果。" } };
   }
   const shape = guideMutationSchema.safeParse(parsed.payload);
   if (!shape.success) {
-    if (status < 200 || status >= 300) {
-      const { message, error } = readMessage(parsed.payload, `操作失败（${status}），请稍后重试。`);
-      return { ok: false, failure: { kind: "http", status, message, error } };
-    }
     return { ok: false, failure: { kind: "invalid_shape", status, message: "服务端响应缺少宿主、修订号或关联列表，不能确认本次写入结果。" } };
   }
   if (shape.data.observation_id !== hostObservationId) {
@@ -221,16 +224,16 @@ export function parseHostObservationResponse(
   rawText: string,
   hostObservationId: string,
 ): ReadBackResult {
+  const httpFailed = status < 200 || status >= 300;
   const parsed = parseJson(rawText);
-  if (!parsed.ok) {
-    if (status < 200 || status >= 300) {
-      return { ok: false, kind: "http", status, message: `读取观察状态失败（${status}），响应无法解析。` };
-    }
-    return { ok: false, kind: "invalid_json", message: "读取观察状态返回了无法解析的数据。" };
-  }
-  if (status < 200 || status >= 300) {
-    const { message } = readMessage(parsed.payload, `读取观察状态失败（${status}），请重试读取。`);
+  if (httpFailed) {
+    const { message } = parsed.ok
+      ? readMessage(parsed.payload, `读取观察状态失败（${status}），请重试读取。`)
+      : { message: `读取观察状态失败（${status}），响应无法解析。` };
     return { ok: false, kind: "http", status, message };
+  }
+  if (!parsed.ok) {
+    return { ok: false, kind: "invalid_json", message: "读取观察状态返回了无法解析的数据。" };
   }
   const shape = z.object({ observations: z.array(readObservationSchema) }).safeParse(parsed.payload);
   if (!shape.success) {
@@ -261,14 +264,55 @@ export function parseHostObservationResponse(
 
 /* --------------------------- 本次目标结果核对 --------------------------- */
 
+export interface RawGuideBasis {
+  observation_id: string;
+  quote: string;
+  quote_source: string;
+  quote_field: string | null;
+}
+
 export interface RawGuideLink {
   id: string;
   item_id: string;
   status: string;
   origin: string;
+  support: string | null;
+  basis: RawGuideBasis[];
+  adult_help_used: boolean;
+  teacher_note: string | null;
+  sustained_note: { period_start: string; period_end: string; description: string } | null;
+  withdrawn_reason: string | null;
 }
 
-/** 从原始 guide_evidence 容器读取关联；无法解析返回 null（不可当作没有关联） */
+function parseRawBasis(value: unknown): RawGuideBasis[] | null {
+  if (!Array.isArray(value)) return null;
+  const result: RawGuideBasis[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null;
+    const record = entry as Record<string, unknown>;
+    const observationId = typeof record.observation_id === "string" ? record.observation_id : null;
+    const quote = typeof record.quote === "string" ? record.quote : null;
+    const quoteSource = typeof record.quote_source === "string" ? record.quote_source : null;
+    const rawField = record.quote_field;
+    const quoteField = rawField === null || rawField === undefined ? null : typeof rawField === "string" ? rawField : undefined;
+    if (!observationId || quote === null || !quoteSource || quoteField === undefined) return null;
+    result.push({ observation_id: observationId, quote, quote_source: quoteSource, quote_field: quoteField });
+  }
+  return result;
+}
+
+function parseRawPeriodNote(value: unknown): { period_start: string; period_end: string; description: string } | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const start = typeof record.period_start === "string" ? record.period_start : null;
+  const end = typeof record.period_end === "string" ? record.period_end : null;
+  const description = typeof record.description === "string" ? record.description : null;
+  if (!start || !end || description === null) return undefined;
+  return { period_start: start, period_end: end, description };
+}
+
+/** 从原始 guide_evidence 容器读取关联；结构不可核对返回 null（不可当作没有关联） */
 export function readRawGuideLinks(value: unknown): RawGuideLink[] | null {
   if (value === null || value === undefined) return [];
   if (typeof value !== "object" || Array.isArray(value)) return null;
@@ -282,8 +326,27 @@ export function readRawGuideLinks(value: unknown): RawGuideLink[] | null {
     const itemId = typeof record.item_id === "string" ? record.item_id : null;
     const linkStatus = typeof record.status === "string" ? record.status : null;
     const origin = typeof record.origin === "string" ? record.origin : null;
-    if (!id || !itemId || !linkStatus || !origin) return null;
-    result.push({ id, item_id: itemId, status: linkStatus, origin });
+    const supportRaw = record.support;
+    const support = supportRaw === null || supportRaw === undefined ? null : typeof supportRaw === "string" ? supportRaw : undefined;
+    const basis = parseRawBasis(record.basis);
+    const adultHelp = typeof record.adult_help_used === "boolean" ? record.adult_help_used : null;
+    const noteRaw = record.teacher_note;
+    const teacherNote = noteRaw === null || noteRaw === undefined ? null : typeof noteRaw === "string" ? noteRaw : undefined;
+    const sustained = parseRawPeriodNote(record.sustained_note);
+    const withdrawnRaw = record.withdrawn_reason;
+    const withdrawnReason = withdrawnRaw === null || withdrawnRaw === undefined ? null : typeof withdrawnRaw === "string" ? withdrawnRaw : undefined;
+    if (
+      !id || !itemId || !linkStatus || !origin ||
+      support === undefined || basis === null || adultHelp === null ||
+      teacherNote === undefined || sustained === undefined || withdrawnReason === undefined
+    ) {
+      return null;
+    }
+    result.push({
+      id, item_id: itemId, status: linkStatus, origin,
+      support, basis, adult_help_used: adultHelp, teacher_note: teacherNote,
+      sustained_note: sustained, withdrawn_reason: withdrawnReason,
+    });
   }
   return result;
 }
@@ -295,17 +358,118 @@ export function readRawRevision(value: unknown): number | null {
   return typeof revision === "number" && Number.isInteger(revision) && revision >= 0 ? revision : null;
 }
 
+/**
+ * 本次决定的完整身份：支持类型、依据定位（来源/片段/出处/字段）、成人帮助、备注与纪要。
+ * 目标判定必须核对内容本身，不能只匹配条目和正式状态。
+ */
+export interface DecisionIdentityInput {
+  link_id: string | null;
+  item_id: string;
+  support: string;
+  basis: RawGuideBasis[];
+  adult_help_used: boolean;
+  teacher_note: string | null;
+  sustained_note: { period_start: string; period_end: string; description: string } | null;
+}
+
+function normalizedNote(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+/** 由提交的决定输入构造身份；link_id 决定（已有建议）不需要 item_id */
+export function decisionIdentity(
+  input: GuideEvidenceDecisionInput,
+  itemId?: string,
+): DecisionIdentityInput {
+  return {
+    link_id: "link_id" in input ? input.link_id : null,
+    item_id: "item_id" in input ? input.item_id : itemId ?? "",
+    support: input.support,
+    basis: input.basis.map((entry) => ({
+      observation_id: entry.observation_id,
+      quote: entry.quote.trim(),
+      quote_source: entry.quote_source,
+      quote_field: entry.quote_source === "raw_text" ? null : entry.quote_field ?? null,
+    })),
+    adult_help_used: input.adult_help_used === true,
+    teacher_note: normalizedNote(input.teacher_note),
+    sustained_note: input.support === "sustained" ? input.sustained_note ?? null : null,
+  };
+}
+
 export type MutationTarget =
-  | { action: "confirm"; link_id: string | null; item_id: string }
-  | { action: "reject"; link_id: string }
-  | { action: "withdraw"; link_id: string }
+  | { action: "confirm"; decision: DecisionIdentityInput }
+  | { action: "reject"; link_id: string; reason: string | null }
+  | { action: "withdraw"; link_id: string; reason: string | null }
   | { action: "suggest" };
 
 export type TargetOutcome = "applied" | "not_applied" | "unconfirmed";
 
 const FORMAL_STATUSES = ["confirmed_performance", "confirmed_clue"];
 
-/** 在已解析的 links 视图上核对本次目标结果；缺失/不匹配为 unconfirmed（需要读回） */
+function sameBasisIdentity(left: RawGuideBasis[], right: RawGuideBasis[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((entry, index) => {
+    const other = right[index];
+    return (
+      entry.observation_id === other.observation_id &&
+      entry.quote.trim() === other.quote.trim() &&
+      entry.quote_source === other.quote_source &&
+      (entry.quote_field ?? null) === (other.quote_field ?? null)
+    );
+  });
+}
+
+function samePeriodNote(
+  left: { period_start: string; period_end: string; description: string } | null,
+  right: { period_start: string; period_end: string; description: string } | null,
+): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.period_start === right.period_start &&
+    left.period_end === right.period_end &&
+    left.description === right.description
+  );
+}
+
+interface DecisionContentShape {
+  support: string | null;
+  basis: RawGuideBasis[];
+  adult_help_used: boolean;
+  teacher_note: string | null;
+  sustained_note: { period_start: string; period_end: string; description: string } | null;
+}
+
+function decisionContentMatches(link: DecisionContentShape, decision: DecisionIdentityInput): boolean {
+  if (link.support !== decision.support) return false;
+  if (!sameBasisIdentity(link.basis, decision.basis)) return false;
+  if (link.adult_help_used !== decision.adult_help_used) return false;
+  if (normalizedNote(link.teacher_note) !== normalizedNote(decision.teacher_note)) return false;
+  if (!samePeriodNote(link.sustained_note, decision.sustained_note)) return false;
+  return true;
+}
+
+/** 已提交决定是否已在 links 视图中按内容生效（同条目可能保留旧终态审计，必须找到生效项） */
+export function decisionAppliedInLinks(links: EvidenceLinkView[], decision: DecisionIdentityInput): boolean {
+  const candidates = decision.link_id
+    ? links.filter((entry) => entry.link_id === decision.link_id)
+    : links.filter((entry) => entry.item_id === decision.item_id && entry.origin === "manual");
+  return candidates.some(
+    (candidate) => FORMAL_STATUSES.includes(candidate.status) && decisionContentMatches(candidate, decision),
+  );
+}
+
+function rejectWithdrawApplied(
+  status: string,
+  actualReason: string | null | undefined,
+  target: Extract<MutationTarget, { action: "reject" | "withdraw" }>,
+): boolean {
+  if (target.action === "reject") return status === "rejected" && normalizedNote(actualReason) === normalizedNote(target.reason);
+  return status === "withdrawn" && normalizedNote(actualReason) === normalizedNote(target.reason);
+}
+
+/** 在已解析的 links 视图上核对本次目标结果；无法确认时返回 unconfirmed（需要读回） */
 export function mutationTargetOutcome(links: EvidenceLinkView[], target: MutationTarget): TargetOutcome {
   if (target.action === "suggest") {
     return links.some((link) => link.status === "ai_suggested") ? "applied" : "unconfirmed";
@@ -313,26 +477,15 @@ export function mutationTargetOutcome(links: EvidenceLinkView[], target: Mutatio
   if (target.action === "reject" || target.action === "withdraw") {
     const link = links.find((entry) => entry.link_id === target.link_id);
     if (!link) return "unconfirmed";
-    if (target.action === "reject") return link.status === "rejected" ? "applied" : "not_applied";
-    return link.status === "withdrawn" ? "applied" : "not_applied";
+    const reason = target.action === "reject" ? link.teacher_note : link.withdrawn_reason;
+    return rejectWithdrawApplied(link.status, reason, target) ? "applied" : "not_applied";
   }
-  if (target.link_id) {
-    const link = links.find((entry) => entry.link_id === target.link_id);
-    if (!link) return "unconfirmed";
-    return FORMAL_STATUSES.includes(link.status) ? "applied" : "not_applied";
-  }
-  const manual = links.find(
-    (entry) =>
-      entry.item_id === target.item_id &&
-      entry.origin === "manual" &&
-      FORMAL_STATUSES.includes(entry.status),
-  );
-  return manual ? "applied" : "unconfirmed";
+  return decisionAppliedInLinks(links, target.decision) ? "applied" : "unconfirmed";
 }
 
 /**
  * 在读回的原始容器上核对本次目标结果（读回是权威事实）：
- * 容器不可读 → unconfirmed；容器可读但目标缺失/状态不符 → not_applied。
+ * 容器不可读 → unconfirmed；容器可读但目标缺失/内容不符 → not_applied。
  */
 export function rawTargetOutcome(raw: unknown, target: MutationTarget): TargetOutcome {
   const links = readRawGuideLinks(raw);
@@ -343,17 +496,20 @@ export function rawTargetOutcome(raw: unknown, target: MutationTarget): TargetOu
   if (target.action === "reject" || target.action === "withdraw") {
     const link = links.find((entry) => entry.id === target.link_id);
     if (!link) return "not_applied";
-    return link.status === "rejected" || link.status === "withdrawn" ? "applied" : "not_applied";
+    const reason = target.action === "reject" ? link.teacher_note : link.withdrawn_reason;
+    return rejectWithdrawApplied(link.status, reason, target) ? "applied" : "not_applied";
   }
-  if (target.link_id) {
-    const link = links.find((entry) => entry.id === target.link_id);
-    if (!link) return "not_applied";
-    return FORMAL_STATUSES.includes(link.status) ? "applied" : "not_applied";
-  }
-  const manual = links.find(
-    (entry) => entry.item_id === target.item_id && entry.origin === "manual" && FORMAL_STATUSES.includes(entry.status),
+  const candidates = links.filter((entry) =>
+    target.decision.link_id
+      ? entry.id === target.decision.link_id
+      : entry.item_id === target.decision.item_id && entry.origin === "manual",
   );
-  return manual ? "applied" : "not_applied";
+  return candidates.some(
+    (candidate) =>
+      FORMAL_STATUSES.includes(candidate.status) && decisionContentMatches(candidate, target.decision),
+  )
+    ? "applied"
+    : "not_applied";
 }
 
 /* ------------------------- Review 确认响应核对 ------------------------- */
@@ -397,19 +553,19 @@ export function parseReviewConfirmResponse(
   hostObservationId: string,
   hostChildId: string,
 ): ParseResult<ReviewConfirmParsed> {
+  const httpFailed = status < 200 || status >= 300;
   const parsed = parseJson(rawText);
+  if (httpFailed) {
+    const { message, error } = parsed.ok
+      ? readMessage(parsed.payload, `确认失败（${status}），请稍后重试。`)
+      : { message: `确认失败（${status}），响应无法解析。`, error: null };
+    return { ok: false, failure: { kind: "http", status, message, error } };
+  }
   if (!parsed.ok) {
-    if (status < 200 || status >= 300) {
-      return { ok: false, failure: { kind: "http", status, message: `确认失败（${status}），响应无法解析。`, error: null } };
-    }
     return { ok: false, failure: { kind: "invalid_json", status, message: "服务端返回了无法解析的确认结果，不能据此认为已归档。" } };
   }
   const shape = reviewConfirmResponseSchema.safeParse(parsed.payload);
   if (!shape.success) {
-    if (status < 200 || status >= 300) {
-      const { message, error } = readMessage(parsed.payload, `确认失败（${status}），请稍后重试。`);
-      return { ok: false, failure: { kind: "http", status, message, error } };
-    }
     return { ok: false, failure: { kind: "invalid_shape", status, message: "确认响应缺少观察状态或关联结果，不能据此认为已归档。" } };
   }
   if (shape.data.observation.id !== hostObservationId) {

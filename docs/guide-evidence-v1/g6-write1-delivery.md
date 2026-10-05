@@ -207,12 +207,24 @@ src/app/observations/[id]/review/review-client.tsx 修改：guide_decisions 与�
 - 浏览器反例：身高体重条目编辑器文案、无成人帮助开关、无持续纪要、真实写入
   `confirmed_performance`，已核对展示为“资料已核对”且无医疗结论词。
 
-## R1 验收结果
+## R1 返修（主评审三处共享闸门）
+
+1. **HTTP 状态优先**：`parseGuideMutationResponse` / `parseReviewConfirmResponse` 先判 HTTP，
+   非 2xx 永远是失败，合法成功形状不能覆盖失败状态（反例：503/500 + 合法 JSON → `kind:"http"`）。
+2. **目标判定精确化**：`MutationTarget` 携带完整决定身份（支持类型、依据定位、成人帮助、备注、纪要）；
+   `decisionAppliedInLinks` 在同条目的全部候选中查找“正式状态且内容一致”的链接，
+   旧终态审计记录不会遮蔽新生效项；reject/withdraw 分别要求对应终态且理由一致
+   （反例：撤回读到 rejected、旧手动线索、依据/备注不一致均不判定生效）。
+3. **幂等读回不锁死**：读回确认“已写入”即恢复操作，不再要求版本戳变化解锁；
+   旧修订的后续写入由服务端 409 兜底。浏览器反例：重复提交触发幂等（revision 不变）→
+   响应不可核对 → 待核对 → 读回确认生效 → 锁释放并可继续真实撤回。
+
+## R1 验收结果（含返修）
 
 | 检查 | 结果 |
 |---|---|
-| `check-guide-write-flow-browser.ts` | **99/99**（保留原 54 项 + 新增 45 项反例）；`real_model_requests: 0` |
-| `check-guide-write-flow.ts` | **112/112**（离线；新增响应核对/读回/幂等/目标结果/失效草稿/保健语义反例） |
+| `check-guide-write-flow-browser.ts` | **102/102**（保留原 54 项 + R1 45 项 + 返修 3 项）；`real_model_requests: 0` |
+| `check-guide-write-flow.ts` | **123/123**（离线；新增 HTTP 优先、目标精确化、幂等读回不锁死反例） |
 | G3 浏览器（既有装置，复跑） | 127/127 |
 | G4 浏览器（既有装置，复跑） | 115/115 |
 | `pnpm validate` / `pnpm next build` + tsup | 全部通过 |

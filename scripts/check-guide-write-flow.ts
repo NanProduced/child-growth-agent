@@ -23,6 +23,8 @@ import {
 } from "../src/lib/guide/decision-draft";
 import {
   confirmAppliedIsDecisive,
+  decisionAppliedInLinks,
+  decisionIdentity,
   mutationTargetOutcome,
   parseGuideMutationResponse,
   parseHostObservationResponse,
@@ -30,6 +32,9 @@ import {
   rawTargetOutcome,
   readRawGuideLinks,
   readRawRevision,
+  type DecisionIdentityInput,
+  type RawGuideBasis,
+  type RawGuideLink,
 } from "../src/lib/guide/mutation-response";
 import {
   observationFocusFromSearch,
@@ -460,37 +465,141 @@ async function main(): Promise<void> {
   );
   ok(!conflict.ok && conflict.failure.kind === "http" && conflict.failure.error === "state_conflict", "409 映射为明确失败");
 
-  /* 本次目标结果 */
-  ok(mutationTargetOutcome([validLink], { action: "confirm", link_id: "link-1", item_id: "item-1" }) === "applied", "确认目标已生效");
+  /* HTTP 状态优先：非 2xx 的合法成功形状也必须是失败 */
+  const httpWithValidBody = parseGuideMutationResponse(
+    503,
+    mutationRaw({ observation_id: "obs-host", revision: 1, links: [validLink] }),
+    "obs-host",
+  );
+  ok(
+    !httpWithValidBody.ok && httpWithValidBody.failure.kind === "http" && httpWithValidBody.failure.status === 503,
+    "指南操作 503 + 合法形状不得当作成功",
+  );
+
+  /* 本次目标结果：精确区分动作并核对决定内容 */
+  const rawBasis: RawGuideBasis[] = [
+    { observation_id: "obs-1", quote: "请你先玩。", quote_source: "raw_text", quote_field: null },
+  ];
+  const decisionBasis = [
+    { observation_id: "obs-1", quote: "请你先玩。", quote_source: "raw_text" as const, quote_field: null },
+  ];
+  const decision = (overrides: Partial<DecisionIdentityInput> = {}): DecisionIdentityInput => ({
+    link_id: null,
+    item_id: "item-1",
+    support: "single_event",
+    basis: rawBasis,
+    adult_help_used: false,
+    teacher_note: null,
+    sustained_note: null,
+    ...overrides,
+  });
+  const rawLink = (overrides: Partial<RawGuideLink> = {}): RawGuideLink => ({
+    id: "link-1",
+    item_id: "item-1",
+    status: "confirmed_performance",
+    origin: "manual",
+    support: "single_event",
+    basis: rawBasis,
+    adult_help_used: false,
+    teacher_note: null,
+    sustained_note: null,
+    withdrawn_reason: null,
+    ...overrides,
+  });
+  ok(
+    mutationTargetOutcome([validLink], { action: "confirm", decision: decision({ link_id: "link-1" }) }) === "applied",
+    "确认目标按 link 与内容生效",
+  );
+  ok(mutationTargetOutcome([validLink], { action: "confirm", decision: decision() }) === "applied", "手动确认目标按内容生效");
+  ok(
+    mutationTargetOutcome([validLink], { action: "confirm", decision: decision({ link_id: "link-9" }) }) === "unconfirmed",
+    "目标 link 缺失需要读回",
+  );
   ok(
     mutationTargetOutcome(
-      [{ ...validLink, status: "rejected" }],
-      { action: "confirm", link_id: "link-1", item_id: "item-1" },
+      [{ ...validLink, support: "clue_only", status: "confirmed_clue" }],
+      { action: "confirm", decision: decision() },
+    ) === "unconfirmed",
+    "同条目已有旧手动线索不得当作本次决定生效",
+  );
+  ok(
+    mutationTargetOutcome(
+      [{ ...validLink, basis: [{ ...validLink.basis[0], quote: "别的话。" }] }],
+      { action: "confirm", decision: decision() },
+    ) === "unconfirmed",
+    "依据定位不同的旧关联不得当作本次决定生效",
+  );
+  ok(
+    mutationTargetOutcome(
+      [{ ...validLink, teacher_note: "旧的备注" }],
+      { action: "confirm", decision: decision({ teacher_note: "本次备注" }) },
+    ) === "unconfirmed",
+    "备注不同不得当作本次决定生效",
+  );
+  ok(
+    mutationTargetOutcome(
+      [{ ...validLink, status: "rejected", teacher_note: "不采用" }],
+      { action: "reject", link_id: "link-1", reason: "不采用" },
+    ) === "applied",
+    "不采用目标终态与理由一致才生效",
+  );
+  ok(
+    mutationTargetOutcome(
+      [{ ...validLink, status: "rejected", teacher_note: "不采用" }],
+      { action: "withdraw", link_id: "link-1", reason: null },
     ) === "not_applied",
-    "确认目标被拒绝时不算成功",
-  );
-  ok(mutationTargetOutcome([], { action: "confirm", link_id: "link-1", item_id: "item-1" }) === "unconfirmed", "目标缺失需要读回");
-  ok(
-    mutationTargetOutcome([validLink], { action: "confirm", link_id: null, item_id: "item-1" }) === "applied",
-    "手动关联目标按 manual 条目核对",
+    "撤回请求读到 rejected 不得当作生效",
   );
   ok(
     mutationTargetOutcome(
-      [{ ...validLink, status: "rejected" }],
-      { action: "reject", link_id: "link-1" },
+      [{ ...validLink, status: "withdrawn", withdrawn_reason: "撤回原因" }],
+      { action: "withdraw", link_id: "link-1", reason: "撤回原因" },
     ) === "applied",
-    "不采用目标已终态",
-  );
-  ok(
-    mutationTargetOutcome([validLink], { action: "reject", link_id: "link-1" }) === "not_applied",
-    "不采用未生效不算成功",
+    "撤回目标终态与理由一致才生效",
   );
   ok(
     mutationTargetOutcome(
-      [{ ...validLink, status: "withdrawn" }],
-      { action: "withdraw", link_id: "link-1" },
+      [{ ...validLink, status: "withdrawn", withdrawn_reason: "另一个原因" }],
+      { action: "withdraw", link_id: "link-1", reason: "撤回原因" },
+    ) === "not_applied",
+    "撤回理由不一致不得当作生效",
+  );
+  ok(
+    decisionAppliedInLinks(
+      [validLink],
+      decisionIdentity({ link_id: "link-1", support: "single_event", basis: decisionBasis }),
+    ),
+    "已提交决定按内容在 links 中生效",
+  );
+  ok(
+    !decisionAppliedInLinks(
+      [{ ...validLink, support: "clue_only", status: "confirmed_clue" }],
+      decisionIdentity({ item_id: "item-1", support: "single_event", basis: decisionBasis }),
+    ),
+    "内容不一致的决定不判定为生效",
+  );
+  ok(
+    decisionAppliedInLinks(
+      [
+        { ...validLink, status: "withdrawn", withdrawn_reason: "旧的" },
+        { ...validLink, link_id: "link-2" },
+      ],
+      decisionIdentity({ item_id: "item-1", support: "single_event", basis: decisionBasis }),
+    ),
+    "同条目旧撤回记录不得遮蔽新的生效项",
+  );
+  ok(
+    rawTargetOutcome(
+      {
+        revision: 2,
+        links: [
+          rawLink({ status: "withdrawn", withdrawn_reason: "旧的" }),
+          rawLink({ id: "link-2" }),
+        ],
+      },
+      { action: "confirm", decision: decision() },
     ) === "applied",
-    "撤回目标已终态",
+    "读回时旧终态记录不得遮蔽新的生效项",
   );
 
   /* 已授权读回 */
@@ -520,23 +629,34 @@ async function main(): Promise<void> {
   ok(readRawRevision({ links: [] }) === null, "修订缺失不当作 0");
   ok(readRawGuideLinks(null)?.length === 0, "NULL 容器是正常未关联");
   ok(readRawGuideLinks({ links: [{ foo: 1 }] }) === null, "损坏容器不可当作无关联");
+  ok(readRawGuideLinks({ links: [rawLink()] })?.[0].support === "single_event", "原始容器读取支持类型");
   ok(
     rawTargetOutcome(
-      { revision: 2, links: [{ id: "link-1", item_id: "item-1", status: "confirmed_performance", origin: "manual" }] },
-      { action: "confirm", link_id: "link-1", item_id: "item-1" },
+      { revision: 2, links: [rawLink()] },
+      { action: "confirm", decision: decision({ link_id: "link-1" }) },
     ) === "applied",
-    "读回原始容器确认目标已生效",
+    "读回原始容器确认目标按内容生效",
   );
   ok(
-    rawTargetOutcome({ revision: 2, links: [] }, { action: "reject", link_id: "link-1" }) === "not_applied",
+    rawTargetOutcome(
+      { revision: 2, links: [rawLink({ status: "rejected", teacher_note: "不采用" })] },
+      { action: "withdraw", link_id: "link-1", reason: null },
+    ) === "not_applied",
+    "读回不得把 rejected 当作撤回生效",
+  );
+  ok(
+    rawTargetOutcome(
+      { revision: 2, links: [rawLink({ support: "clue_only", status: "confirmed_clue" })] },
+      { action: "confirm", decision: decision() },
+    ) === "not_applied",
+    "读回旧手动线索不得当作本次决定生效",
+  );
+  ok(
+    rawTargetOutcome({ revision: 2, links: [] }, { action: "reject", link_id: "link-1", reason: null }) === "not_applied",
     "读回权威事实下目标缺失即未写入",
   );
   ok(
-    rawTargetOutcome({ revision: 2, links: [{ id: "l", item_id: "i", status: "whatever", origin: "manual" }] }, { action: "confirm", link_id: null, item_id: "i" }) === "not_applied",
-    "读回手动目标状态不符即未生效",
-  );
-  ok(
-    rawTargetOutcome({ links: "broken" }, { action: "confirm", link_id: null, item_id: "i" }) === "unconfirmed",
+    rawTargetOutcome({ links: "broken" }, { action: "confirm", decision: decision() }) === "unconfirmed",
     "读回容器不可读时仍需待核对",
   );
 
@@ -565,6 +685,30 @@ async function main(): Promise<void> {
   ok(
     reviewOk.ok && confirmAppliedIsDecisive(reviewOk.value.guideEvidence) === "saved_with_links",
     "归档+关联响应核对为已保存",
+  );
+  const reviewHttpWithValidBody = parseReviewConfirmResponse(
+    500,
+    mutationRaw({
+      observation: {
+        id: "obs-host",
+        child_id: "child-1",
+        status: "confirmed",
+        agent_context: null,
+        ai_draft: null,
+        ai_model: null,
+        ai_organized_at: null,
+        confirmed_content: null,
+        confirmed_at: "2026-09-20T02:00:00.000Z",
+      },
+      guideEvidence: { status: "applied", revision: 5, links: [validLink] },
+      profileUpdateStatus: "updated",
+    }),
+    "obs-host",
+    "child-1",
+  );
+  ok(
+    !reviewHttpWithValidBody.ok && reviewHttpWithValidBody.failure.kind === "http",
+    "Review 确认 500 + 合法形状不得当作成功",
   );
   const detailUnavailable = parseReviewConfirmResponse(
     200,

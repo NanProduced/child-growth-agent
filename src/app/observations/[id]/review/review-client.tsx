@@ -24,6 +24,8 @@ import type { BasisSourceOption, GuideItemOption, GuideWriteAccessView } from '@
 import { withEvidenceItemFocus } from '@/lib/guide/navigation';
 import {
   confirmAppliedIsDecisive,
+  decisionAppliedInLinks,
+  decisionIdentity,
   parseHostObservationResponse,
   parseReviewConfirmResponse,
 } from '@/lib/guide/mutation-response';
@@ -461,8 +463,21 @@ export function ReviewClient({
       const data = parsed.value;
       const applied = confirmAppliedIsDecisive(data.guideEvidence);
       if (applied === 'saved_with_links') {
+        const links = data.guideEvidence?.links ?? [];
+        const decisions = pendingGuide?.decisions ?? [];
+        const allDecisionsApplied = decisions.every((decision) =>
+          decisionAppliedInLinks(links, decisionIdentity(decision)),
+        );
+        if (!allDecisionsApplied) {
+          setConfirmUnresolved({
+            kind: 'confirm',
+            message:
+              '响应已收到，但无法确认本次归档携带的关联决定已按内容生效；输入与待提交选择已保留，请重新读取核对。',
+          });
+          return;
+        }
         setGuideRevision(data.guideEvidence?.revision ?? guideRevision);
-        setGuideLinks(data.guideEvidence?.links ?? []);
+        setGuideLinks(links);
         setGuideDetailUnavailable(false);
         setPendingGuide(null);
       }
