@@ -1,19 +1,20 @@
 "use strict";
 
 /**
- * YAYA-TECH0-R1 runtime 生命周期与有界 Agent 协议 PoC（离线）。
+ * YAYA-TECH0-R2 runtime 生命周期与有界 Agent 协议 PoC（离线）。
  *
  * 分层与证据口径：
  * - runtime_unit_mock：jsdom + React 19 + 真实发布包 @assistant-ui/react@0.15.23（DOM 模拟，不是真实浏览器）
  * - unit：有界 Agent 协议替身（模型/工具/服务端全部为进程内替身）
  * - simulated：业务写入/提案/回执为假服务端计数器，不冒充真实数据库并发验收
- * - 真实网络出口一律拒绝并计数；Provider/搜索/S3/DB 本轮 0 请求
+ * - 出口守门：fetch/http/https/XHR 默认拒绝；自检单独计数；其余被拒尝试必须导致整体 FAIL 与非零退出
  *
  * 运行：见 docs/yaya-v1/runtime-poc.md（候选依赖只装在自有 scratch，不进项目依赖）。
  */
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { createRequire } = require("node:module");
 const { pathToFileURL } = require("node:url");
 
@@ -23,9 +24,17 @@ const MODULES_ROOT =
 
 // ---------- 1. 真实网络出口闸门（先于任何动态 import 安装） ----------
 
-const realEgress = { denied: 0, byKind: Object.create(null), guardSelfTest: 0 };
+const realEgress = {
+  violations: 0,
+  byKind: Object.create(null),
+  selfTest: 0,
+  selfTestArmed: false,
+  gateScope: ["globalThis.fetch", "node:http.request/get", "node:https.request/get", "window.XMLHttpRequest"],
+  gateUncovered: ["node:net/dgram/socket 直连", "DNS", "原生插件"],
+};
 function denyEgress(kind, target) {
-  realEgress.denied += 1;
+  if (realEgress.selfTestArmed) realEgress.selfTest += 1;
+  else realEgress.violations += 1;
   realEgress.byKind[kind] = (realEgress.byKind[kind] || 0) + 1;
   const error = new Error(`EGRESS_DENIED ${kind}: ${String(target).slice(0, 120)}`);
   error.code = "EGRESS_DENIED";
@@ -41,6 +50,14 @@ for (const [kind, mod] of [
   const denied = (target) => denyEgress(kind, target);
   mod.request = denied;
   mod.get = denied;
+}
+// 子进程模式：故意发起一次被拒出口并吞掉异常，最终仍必须非零退出（供父进程断言）。
+if (process.env.YAYA_POC_EXTRA_EGRESS === "1") {
+  try {
+    globalThis.fetch("https://example.invalid/extra-egress");
+  } catch {
+    // 故意吞掉：出口违规不得因调用方捕获而消失
+  }
 }
 
 // ---------- 2. 定位 scratch 候选依赖（项目依赖未被修改） ----------
@@ -165,52 +182,126 @@ function lastMessage(runtime) {
 
 // ---------- 4. 有界 Agent 协议替身（unit） ----------
 
+/**
+ * 假服务端：只做最小事实建模（可信批准与本地 approved part 分离、actor/session/状态/版本核对、
+ * 消费幂等、按原 operation_id 查询）。字段形状由 YAYA0 冻结，此处不是生产授权框架。
+ */
 function createProposalServer() {
-  const pending = new Map();
+  const proposals = new Map();
   const consumed = new Map();
+  const trustedApprovals = new Map();
+  const operations = new Map();
   const writeAttempts = [];
   const naiveWrites = [];
   let sequence = 0;
+  const approvalKey = (id, actor, session) => `${id}|${actor}|${session}`;
   return {
-    pending,
+    proposals,
+    consumed,
+    trustedApprovals,
+    operations,
     writeAttempts,
     naiveWrites,
-    createProposal(tool, args, meta) {
+    createProposal(tool, args, meta = {}) {
       sequence += 1;
       const id = `p-${sequence}`;
-      pending.set(id, { id, tool, args, status: "pending", contentVersion: 1, actor: "teacher-1", ...(meta || {}) });
-      return pending.get(id);
+      const record = {
+        id,
+        tool,
+        args,
+        status: "pending",
+        actor: meta.actor ?? "teacher-1",
+        contentVersion: meta.contentVersion ?? 1,
+      };
+      proposals.set(id, record);
+      return record;
     },
-    approve(id) {
+    cancelProposal(id) {
+      const proposal = proposals.get(id);
+      if (proposal) proposal.status = "cancelled";
+      return proposal;
+    },
+    expireProposal(id) {
+      const proposal = proposals.get(id);
+      if (proposal) proposal.status = "expired";
+      return proposal;
+    },
+    /** 替身：当前会话真实用户批准（必须是服务端记录，不能来自本地 approved part）。 */
+    grantTrustedApproval(id, { actor, session }) {
+      trustedApprovals.set(approvalKey(id, actor, session), { at: "simulated" });
+      return true;
+    },
+    /** 消费：缺前提、无可信批准、actor/session/状态/版本任一不符都不通过；重复消费返回原回执。 */
+    consume(id, premise) {
       if (consumed.has(id)) return { ok: false, reason: "already_consumed", receipt: consumed.get(id) };
-      const proposal = pending.get(id);
+      if (
+        !premise ||
+        typeof premise.actor !== "string" ||
+        typeof premise.session !== "string" ||
+        typeof premise.contentVersion !== "number"
+      ) {
+        return { ok: false, reason: "missing_premise" };
+      }
+      const proposal = proposals.get(id);
       if (!proposal) return { ok: false, reason: "unknown_proposal" };
-      proposal.status = "approved";
-      consumed.set(id, { receiptId: `r-${id}`, executedAt: "simulated" });
-      pending.delete(id);
-      this.writeAttempts.push(id);
-      return { ok: true, receipt: consumed.get(id) };
-    },
-    consumeFromAdapter(id, premise) {
-      if (consumed.has(id)) return { ok: false, reason: "already_consumed", receipt: consumed.get(id) };
-      const proposal = pending.get(id);
-      if (!proposal) return { ok: false, reason: "no_matching_pending" };
-      if (premise && proposal.contentVersion !== premise.contentVersion) {
+      if (!trustedApprovals.has(approvalKey(id, premise.actor, premise.session))) {
+        return { ok: false, reason: "no_trusted_approval" };
+      }
+      if (proposal.actor !== premise.actor) return { ok: false, reason: "actor_mismatch" };
+      if (proposal.status === "cancelled") return { ok: false, reason: "proposal_cancelled" };
+      if (proposal.status === "expired") return { ok: false, reason: "proposal_expired" };
+      if (proposal.status !== "pending") return { ok: false, reason: `proposal_${proposal.status}` };
+      if (proposal.contentVersion !== premise.contentVersion) {
         return { ok: false, reason: "premise_version_mismatch" };
       }
-      return this.approve(id);
+      const receipt = { receiptId: `r-${id}`, operationId: `op-${id}`, executedAt: "simulated" };
+      proposal.status = "consumed";
+      consumed.set(id, receipt);
+      operations.set(receipt.operationId, { status: "committed", receipt });
+      writeAttempts.push(id);
+      return { ok: true, receipt };
+    },
+    /** 恢复路线：只按原 operation_id / 原提案查询，不重发。 */
+    queryOperation(operationId) {
+      const operation = operations.get(operationId);
+      return operation ? { ...operation } : { status: "not_found" };
+    },
+    queryByProposal(id) {
+      if (consumed.has(id)) return { status: "committed", receipt: consumed.get(id) };
+      const proposal = proposals.get(id);
+      if (!proposal) return { status: "unknown" };
+      if (proposal.status === "cancelled" || proposal.status === "expired") {
+        return { status: "failed_no_effect" };
+      }
+      return { status: "not_executed" };
     },
     naiveExecute(id) {
       this.naiveWrites.push(id);
       return { ok: true };
     },
-    replayCount(id) {
-      return this.writeAttempts.filter((attempt) => attempt === id).length + (consumed.has(id) ? 1 : 0);
-    },
   };
 }
 
-const readSchemas = {
+/** A 恢复路线状态表：所有非明确结果都保持核验，不重发。 */
+function recoveryActionFor(queryResult) {
+  switch (queryResult && queryResult.status) {
+    case "executing":
+    case "unknown":
+    case "query_failed":
+      return { action: "keep_verifying", reexecute: false };
+    case "committed":
+      return { action: "restore_result", reexecute: false };
+    case "committed_detail_unavailable":
+      return { action: "read_detail_only", reexecute: false };
+    case "failed_no_effect":
+    case "not_executed":
+      return { action: "reverify_and_approve", reexecute: true };
+    default:
+      return { action: "keep_verifying", reexecute: false };
+  }
+}
+
+const READ_TOOLS = {
   list_class_children: (args) =>
     args && typeof args.class === "string"
       ? { ok: true }
@@ -220,10 +311,41 @@ const readSchemas = {
       ? { ok: true }
       : { ok: false, reason: "invalid_args:list_child_observations" },
 };
-const writeSchema = (args) =>
-  args && typeof args.child_id === "string" && typeof args.raw_text === "string"
-    ? { ok: true }
-    : { ok: false, reason: "invalid_args:create_observation_draft" };
+const WRITE_TOOLS = {
+  create_observation_draft: (args) =>
+    args && typeof args.child_id === "string" && typeof args.raw_text === "string"
+      ? { ok: true }
+      : { ok: false, reason: "invalid_args:create_observation_draft" },
+};
+
+/** 有限等待：超时返回 {timedOut:true}，不等待上游物理取消（上游效果 NOT_RUN）。 */
+function withTimeout(value, ms) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve({ timedOut: true });
+      }
+    }, Math.max(0, ms));
+    Promise.resolve(value).then(
+      (result) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ timedOut: false, result });
+        }
+      },
+      (error) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ timedOut: false, error });
+        }
+      },
+    );
+  });
+}
 
 function createReadServer() {
   return {
@@ -249,9 +371,11 @@ function createReadServer() {
   };
 }
 
-async function runBoundedAgent({ userText, decide, server, policy, bounds }) {
+async function runBoundedAgent({ userText, decide, server, bounds, control = {} }) {
   const trace = {
+    modelAttempts: 0,
     modelCalls: 0,
+    toolAttempts: 0,
     toolCalls: [],
     toolRetries: 0,
     invalidArgs: 0,
@@ -264,16 +388,43 @@ async function runBoundedAgent({ userText, decide, server, policy, bounds }) {
   const history = [{ role: "user", content: userText }];
   let lastResult = null;
   const deadline = Date.now() + bounds.deadlineMs;
+  const isCancelled = () => control.cancelled === true;
+  const isExpired = () => Date.now() > deadline;
+  const stopIfInvalid = () => {
+    if (isCancelled()) {
+      trace.stoppedBy = "cancelled";
+      return true;
+    }
+    if (isExpired()) {
+      trace.stoppedBy = "deadline";
+      return true;
+    }
+    return false;
+  };
   for (;;) {
-    if (trace.modelCalls >= bounds.maxModelCalls) {
+    if (stopIfInvalid()) break;
+    if (trace.modelAttempts >= bounds.maxModelCalls) {
       trace.stoppedBy = "max_model_calls";
       break;
     }
-    if (Date.now() > deadline) {
-      trace.stoppedBy = "deadline";
+    trace.modelAttempts += 1;
+    const decisionWait = await withTimeout(
+      Promise.resolve().then(() => decide({ history, lastResult })),
+      deadline - Date.now(),
+    );
+    if (isCancelled()) {
+      trace.stoppedBy = "cancelled";
       break;
     }
-    const decision = await decide({ history, lastResult });
+    if (decisionWait.timedOut || isExpired()) {
+      trace.stoppedBy = "deadline_after_await";
+      break;
+    }
+    if (decisionWait.error) {
+      trace.stoppedBy = "model_error";
+      break;
+    }
+    const decision = decisionWait.result;
     trace.modelCalls += 1;
     assert(decision && typeof decision.type === "string", "model decision must be an action object");
     if (decision.type === "answer") {
@@ -289,7 +440,11 @@ async function runBoundedAgent({ userText, decide, server, policy, bounds }) {
         trace.stoppedBy = "max_tool_steps";
         break;
       }
-      const schema = readSchemas[decision.tool];
+      if (trace.toolAttempts >= bounds.maxToolAttempts) {
+        trace.stoppedBy = "max_tool_attempts";
+        break;
+      }
+      const schema = READ_TOOLS[decision.tool];
       if (!schema) {
         trace.stoppedBy = `unknown_tool:${decision.tool}`;
         break;
@@ -303,17 +458,39 @@ async function runBoundedAgent({ userText, decide, server, policy, bounds }) {
       let result;
       let error;
       for (let attempt = 0; attempt <= bounds.maxToolRetries; attempt += 1) {
+        if (trace.toolAttempts >= bounds.maxToolAttempts) break;
+        trace.toolAttempts += 1;
+        let wait;
         try {
-          result = server.read(decision.tool, decision.args);
-          error = undefined;
-          break;
+          wait = await withTimeout(
+            Promise.resolve().then(() => server.read(decision.tool, decision.args)),
+            deadline - Date.now(),
+          );
         } catch (thrown) {
-          error = thrown;
-          trace.toolRetries += 1;
+          wait = { timedOut: false, error: thrown };
         }
+        if (isCancelled()) {
+          trace.stoppedBy = "cancelled";
+          break;
+        }
+        if (wait.timedOut || isExpired()) {
+          error = new Error("tool deadline");
+          trace.toolRetries += 1;
+          trace.stoppedBy = "deadline_after_await";
+          break;
+        }
+        if (wait.error) {
+          error = wait.error;
+          trace.toolRetries += 1;
+          continue;
+        }
+        result = wait.result;
+        error = undefined;
+        break;
       }
-      if (error) {
-        trace.stoppedBy = "tool_error";
+      if (trace.stoppedBy === "cancelled" || trace.stoppedBy === "deadline" || trace.stoppedBy === "deadline_after_await") break;
+      if (error || result === undefined) {
+        if (!trace.stoppedBy) trace.stoppedBy = "tool_error";
         break;
       }
       trace.toolCalls.push({ tool: decision.tool, args: decision.args });
@@ -324,19 +501,21 @@ async function runBoundedAgent({ userText, decide, server, policy, bounds }) {
       continue;
     }
     if (decision.type === "propose_write") {
-      if (!writeSchema(decision.args).ok) {
+      const schema = WRITE_TOOLS[decision.tool];
+      if (!schema) {
+        trace.stoppedBy = `unknown_write_tool:${decision.tool}`;
+        break;
+      }
+      const validated = schema(decision.args);
+      if (!validated.ok) {
         trace.invalidArgs += 1;
-        trace.stoppedBy = "invalid_args:create_observation_draft";
+        trace.stoppedBy = validated.reason;
         break;
       }
       const proposal = server.createProposal(decision.tool, decision.args);
       trace.proposals.push(proposal.id);
-      if (!policy.autoApproveWrites) {
-        trace.stoppedBy = "awaiting_approval";
-        break;
-      }
-      server.approve(proposal.id);
-      continue;
+      trace.stoppedBy = "awaiting_approval";
+      break;
     }
     trace.stoppedBy = `unknown_action:${decision.type}`;
     break;
@@ -515,36 +694,42 @@ async function scenarioLateYieldAfterCancel() {
   return `dropped_late_yield=true, adapter_continued_after_abort=${trace.continuedAfterAbort}`;
 }
 
-async function scenarioRestoredApproval({ guarded, premiseVersion = 1 }) {
+async function scenarioRestoredApproval({ guarded, trusted = false, premiseVersion = 1 }) {
   const server = createProposalServer();
-  server.pending.set("p-restored", {
-    id: "p-restored",
-    tool: "create_observation_draft",
-    args: {},
-    status: "pending",
-    contentVersion: 1,
-    actor: "teacher-1",
-  });
-  const trace = { adapterRuns: 0, blocked: 0, executed: 0 };
+  const proposal = server.createProposal(
+    "create_observation_draft",
+    { child_id: "c2" },
+    { actor: "teacher-1", contentVersion: 1 },
+  );
+  // 旧会话曾真实批准过：只属于 s-old，不构成当前会话的可信批准。
+  server.grantTrustedApproval(proposal.id, { actor: "teacher-1", session: "s-old" });
+  if (guarded && trusted) {
+    // 当前会话重新核对后，由当前会话真实批准（服务端记录）。
+    server.grantTrustedApproval(proposal.id, { actor: "teacher-1", session: "s-new" });
+  }
+  const trace = { adapterRuns: 0, blocked: 0, executed: 0, lastReason: null };
   const makeAdapter = () => ({
     async *run({ unstable_getMessage }) {
       const message = unstable_getMessage();
-      const part = message.content.find((entry) => entry.type === "tool-call" && entry.approval && entry.approval.id === "p-restored");
+      const part = message.content.find(
+        (entry) => entry.type === "tool-call" && entry.approval && entry.approval.id === proposal.id,
+      );
       if (part && part.approval.approved === true) {
         trace.adapterRuns += 1;
         if (!guarded) {
-          server.naiveExecute("p-restored");
+          server.naiveExecute(proposal.id);
           trace.executed += 1;
           yield { content: [{ type: "text", text: "已执行（弱口径）" }] };
         } else {
-          const outcome = server.consumeFromAdapter("p-restored", {
+          const outcome = server.consume(proposal.id, {
             actor: "teacher-1",
-            session: "s-restored",
+            session: "s-new",
             contentVersion: premiseVersion,
           });
+          trace.lastReason = outcome.reason || null;
           if (outcome.ok) {
             trace.executed += 1;
-            yield { content: [{ type: "text", text: "已执行（服务端凭证）" }] };
+            yield { content: [{ type: "text", text: "已执行（服务端可信批准）" }] };
           } else {
             trace.blocked += 1;
             yield { content: [{ type: "text", text: "该批准在当前会话无效，请重新核对后再批准" }] };
@@ -559,7 +744,7 @@ async function scenarioRestoredApproval({ guarded, premiseVersion = 1 }) {
           toolName: "create_observation_draft",
           args: { child_id: "c2" },
           argsText: "{}",
-          approval: { id: "p-restored" },
+          approval: { id: proposal.id },
         }],
         status: { type: "requires-action", reason: "tool-calls" },
       };
@@ -595,25 +780,35 @@ async function scenarioRestoredApproval({ guarded, premiseVersion = 1 }) {
   const finalText = final.content.filter((part) => part.type === "text").map((part) => part.text).join("|");
   assert(trace.adapterRuns === 1, `LocalRuntime should auto-re-run adapter after approval, got ${trace.adapterRuns}`);
   restored.root.unmount();
-  if (guarded && premiseVersion !== 1) {
-    assert(trace.executed === 0, "guarded adapter must not execute when the server premise no longer matches");
-    assert(trace.blocked === 1, "guarded adapter should report invalid approval");
+  if (guarded && !trusted) {
+    assert(trace.executed === 0, "local approved part alone must not execute");
+    assert(trace.lastReason === "no_trusted_approval", `expected no_trusted_approval, got ${trace.lastReason}`);
     assert(finalText.includes("重新核对"), `expected re-check text, got: ${finalText}`);
-    summary.green.restored_approval_guard_mismatch = {
+    summary.green.restored_approval_no_trusted = {
       local_auto_reruns_adapter: trace.adapterRuns,
       server_side_write_calls: 0,
-      blocked_reason: "premise_version_mismatch",
+      blocked_reason: trace.lastReason,
     };
-    return "adapter re-ran, stale-premise write blocked by server gate (0)";
+    return "local approved only (old session) -> blocked: no_trusted_approval, writes 0";
+  }
+  if (guarded && premiseVersion !== 1) {
+    assert(trace.executed === 0, "trusted approval with stale premise must not execute");
+    assert(trace.lastReason === "premise_version_mismatch", `expected premise_version_mismatch, got ${trace.lastReason}`);
+    summary.green.restored_approval_trusted_stale = {
+      local_auto_reruns_adapter: trace.adapterRuns,
+      server_side_write_calls: 0,
+      blocked_reason: trace.lastReason,
+    };
+    return "current-session trusted approval but stale content version -> blocked, writes 0";
   }
   if (guarded) {
-    assert(trace.executed === 1, "matching premise should execute through the server record");
+    assert(trace.executed === 1, "trusted approval with matching premise should execute once");
     assert(server.writeAttempts.length === 1, "server-mediated write count must be 1");
-    summary.green.restored_approval_guard_match = {
+    summary.green.restored_approval_trusted_match = {
       local_auto_reruns_adapter: trace.adapterRuns,
       server_side_write_calls: 1,
     };
-    return "server-mediated approval executed once with matching premise";
+    return "current-session trusted approval + matching premise -> executed once";
   }
   assert(trace.executed === 1, "naive adapter would execute from local approved part alone");
   assert(server.naiveWrites.length === 1, "naive write counter");
@@ -623,6 +818,99 @@ async function scenarioRestoredApproval({ guarded, premiseVersion = 1 }) {
     server_pending_record_used: false,
   };
   return "restored local approval auto-ran adapter and naive write fired (RED counterexample)";
+}
+
+async function scenarioLostResponseRecovery() {
+  const server = createProposalServer();
+  const proposal = server.createProposal(
+    "create_observation_draft",
+    { child_id: "c2", raw_text: "乙用蓝色画了圆形" },
+    { actor: "teacher-1", contentVersion: 5 },
+  );
+  server.grantTrustedApproval(proposal.id, { actor: "teacher-1", session: "s-old" });
+  const trace = { executed: 0, queries: 0, recoveredText: null };
+  const makeAdapter = (mode) => ({
+    async *run({ messages, unstable_getMessage }) {
+      const current = unstable_getMessage();
+      const currentApproved = current.content.find(
+        (part) => part.type === "tool-call" && part.approval && part.approval.id === proposal.id && part.approval.approved === true,
+      );
+      if (currentApproved && mode === "lose-response") {
+        const outcome = server.consume(proposal.id, { actor: "teacher-1", session: "s-old", contentVersion: 5 });
+        assert(outcome.ok === true, "trusted consume in original session should execute once");
+        trace.executed += 1;
+        throw new Error("simulated response loss after business commit");
+      }
+      const approvedInHistory = messages
+        .flatMap((message) => (message.role === "assistant" ? message.content : []))
+        .find((part) => part.type === "tool-call" && part.approval && part.approval.id === proposal.id && part.approval.approved === true);
+      if (approvedInHistory) {
+        trace.queries += 1;
+        const query = server.queryByProposal(proposal.id);
+        const decision = recoveryActionFor(query);
+        if (decision.action === "restore_result") {
+          trace.recoveredText = `原保存已完成，回执 ${query.receipt.receiptId}`;
+          yield { content: [{ type: "text", text: trace.recoveredText }] };
+          return;
+        }
+        yield { content: [{ type: "text", text: "结果仍未知，保持核验，不重发" }] };
+        return;
+      }
+      yield {
+        content: [{
+          type: "tool-call",
+          toolCallId: "tc-recover",
+          toolName: "create_observation_draft",
+          args: proposal.args,
+          argsText: "{}",
+          approval: { id: proposal.id },
+        }],
+        status: { type: "requires-action", reason: "tool-calls" },
+      };
+    },
+  });
+
+  const first = await mountRuntime(makeAdapter("lose-response"));
+  first.runtime.thread.append("帮我保存这条观察");
+  await sleep(40);
+  const paused = lastMessage(first.runtime);
+  assert(paused.status.type === "requires-action", "first runtime should pause");
+  await first.runtime.thread
+    .getMessageById(paused.id)
+    .getMessagePartByToolCallId("tc-recover")
+    .respondToToolApproval({ approved: true });
+  await sleep(80);
+  assert(trace.executed === 1, "original write should execute exactly once");
+  assert(server.writeAttempts.length === 1, "business write count after lost response must be 1");
+  const repository = first.runtime.thread.export();
+  first.root.unmount();
+
+  const restored = await mountRuntime(makeAdapter("recover"), {
+    adapters: {
+      history: {
+        async load() {
+          return repository;
+        },
+        async append() {},
+      },
+    },
+  });
+  await sleep(60);
+  restored.runtime.thread.append("刚才那条保存成功了吗？");
+  await sleep(100);
+  const final = lastMessage(restored.runtime);
+  const finalText = final.content.filter((part) => part.type === "text").map((part) => part.text).join("|");
+  assert(trace.queries === 1, `recovery should query original operation once, got ${trace.queries}`);
+  assert(trace.recoveredText && finalText.includes(trace.recoveredText), `expected recovered receipt text, got: ${finalText}`);
+  assert(server.writeAttempts.length === 1, "device switch must not produce a second business write");
+  restored.root.unmount();
+  summary.green.lost_response_recovery = {
+    original_writes: 1,
+    recovery_queries: trace.queries,
+    reexecutions_after_restore: 0,
+    recovered_receipt: trace.recoveredText,
+  };
+  return `write=1, query=1, restored=<${trace.recoveredText}>`;
 }
 
 async function scenarioLockedApprovedWithoutReceipt() {
@@ -705,7 +993,7 @@ async function scenarioLockedApprovedWithoutReceipt() {
 function scenarioBoundedLoop() {
   const server = createReadServer();
   const proposalServer = createProposalServer();
-  const bounds = { maxModelCalls: 8, maxToolSteps: 3, maxToolRetries: 1, deadlineMs: 2000 };
+  const bounds = { maxModelCalls: 8, maxToolSteps: 3, maxToolAttempts: 6, maxToolRetries: 1, deadlineMs: 2000 };
   return { server, proposalServer, bounds };
 }
 
@@ -728,29 +1016,44 @@ async function main() {
   }
   console.log(`  zod@root=${versionOf("zod")}`);
 
-  // gate 自检：真实 fetch 必须被拒绝并计数
+  // 出口守门自检：单独计数；其余被拒尝试必须导致整体失败
   await check("unit/network-gate", async () => {
+    realEgress.selfTestArmed = true;
     let denied = null;
     try {
       await globalThis.fetch("https://example.invalid/");
     } catch (error) {
       denied = error.code;
+    } finally {
+      realEgress.selfTestArmed = false;
     }
     assert(denied === "EGRESS_DENIED", "fetch must be denied");
-    realEgress.denied -= 1;
-    realEgress.byKind.fetch -= 1;
-    realEgress.guardSelfTest += 1;
-    return "deliberate denied fetch counted separately from real egress";
+    return `self_test=${realEgress.selfTest}, violations=${realEgress.violations}, scope=${realEgress.gateScope.length}`;
   });
 
+  // 子进程复测：额外被拒出口即使异常被吞掉，也必须导致非零退出
+  if (process.env.YAYA_POC_EXTRA_EGRESS !== "1") {
+    await check("unit/egress-violation-fails-exit", async () => {
+      const child = spawnSync(process.execPath, [__filename], {
+        env: { ...process.env, YAYA_POC_EXTRA_EGRESS: "1" },
+        encoding: "utf8",
+        timeout: 120000,
+        maxBuffer: 20 * 1024 * 1024,
+      });
+      assert(child.error === undefined, `child spawn error: ${child.error && child.error.message}`);
+      assert(child.status !== 0, `child with swallowed egress violation must exit non-zero, got ${child.status}`);
+      assert(/egress-violation|FAILED/.test(child.stdout), "child output should report the egress violation");
+      return `child_exit=${child.status}, violation reported`;
+    });
+  }
+
   // A：有界 Agent 协议闭环（unit）
-  const { server, proposalServer, bounds } = scenarioBoundedLoop();
+  const { server, bounds } = scenarioBoundedLoop();
   await check("unit/closed-loop-read-feedback", async () => {
     const trace = await runBoundedAgent({
       userText: "帮我看看小二班孩子的观察",
       decide: makeClosedLoopDecide(),
       server,
-      policy: { autoApproveWrites: false },
       bounds,
     });
     assert(trace.toolCalls.length === 2, `expected 2 read tools, got ${trace.toolCalls.length}`);
@@ -759,13 +1062,16 @@ async function main() {
     assert(trace.toolCalls[1].args.childId === "c2", "second tool target must come from first result");
     assert(trace.answer && trace.answer.includes("o2,o3"), `answer should cite sources, got ${trace.answer}`);
     assert(trace.proposals.length === 0, "no write should be proposed");
+    assert(trace.toolAttempts === 2, "attempt accounting should match successful reads");
     summary.simulated.closed_loop = {
+      model_attempts: trace.modelAttempts,
       model_calls: trace.modelCalls,
+      tool_attempts: trace.toolAttempts,
       read_tools: trace.toolCalls.map((entry) => entry.tool),
       second_target: trace.toolCalls[1].args.childId,
       answer: trace.answer,
     };
-    return `modelCalls=${trace.modelCalls}, tools=${trace.toolCalls.map((entry) => entry.tool).join(">")}, answer=${trace.answer}`;
+    return `modelAttempts=${trace.modelAttempts}, tools=${trace.toolCalls.map((entry) => entry.tool).join(">")}, answer=${trace.answer}`;
   });
 
   await check("unit/injection-is-data", async () => {
@@ -773,12 +1079,11 @@ async function main() {
       userText: "帮我看看小二班孩子的观察",
       decide: makeClosedLoopDecide(),
       server,
-      policy: { autoApproveWrites: false },
       bounds,
     });
     assert(trace.proposals.length === 0, "tool result text must not become an action");
     assert(trace.toolResults.some((entry) => JSON.stringify(entry.result).includes("系统指令")), "fixture injection should be present but inert");
-    return "observation text containing instructions stayed data; no write proposed";
+    return "observation text containing instructions stayed data; no write proposed (替身口径，不代表真实模型抗注入质量)";
   });
 
   await check("unit/ambiguity-clarifies", async () => {
@@ -786,7 +1091,6 @@ async function main() {
       userText: "帮我看看孩子",
       decide: async () => ({ type: "clarify", question: "请说明要看哪个孩子或哪次观察" }),
       server,
-      policy: { autoApproveWrites: false },
       bounds,
     });
     assert(trace.toolCalls.length === 0, "no tool without clear intent");
@@ -795,7 +1099,7 @@ async function main() {
   });
 
   await check("unit/write-pauses-until-approval", async () => {
-    const writePolicyServer = createProposalServer();
+    const writeServer = createProposalServer();
     const decide = async () => ({
       type: "propose_write",
       tool: "create_observation_draft",
@@ -804,34 +1108,45 @@ async function main() {
     const paused = await runBoundedAgent({
       userText: "保存乙的这次观察",
       decide,
-      server: writePolicyServer,
-      policy: { autoApproveWrites: false },
+      server: writeServer,
       bounds,
     });
     assert(paused.stoppedBy === "awaiting_approval", "write must pause for approval");
     assert(paused.proposals.length === 1, "one proposal");
-    assert(writePolicyServer.writeAttempts.length === 0, "no write before approval");
-    const first = writePolicyServer.approve(paused.proposals[0]);
-    assert(first.ok === true, "approval should execute once");
-    const replay = writePolicyServer.approve(paused.proposals[0]);
+    assert(writeServer.writeAttempts.length === 0, "no write before approval");
+    const noTrusted = writeServer.consume(paused.proposals[0], { actor: "teacher-1", session: "s1", contentVersion: 1 });
+    assert(noTrusted.ok === false && noTrusted.reason === "no_trusted_approval", "no trusted approval -> blocked");
+    writeServer.grantTrustedApproval(paused.proposals[0], { actor: "teacher-1", session: "s1" });
+    const first = writeServer.consume(paused.proposals[0], { actor: "teacher-1", session: "s1", contentVersion: 1 });
+    assert(first.ok === true, "trusted approval should execute once");
+    const replay = writeServer.consume(paused.proposals[0], { actor: "teacher-1", session: "s1", contentVersion: 1 });
     assert(replay.ok === false && replay.reason === "already_consumed", "duplicate approval must be idempotent");
+    assert(writeServer.writeAttempts.length === 1, "business write stays 1");
     summary.green.write_gate = {
       writes_before_approval: 0,
-      writes_after_approval: writePolicyServer.writeAttempts.length,
+      no_trusted_blocked: true,
+      writes_after_approval: writeServer.writeAttempts.length,
       replay_result: replay.reason,
     };
-    return `writes=0 before approval, writes=${writePolicyServer.writeAttempts.length} after, replay=${replay.reason}`;
+    return `writes=0 before approval, writes=${writeServer.writeAttempts.length} after, replay=${replay.reason}`;
   });
 
   await check("unit/batch-does-not-block", async () => {
     const batchServer = createProposalServer();
     const items = ["c1", "c2", "c3"].map((childId) =>
-      batchServer.createProposal("create_observation_draft", { child_id: childId, raw_text: `${childId} 的记录` }),
+      batchServer.createProposal(
+        "create_observation_draft",
+        { child_id: childId, raw_text: `${childId} 的记录` },
+        { actor: "teacher-1", contentVersion: 1 },
+      ),
     );
-    batchServer.approve(items[0].id);
-    batchServer.approve(items[2].id);
+    for (const index of [0, 2]) {
+      batchServer.grantTrustedApproval(items[index].id, { actor: "teacher-1", session: "s1" });
+      const outcome = batchServer.consume(items[index].id, { actor: "teacher-1", session: "s1", contentVersion: 1 });
+      assert(outcome.ok === true, `item ${index + 1} should execute`);
+    }
     assert(batchServer.writeAttempts.length === 2, "approved items execute independently");
-    assert(batchServer.pending.has(items[1].id), "pending item stays pending without blocking others");
+    assert(batchServer.proposals.get(items[1].id).status === "pending", "pending item stays pending without blocking others");
     summary.green.batch = { executed: 2, pending: 1 };
     return "item1 executed, item2 pending, item3 executed without blocking";
   });
@@ -841,12 +1156,12 @@ async function main() {
       userText: "循环",
       decide: async () => ({ type: "read", tool: "list_class_children", args: { class: "小二班" } }),
       server,
-      policy: { autoApproveWrites: false },
       bounds,
     });
     assert(trace.stoppedBy === "max_tool_steps", `expected max_tool_steps, got ${trace.stoppedBy}`);
     assert(trace.toolCalls.length === bounds.maxToolSteps, "tool steps bounded");
-    return `stoppedBy=${trace.stoppedBy}, toolCalls=${trace.toolCalls.length}, modelCalls=${trace.modelCalls}`;
+    assert(trace.toolAttempts <= bounds.maxToolAttempts, "tool attempts bounded");
+    return `stoppedBy=${trace.stoppedBy}, toolCalls=${trace.toolCalls.length}, modelAttempts=${trace.modelAttempts}`;
   });
 
   await check("unit/invalid-args-rejected", async () => {
@@ -854,7 +1169,6 @@ async function main() {
       userText: "坏参数",
       decide: async () => ({ type: "read", tool: "list_child_observations", args: {} }),
       server,
-      policy: { autoApproveWrites: false },
       bounds,
     });
     assert(trace.invalidArgs === 1 && trace.stoppedBy.startsWith("invalid_args"), "schema validation must reject");
@@ -872,12 +1186,248 @@ async function main() {
       userText: "工具失败",
       decide: async () => ({ type: "read", tool: "list_class_children", args: { class: "小二班" } }),
       server: flakyServer,
-      policy: { autoApproveWrites: false },
       bounds,
     });
     assert(trace.stoppedBy === "tool_error", `expected tool_error, got ${trace.stoppedBy}`);
-    assert(trace.toolRetries === bounds.maxToolRetries + 1, `retries bounded: ${trace.toolRetries}`);
-    return `stoppedBy=${trace.stoppedBy}, attempts=${trace.toolRetries}`;
+    assert(trace.toolAttempts === bounds.maxToolRetries + 1, `attempts bounded: ${trace.toolAttempts}`);
+    return `stoppedBy=${trace.stoppedBy}, attempts=${trace.toolAttempts}`;
+  });
+
+  await check("unit/async-tool-reject-retry-bounded", async () => {
+    const asyncFailServer = {
+      read() {
+        return Promise.reject(new Error("async simulated tool failure"));
+      },
+    };
+    const trace = await runBoundedAgent({
+      userText: "异步工具失败",
+      decide: async () => ({ type: "read", tool: "list_class_children", args: { class: "小二班" } }),
+      server: asyncFailServer,
+      bounds,
+    });
+    assert(trace.stoppedBy === "tool_error", `async rejection must be awaited and stop the run, got ${trace.stoppedBy}`);
+    assert(trace.toolAttempts === bounds.maxToolRetries + 1, `async attempts bounded: ${trace.toolAttempts}`);
+    assert(trace.answer === null && trace.proposals.length === 0, "no answer/proposal after async tool failure");
+    return `stoppedBy=${trace.stoppedBy}, attempts=${trace.toolAttempts}`;
+  });
+
+  await check("unit/slow-model-deadline", async () => {
+    const trace = await runBoundedAgent({
+      userText: "慢模型",
+      decide: async () => {
+        await sleep(70);
+        return { type: "propose_write", tool: "create_observation_draft", args: { child_id: "c1", raw_text: "x" } };
+      },
+      server: createProposalServer(),
+      bounds: { ...bounds, deadlineMs: 10 },
+    });
+    assert(trace.stoppedBy === "deadline_after_await", `expected deadline_after_await, got ${trace.stoppedBy}`);
+    assert(trace.proposals.length === 0, "late model result must not create a proposal");
+    assert(trace.modelAttempts === 1, "model attempt counted even when it times out");
+    return `stoppedBy=${trace.stoppedBy}, proposals=0, modelAttempts=${trace.modelAttempts}`;
+  });
+
+  await check("unit/slow-tool-deadline", async () => {
+    const slowServer = {
+      read() {
+        return sleep(70).then(() => ({ children: [] }));
+      },
+    };
+    const trace = await runBoundedAgent({
+      userText: "慢工具",
+      decide: async () => ({ type: "read", tool: "list_class_children", args: { class: "小二班" } }),
+      server: slowServer,
+      bounds: { ...bounds, deadlineMs: 10 },
+    });
+    assert(trace.stoppedBy === "deadline_after_await", `expected deadline_after_await, got ${trace.stoppedBy}`);
+    assert(trace.toolCalls.length === 0 && trace.answer === null, "late tool result must not be consumed");
+    assert(trace.toolAttempts === 1, "tool attempt counted even when it times out");
+    return `stoppedBy=${trace.stoppedBy}, consumed=0, toolAttempts=${trace.toolAttempts}`;
+  });
+
+  await check("unit/tool-never-returns-deadline", async () => {
+    const neverServer = {
+      read() {
+        return new Promise(() => {});
+      },
+    };
+    const trace = await runBoundedAgent({
+      userText: "不返回的工具",
+      decide: async () => ({ type: "read", tool: "list_class_children", args: { class: "小二班" } }),
+      server: neverServer,
+      bounds: { ...bounds, deadlineMs: 30 },
+    });
+    assert(trace.stoppedBy === "deadline_after_await", `expected deadline_after_await, got ${trace.stoppedBy}`);
+    assert(trace.toolAttempts === 1 && trace.toolCalls.length === 0, "never-settling tool is bounded");
+    return `stoppedBy=${trace.stoppedBy}, dangling_handles=0`;
+  });
+
+  await check("unit/cancel-mid-tool-no-write", async () => {
+    const control = { cancelled: false };
+    const slowServer = {
+      read() {
+        return sleep(30).then(() => ({ children: [{ id: "c9" }] }));
+      },
+    };
+    const decide = async ({ lastResult }) =>
+      lastResult
+        ? { type: "propose_write", tool: "create_observation_draft", args: { child_id: "c9", raw_text: "x" } }
+        : { type: "read", tool: "list_class_children", args: { class: "小二班" } };
+    setTimeout(() => {
+      control.cancelled = true;
+    }, 5);
+    const trace = await runBoundedAgent({
+      userText: "取消中的工具",
+      decide,
+      server: slowServer,
+      bounds,
+      control,
+    });
+    assert(trace.stoppedBy === "cancelled", `expected cancelled, got ${trace.stoppedBy}`);
+    assert(trace.toolCalls.length === 0 && trace.proposals.length === 0, "cancelled run must not consume result or propose");
+    assert(trace.toolAttempts === 1, "attempt counted");
+    return `stoppedBy=${trace.stoppedBy}, toolCalls=0, proposals=0`;
+  });
+
+  await check("unit/late-model-after-cancel", async () => {
+    const control = { cancelled: false };
+    const decide = async () => {
+      await sleep(30);
+      return { type: "propose_write", tool: "create_observation_draft", args: { child_id: "c1", raw_text: "x" } };
+    };
+    setTimeout(() => {
+      control.cancelled = true;
+    }, 5);
+    const trace = await runBoundedAgent({
+      userText: "取消后的迟到模型",
+      decide,
+      server: createProposalServer(),
+      bounds,
+      control,
+    });
+    assert(trace.stoppedBy === "cancelled", `expected cancelled, got ${trace.stoppedBy}`);
+    assert(trace.proposals.length === 0 && trace.modelCalls === 0, "late model result after cancel is dropped");
+    assert(trace.modelAttempts === 1, "attempt counted before await");
+    return `stoppedBy=${trace.stoppedBy}, proposals=0, modelAttempts=1, modelCalls=0`;
+  });
+
+  await check("unit/unknown-write-tool-rejected", async () => {
+    const writeServer = createProposalServer();
+    const trace = await runBoundedAgent({
+      userText: "未知写工具",
+      decide: async () => ({ type: "propose_write", tool: "delete_all_children", args: { child_id: "c1" } }),
+      server: writeServer,
+      bounds,
+    });
+    assert(trace.stoppedBy === "unknown_write_tool:delete_all_children", `expected unknown_write_tool, got ${trace.stoppedBy}`);
+    assert(trace.proposals.length === 0 && writeServer.writeAttempts.length === 0, "unknown write tool must not create proposal");
+    return `stoppedBy=${trace.stoppedBy}, proposals=0`;
+  });
+
+  await check("unit/model-call-budget", async () => {
+    const trace = await runBoundedAgent({
+      userText: "模型预算",
+      decide: async () => ({ type: "read", tool: "list_class_children", args: { class: "小二班" } }),
+      server,
+      bounds: { ...bounds, maxModelCalls: 2 },
+    });
+    assert(trace.stoppedBy === "max_model_calls", `expected max_model_calls, got ${trace.stoppedBy}`);
+    assert(trace.modelAttempts === 2, `model attempts bounded: ${trace.modelAttempts}`);
+    return `stoppedBy=${trace.stoppedBy}, modelAttempts=${trace.modelAttempts}`;
+  });
+
+  await check("unit/proposal-premise-matrix", async () => {
+    const premiseServer = createProposalServer();
+    const proposal = premiseServer.createProposal(
+      "create_observation_draft",
+      { child_id: "c1", raw_text: "x" },
+      { actor: "teacher-1", contentVersion: 1 },
+    );
+    premiseServer.grantTrustedApproval(proposal.id, { actor: "teacher-1", session: "s1" });
+    premiseServer.cancelProposal(proposal.id);
+    const cancelled = premiseServer.consume(proposal.id, { actor: "teacher-1", session: "s1", contentVersion: 1 });
+    assert(cancelled.reason === "proposal_cancelled", `cancelled proposal must be rejected, got ${cancelled.reason}`);
+    premiseServer.grantTrustedApproval(proposal.id, { actor: "teacher-2", session: "s2" });
+    const actorMismatch = premiseServer.consume(proposal.id, { actor: "teacher-2", session: "s2", contentVersion: 1 });
+    assert(actorMismatch.reason === "actor_mismatch", `other account must be rejected, got ${actorMismatch.reason}`);
+    const noTrusted = premiseServer.consume(proposal.id, { actor: "teacher-1", session: "s9", contentVersion: 1 });
+    assert(noTrusted.reason === "no_trusted_approval", `other session must be rejected, got ${noTrusted.reason}`);
+    const missing = premiseServer.consume(proposal.id, { actor: "teacher-1", session: "s1" });
+    assert(missing.reason === "missing_premise", `missing premise must not default-pass, got ${missing.reason}`);
+    const expiredProposal = premiseServer.createProposal(
+      "create_observation_draft",
+      { child_id: "c2", raw_text: "y" },
+      { actor: "teacher-1", contentVersion: 1 },
+    );
+    premiseServer.grantTrustedApproval(expiredProposal.id, { actor: "teacher-1", session: "s1" });
+    premiseServer.expireProposal(expiredProposal.id);
+    const expired = premiseServer.consume(expiredProposal.id, { actor: "teacher-1", session: "s1", contentVersion: 1 });
+    assert(expired.reason === "proposal_expired", `expired proposal must be rejected, got ${expired.reason}`);
+    assert(premiseServer.writeAttempts.length === 0, "no rejected premise may write");
+    const fresh = premiseServer.createProposal(
+      "create_observation_draft",
+      { child_id: "c3", raw_text: "z" },
+      { actor: "teacher-1", contentVersion: 2 },
+    );
+    premiseServer.grantTrustedApproval(fresh.id, { actor: "teacher-1", session: "s2" });
+    const versionMismatch = premiseServer.consume(fresh.id, { actor: "teacher-1", session: "s2", contentVersion: 1 });
+    assert(versionMismatch.reason === "premise_version_mismatch", `version mismatch must be rejected, got ${versionMismatch.reason}`);
+    const matched = premiseServer.consume(fresh.id, { actor: "teacher-1", session: "s2", contentVersion: 2 });
+    assert(matched.ok === true, "matching trusted premise should execute once");
+    assert(premiseServer.writeAttempts.length === 1, "exactly one write after all rejections");
+    summary.green.proposal_premise_matrix = {
+      cancelled: cancelled.reason,
+      actor_mismatch: actorMismatch.reason,
+      session_mismatch: noTrusted.reason,
+      missing_premise: missing.reason,
+      expired: expired.reason,
+      version_mismatch: versionMismatch.reason,
+      matched_writes: premiseServer.writeAttempts.length,
+    };
+    return "cancelled/actor/session/missing/expired/version all rejected; matching premise writes once";
+  });
+
+  await check("unit/recovery-state-machine", async () => {
+    const cases = [
+      [{ status: "executing" }, "keep_verifying"],
+      [{ status: "unknown" }, "keep_verifying"],
+      [{ status: "query_failed" }, "keep_verifying"],
+      [{ status: "committed", receipt: { receiptId: "r-x" } }, "restore_result"],
+      [{ status: "committed_detail_unavailable" }, "read_detail_only"],
+      [{ status: "failed_no_effect" }, "reverify_and_approve"],
+      [{ status: "not_executed" }, "reverify_and_approve"],
+      [{ status: "not_found" }, "keep_verifying"],
+    ];
+    for (const [query, expected] of cases) {
+      const decision = recoveryActionFor(query);
+      assert(decision.action === expected, `${query.status} -> expected ${expected}, got ${decision.action}`);
+      if (expected !== "reverify_and_approve") assert(decision.reexecute === false, `${query.status} must not re-execute`);
+    }
+    const recoveryServer = createProposalServer();
+    const original = recoveryServer.createProposal(
+      "create_observation_draft",
+      { child_id: "c1", raw_text: "x" },
+      { actor: "teacher-1", contentVersion: 1 },
+    );
+    const notExecuted = recoveryActionFor(recoveryServer.queryByProposal(original.id));
+    assert(notExecuted.action === "reverify_and_approve", "not-executed proposal may be re-verified");
+    const reopened = recoveryServer.createProposal(
+      "create_observation_draft",
+      { child_id: "c1", raw_text: "x" },
+      { actor: "teacher-1", contentVersion: 1 },
+    );
+    assert(reopened.id !== original.id, "re-verified execution must use a new operation identity");
+    recoveryServer.grantTrustedApproval(reopened.id, { actor: "teacher-1", session: "s2" });
+    const executed = recoveryServer.consume(reopened.id, { actor: "teacher-1", session: "s2", contentVersion: 1 });
+    assert(executed.ok === true, "new proposal after clear non-execution should execute once");
+    assert(recoveryServer.writeAttempts.length === 1, "only the new operation writes once");
+    summary.green.recovery_state_machine = {
+      keep_verifying: ["executing", "unknown", "query_failed", "not_found"],
+      restore_or_read_only: ["committed", "committed_detail_unavailable"],
+      reverify: ["failed_no_effect", "not_executed"],
+      new_operation_id: true,
+    };
+    return "unknown results keep verifying; committed restores; clear non-execution re-verifies under a new id";
   });
 
   await check("unit/late-run-result-guard", async () => {
@@ -897,14 +1447,25 @@ async function main() {
 
   await check("unit/duplicate-execution-idempotent", async () => {
     const replayServer = createProposalServer();
-    const proposal = replayServer.createProposal("create_observation_draft", { child_id: "c1", raw_text: "x" });
-    const first = replayServer.consumeFromAdapter(proposal.id);
-    const second = replayServer.consumeFromAdapter(proposal.id);
+    const proposal = replayServer.createProposal(
+      "create_observation_draft",
+      { child_id: "c1", raw_text: "x" },
+      { actor: "teacher-1", contentVersion: 1 },
+    );
+    replayServer.grantTrustedApproval(proposal.id, { actor: "teacher-1", session: "s1" });
+    const first = replayServer.consume(proposal.id, { actor: "teacher-1", session: "s1", contentVersion: 1 });
+    const second = replayServer.consume(proposal.id, { actor: "teacher-1", session: "s1", contentVersion: 1 });
     assert(first.ok === true, "first consume executes");
     assert(second.ok === false && second.reason === "already_consumed", "second consume is deduped by receipt");
+    assert(second.receipt && second.receipt.receiptId === first.receipt.receiptId, "duplicate consume returns the original receipt");
     assert(replayServer.writeAttempts.length === 1, "business write stays 1");
-    summary.green.duplicate_execution = { attempts: 2, business_writes: replayServer.writeAttempts.length, replay_result: second.reason };
-    return `attempts=2, business_writes=1, replay=${second.reason}`;
+    summary.green.duplicate_execution = {
+      attempts: 2,
+      business_writes: replayServer.writeAttempts.length,
+      replay_result: second.reason,
+      original_receipt_returned: second.receipt.receiptId,
+    };
+    return `attempts=2, business_writes=1, replay=${second.reason}, receipt=${second.receipt.receiptId}`;
   });
 
   // B/C：LocalRuntime 生命周期（runtime_unit_mock）
@@ -913,22 +1474,32 @@ async function main() {
   await check("runtime/history-load-no-autorun", scenarioHistoryLoad);
   await check("runtime/late-yield-dropped", scenarioLateYieldAfterCancel);
   await check("runtime/restored-approval-naive-RED", () => scenarioRestoredApproval({ guarded: false }));
-  await check("runtime/restored-approval-guarded-stale-GREEN", () =>
-    scenarioRestoredApproval({ guarded: true, premiseVersion: 2 }),
+  await check("runtime/restored-local-approved-no-trusted-GREEN", () => scenarioRestoredApproval({ guarded: true }));
+  await check("runtime/restored-trusted-stale-GREEN", () =>
+    scenarioRestoredApproval({ guarded: true, trusted: true, premiseVersion: 2 }),
   );
-  await check("runtime/restored-approval-guarded-match-GREEN", () =>
-    scenarioRestoredApproval({ guarded: true, premiseVersion: 1 }),
+  await check("runtime/restored-trusted-match-GREEN", () =>
+    scenarioRestoredApproval({ guarded: true, trusted: true, premiseVersion: 1 }),
   );
+  await check("runtime/lost-response-recovery", scenarioLostResponseRecovery);
   await check("runtime/approved-without-receipt-lockout", scenarioLockedApprovedWithoutReceipt);
 
+  if (realEgress.violations > 0) {
+    summary.checks.push({
+      name: "unit/egress-violation",
+      status: "FAIL",
+      detail: `denied egress attempts outside self-test: ${realEgress.violations}`,
+    });
+  }
   summary.real_egress = {
-    fetch: 0,
-    http: 0,
-    https: 0,
-    xhr: 0,
-    denied_total: realEgress.denied,
+    actual_sent: 0,
+    actual_sent_basis: "covered entry points throw before I/O; socket/dns layer not instrumented",
+    attempted_denied_total: realEgress.violations + realEgress.selfTest,
+    attempted_denied_non_self_test: realEgress.violations,
+    self_test: realEgress.selfTest,
     denied_by_kind: realEgress.byKind,
-    guard_self_test: realEgress.guardSelfTest,
+    gate_scope: realEgress.gateScope,
+    gate_uncovered: realEgress.gateUncovered,
   };
   const failed = summary.checks.filter((entry) => entry.status === "FAIL");
   console.log("---- summary ----");
