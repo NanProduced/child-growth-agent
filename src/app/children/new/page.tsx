@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { z } from 'zod';
@@ -36,7 +36,7 @@ import {
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { useTeacher } from '@/components/teacher-provider';
-import { fetchWithAccountAuth } from "@/lib/accounts/client";
+import { authIdentityKey, fetchWithAccountAuth } from "@/lib/accounts/client";
 import { ageText, classLabel, formatDateCn } from '@/lib/format';
 import { CLASS_STAGES, CLASS_STAGE_LABELS, type Child, type SchoolClass } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -143,7 +143,9 @@ function ErrorText({ message }: { message?: string }) {
 
 export default function NewChildPage() {
   const router = useRouter();
-  const { loading: authLoading, configured, canCreateProfiles, principal, revalidate } = useTeacher();
+  const { loading: authLoading, canCreateProfiles, principal, auth, revalidate } = useTeacher();
+  const identity = authIdentityKey(auth);
+  const directoryGeneration = useRef(0);
 
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormState>({
@@ -160,14 +162,18 @@ export default function NewChildPage() {
   const [submitting, setSubmitting] = useState(false);
 
   const loadDirectory = useCallback(async () => {
+    const requestGeneration = ++directoryGeneration.current;
     setDirectory({ status: 'loading' });
     let response: Response;
     try {
       response = await fetchWithAccountAuth('/api/classes');
     } catch {
-      setDirectory({ status: 'error', message: '班级资料暂不可读，请稍后重试。读取失败不代表没有班级。' });
+      if (requestGeneration === directoryGeneration.current) {
+        setDirectory({ status: 'error', message: '班级资料暂不可读，请稍后重试。读取失败不代表没有班级。' });
+      }
       return;
     }
+    if (requestGeneration !== directoryGeneration.current) return;
     if (response.status === 401 || response.status === 403) {
       // A lost session clears the private class projection and asks the provider to re-verify identity.
       setDirectory({ status: response.status === 401 ? 'login' : 'denied' });
@@ -179,6 +185,7 @@ export default function NewChildPage() {
       return;
     }
     const body: unknown = await response.json().catch(() => null);
+    if (requestGeneration !== directoryGeneration.current) return;
     const classes = readClassDirectory(body);
     if (!classes) {
       setDirectory({ status: 'error', message: '班级资料无法核对，请稍后重新读取。' });
@@ -188,14 +195,15 @@ export default function NewChildPage() {
   }, [revalidate]);
 
   useEffect(() => {
-    void loadDirectory();
-  }, [loadDirectory]);
+    // Identity or scope changed: drop the previous private class projection immediately and
+    // ignore any response that started under the old identity (late responses must not restore it).
+    directoryGeneration.current += 1;
+    setDirectory({ status: 'loading' });
+    if (auth.state.kind === 'authenticated' && canCreateProfiles) void loadDirectory();
+  }, [identity, canCreateProfiles, auth.state.kind, loadDirectory]);
 
   const classes = directory.status === 'ready' ? directory.classes : [];
   const isAdmin = principal?.role === 'admin';
-  const unassignedTeacher = principal?.role === 'teacher' &&
-    (principal.scope.kind === 'none' ||
-      (principal.scope.kind === 'classes' && principal.scope.class_ids.length === 0));
 
   function setField<K extends FieldKey>(key: K, value: string) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -265,9 +273,10 @@ export default function NewChildPage() {
         throw new Error(data.message ?? '建档失败，请稍后再试');
       }
       toast.success(`已建立 ${data.child.name} 的成长档案`);
-      router.push(
-        `/observations/new?child_id=${encodeURIComponent(data.child.id)}`,
-      );
+      // 管理员没有教学权限：建档后进入成长档案；教师保持原有“建档后直接记录观察”流程。
+      router.push(isAdmin
+        ? `/children/${encodeURIComponent(data.child.id)}`
+        : `/observations/new?child_id=${encodeURIComponent(data.child.id)}`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '建档失败，请稍后再试');
       setSubmitting(false);
@@ -282,17 +291,51 @@ export default function NewChildPage() {
     );
   }
 
-  if (!configured || !canCreateProfiles) {
-    const title = unassignedTeacher ? '尚未分配任教班级' : '需要园所账号登录';
-    const description = unassignedTeacher
-      ? '建立成长档案需要先有任教班级。请联系管理员分配任教班级后再建档；本页不提供自行建立班级的入口。'
-      : '建立成长档案属于写操作，需教师身份验证。请点击右上角「园所账号登录」输入账号密码后再来。';
+  if (auth.state.kind === 'unavailable') {
+    return (
+      <div className="mx-auto max-w-lg py-10">
+        <Alert variant="destructive">
+          <AlertTitle>账号服务暂时不可用</AlertTitle>
+          <AlertDescription className="space-y-3">
+            <p>
+              当前无法核验账号与任教范围，不能判断是否可以建档。这与未登录不同：重复输入账号密码
+              不会恢复，请等服务恢复后重新核验。
+            </p>
+            <Button type="button" variant="outline" className="min-h-11" onClick={() => void revalidate()}>
+              重新核验
+            </Button>
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
+  if (auth.state.kind !== 'authenticated') {
     return (
       <div className="mx-auto max-w-lg py-10">
         <Alert>
           <LogIn className="size-4" />
-          <AlertTitle>{title}</AlertTitle>
-          <AlertDescription>{description}</AlertDescription>
+          <AlertTitle>需要园所账号登录</AlertTitle>
+          <AlertDescription className="space-y-3">
+            <p>建立成长档案属于写操作，需教师身份验证。请登录园所账号后再来。</p>
+            <Button asChild className="min-h-11">
+              <Link href="/login?returnTo=%2Fchildren%2Fnew">园所账号登录</Link>
+            </Button>
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
+  if (!canCreateProfiles) {
+    return (
+      <div className="mx-auto max-w-lg py-10">
+        <Alert>
+          <LogIn className="size-4" />
+          <AlertTitle>尚未分配任教班级</AlertTitle>
+          <AlertDescription>
+            建立成长档案需要先有任教班级。请联系管理员分配任教班级后再建档；本页不提供自行建立班级的入口。
+          </AlertDescription>
         </Alert>
       </div>
     );
@@ -313,7 +356,9 @@ export default function NewChildPage() {
           建立成长档案
         </h1>
         <p className="mt-1 text-sm text-slate-600">
-          分三步完成基本信息、可选补充和确认，随后即可记录第一次观察。
+          {isAdmin
+            ? '分三步完成基本信息、可选补充和确认；建档后进入该幼儿的成长档案，由教师录入观察。'
+            : '分三步完成基本信息、可选补充和确认，随后即可记录第一次观察。'}
         </p>
       </div>
 
@@ -358,7 +403,7 @@ export default function NewChildPage() {
       <Card className="border-amber-200/80">
         <CardHeader>
           <CardTitle className="text-base">{STEPS[step]}</CardTitle>
-          <CardDescription>{STEP_HINTS[step]}</CardDescription>
+          <CardDescription>{step === 2 && isAdmin ? '确认信息无误后建档，随后进入该幼儿的成长档案。' : STEP_HINTS[step]}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {step === 0 ? (
@@ -564,7 +609,9 @@ export default function NewChildPage() {
               ) : null}
 
               <p className="text-xs text-slate-400">
-                建档成功后将直接进入该幼儿的观察录入页；观察原文保存后不可修改。
+                {isAdmin
+                  ? '建档成功后进入该幼儿的成长档案；观察录入由教师完成。'
+                  : '建档成功后将直接进入该幼儿的观察录入页；观察原文保存后不可修改。'}
               </p>
             </div>
           ) : null}
@@ -602,7 +649,7 @@ export default function NewChildPage() {
             ) : (
               <Check className="size-4" />
             )}
-                {submitting ? '正在建立…' : '建立成长档案并记录观察'}
+                {submitting ? '正在建立…' : isAdmin ? '建立成长档案' : '建立成长档案并记录观察'}
           </Button>
         )}
       </div>

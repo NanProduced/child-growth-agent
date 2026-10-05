@@ -389,15 +389,13 @@ export default async function ChildDetailPage({
         <GrowthProfileRetry childId={child.id} hasStoredProfile={Boolean(child.growth_profile)} />
       ) : null}
 
-      {/* Activity support generation is a teaching write; administrators keep read-only summaries on reports/activities. */}
-      {isAdmin ? null : (
-        <ActivitySupportSection
-          childId={child.id}
-          confirmedObservationCount={confirmedObservations.length}
-          initialSupport={activitySupport}
-          hasStaleSupport={hasStaleActivitySupport}
-        />
-      )}
+      <ActivitySupportSection
+        childId={child.id}
+        confirmedObservationCount={confirmedObservations.length}
+        initialSupport={activitySupport}
+        hasStaleSupport={hasStaleActivitySupport}
+        readOnly={isAdmin}
+      />
 
       <section aria-labelledby="observation-timeline-title">
         <div className="mb-3 flex flex-wrap items-end justify-between gap-3">

@@ -35,21 +35,29 @@ interface BrowserLocator {
   fill(value: string): Promise<void>;
   textContent(): Promise<string | null>;
   isVisible(): Promise<boolean>;
+  count(): Promise<number>;
   waitFor(options?: { state?: "visible" | "attached"; timeout?: number }): Promise<void>;
+}
+interface RouteLike {
+  fetch(): Promise<{ status(): number; text(): Promise<string> }>;
+  continue(): Promise<void>;
+  fulfill(options: { status: number; contentType?: string; body: string }): Promise<void>;
 }
 interface BrowserPage {
   goto(url: string, options?: { waitUntil?: "load" | "domcontentloaded" | "networkidle"; timeout?: number }): Promise<unknown>;
   content(): Promise<string>;
   getByText(text: string | RegExp): BrowserLocator;
-  getByRole(role: string, options?: { name?: string | RegExp }): BrowserLocator;
+  getByRole(role: string, options?: { name?: string | RegExp; exact?: boolean }): BrowserLocator;
   locator(selector: string): BrowserLocator;
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   screenshot(options?: { path?: string; fullPage?: boolean }): Promise<unknown>;
   evaluate<T>(fn: string | (() => T | Promise<T>)): Promise<T>;
   evaluate<T, A>(fn: (arg: A) => T | Promise<T>, arg: A): Promise<T>;
   waitForTimeout(ms: number): Promise<void>;
-  waitForURL(predicate: (url: { pathname: string }) => boolean, options?: { timeout?: number }): Promise<void>;
+  waitForURL(predicate: (url: { pathname: string; search: string; toString(): string }) => boolean, options?: { timeout?: number }): Promise<void>;
   reload(options?: { waitUntil?: "load" | "domcontentloaded" | "networkidle"; timeout?: number }): Promise<unknown>;
+  route(pattern: string, handler: (route: RouteLike) => Promise<void>): Promise<void>;
+  unroute(pattern: string): Promise<void>;
   url(): string;
   request: { get(url: string): Promise<{ status(): number; json(): Promise<unknown> }> };
 }
@@ -127,6 +135,7 @@ async function main(): Promise<void> {
   let guard: ModelRequestGuard | null = null;
   let service: TrackedChild | null = null;
   let browser: Browser | null = null;
+  let verifier: Client | null = null;
   let seeds: {
     admin: { username: string; password: string; account_id: string };
     teacher: { username: string; password: string; account_id: string; display_name: string };
@@ -165,13 +174,37 @@ async function main(): Promise<void> {
       await client.query("INSERT INTO children(id,name,gender,birth_date,class_name,is_demo) VALUES($1,$2,'女',$3,'芽芽班',true)", [id, name, birth]);
     }
     await client.query("INSERT INTO child_class_enrollments(child_id,class_id,start_date) VALUES($1,$2,'2026-09-01'),($3,$2,'2026-09-01'),($4,$5,'2026-09-01')", [child1, classA, child2, child3, classC]);
-    const observation1 = randomUUID(); const observation2 = randomUUID();
+    const observation1 = randomUUID(); const observation2 = randomUUID(); const observation3 = randomUUID();
+    const draft1 = { domain: "社会", sub_domain: "同伴交往", objective_description: "幼儿照顾布娃娃。", highlights: ["邀请同伴"], support_suggestions: ["提供角色游戏材料"], highlight_quote: "一起照顾她吧" };
+    const confirmed3 = { domain: "健康", sub_domain: "动作发展", objective_description: "幼儿连续跳过三条标线。", highlights: ["连续跳跃"], support_suggestions: ["提供不同间距的标线。"], highlight_quote: "连续跳过三条标线" };
+    const activitySupport = {
+      suggestions: [{
+        title: "楼梯测量", purpose: "在真实情境中比较高低",
+        steps: ["用积木搭出台阶", "给玩偶量身高并记录"], materials: ["积木", "软尺"],
+        observe: "是否主动比较并说出理由", adaptation: "材料不够时改用椅子", evidence: ["连续跳过三条标线"],
+      }, {
+        title: "跳格子接力", purpose: "在游戏中练习连续跳跃",
+        steps: ["用粉笔画出不同间距格子", "与同伴轮流跳完全程"], materials: ["粉笔"],
+        observe: "落地是否稳定", adaptation: "缩小格子间距", evidence: ["连续跳过三条标线"],
+      }],
+      source_observation_ids: [observation3], ai_model: "fixture-model", generated_at: "2026-10-04T00:00:00.000Z",
+    };
+    const growthProfile = {
+      summary: "童童喜欢用身体动作探索空间。", recent_change: "连续跳跃更稳定。", development_clues: ["连续跳跃"],
+      next_support: "提供不同间距的标线。", next_focus: "落地方式。",
+      source_observation_ids: [observation3], ai_model: "fixture-model", updated_at: "2026-10-04T00:00:00.000Z",
+      activity_support: activitySupport,
+    };
     await client.query(
-      "INSERT INTO observations(id,child_id,class_id,observed_at,context,raw_text,status,ai_draft,ai_model,ai_organized_at,is_demo) VALUES" +
-      "($1,$2,$3,'2026-09-28','娃娃家','AI-ORGANIZED-C1 幼儿给布娃娃盖好毯子并邀请同伴一起照顾。','ai_organized',$4,'fixture-model','2026-09-28T10:00:00+08:00',true)," +
-      "($5,$6,$3,'2026-09-29','建构区','HIST-ONLY-C2 幼儿把长积木架在两个方积木上试了三次。','draft',null,null,null,true)",
-      [observation1, child1, classA, JSON.stringify({ domain: "社会", sub_domain: "同伴交往", objective_description: "幼儿照顾布娃娃。", highlights: ["邀请同伴"], support_suggestions: ["提供角色游戏材料"], highlight_quote: "一起照顾她吧" }), observation2, child2]);
+      "INSERT INTO observations(id,child_id,class_id,observed_at,context,raw_text,status,ai_draft,ai_model,ai_organized_at,confirmed_content,confirmed_at,is_demo) VALUES" +
+      "($1,$2,$3,'2026-09-28','娃娃家','AI-ORGANIZED-C1 幼儿给布娃娃盖好毯子并邀请同伴一起照顾。','ai_organized',$4,'fixture-model','2026-09-28T10:00:00+08:00',null,null,true)," +
+      "($5,$6,$3,'2026-09-29','建构区','HIST-ONLY-C2 幼儿把长积木架在两个方积木上试了三次。','draft',null,null,null,null,null,true)," +
+      "($7,$2,$3,'2026-09-30','户外游戏','SUPPORT-C1 幼儿连续跳过三条标线。','confirmed',null,null,null,$8,'2026-09-30T10:00:00+08:00',true)",
+      [observation1, child1, classA, JSON.stringify(draft1), observation2, child2, observation3, JSON.stringify(confirmed3)]);
+    await client.query("UPDATE children SET growth_profile=$2 WHERE id=$1", [child1, JSON.stringify(growthProfile)]);
     await client.end();
+    verifier = new Client({ connectionString: db.url });
+    await verifier.connect();
 
     const adminPassword = randomBytes(18).toString("base64url");
     const teacherPassword = randomBytes(18).toString("base64url");
@@ -212,10 +245,30 @@ async function main(): Promise<void> {
     if (chromePath) launchOptions.executablePath = chromePath;
     browser = await playwright.chromium.launch(launchOptions);
 
+    const settle = async (page: BrowserPage) => {
+      // Wait for dialog/transition animations so screenshots never capture mid-transition frames.
+      await page.evaluate(() => Promise.race([
+        Promise.all(document.getAnimations().map((animation) => animation.finished)).then(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]).then(() => undefined));
+      await page.waitForTimeout(150);
+    };
     const shoot = async (page: BrowserPage, name: string) => {
+      await settle(page);
       const file = path.join(outDir, name);
       await page.screenshot({ path: file, fullPage: false });
       screenshots.push(name);
+    };
+    const fillChildForm = async (page: BrowserPage, name: string, childClass: string) => {
+      await page.locator("#child-name").first().fill(name);
+      await page.locator("#gender-女").first().click();
+      await page.locator("#birth-date").first().fill("2023-03-01");
+      await page.getByRole("combobox", { name: "选择学段" }).first().click();
+      await page.getByRole("option", { name: "小班" }).first().click();
+      await page.getByRole("combobox", { name: "选择班级" }).first().click();
+      await page.getByRole("option", { name: childClass }).first().click();
+      await page.getByRole("button", { name: "下一步" }).first().click();
+      await page.getByRole("button", { name: "下一步" }).first().click();
     };
     const noOverflow = async (page: BrowserPage, name: string) => {
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
@@ -282,7 +335,9 @@ async function main(): Promise<void> {
     await shoot(adminPage, "05-admin-class-detail-1440.png");
     await adminPage.goto(`${base}/children/${child1}`, { waitUntil: "networkidle" });
     const adminChild = await adminPage.content();
-    check("管理员档案页可转班、无记录观察/生成支持入口", adminChild.includes("转班") && !adminChild.includes("记录一次观察") && !adminChild.includes("再记一条") && !adminChild.includes("生成活动支持"));
+    check("管理员档案页可转班、无记录观察入口", adminChild.includes("转班") && !adminChild.includes("记录一次观察") && !adminChild.includes("再记一条"));
+    check("管理员可读已有活动支持正文", ["楼梯测量", "跳格子接力", "用积木搭出台阶", "软尺", "粉笔", "材料不够时改用椅子"].every((text) => adminChild.includes(text)));
+    check("管理员活动支持无生成/重生成/重试控件", (await adminPage.getByRole("button", { name: /生成活动支持|重新生成|再试一次/ }).count()) === 0);
     await shoot(adminPage, "06-admin-child-detail-1440.png");
     await adminPage.goto(`${base}/reports?child=${child1}`, { waitUntil: "networkidle" });
     const adminReports = await adminPage.content();
@@ -300,12 +355,35 @@ async function main(): Promise<void> {
     await teacherPage.goto(`${base}/children/${child1}`, { waitUntil: "networkidle" });
     const teacherChild = await teacherPage.content();
     check("教师档案页无转班入口", !teacherChild.includes("转班") && teacherChild.includes("记录一次观察"));
+    check("教师仍可重新生成活动支持", (await teacherPage.getByRole("button", { name: "重新生成", exact: true }).count()) === 1);
     await teacherPage.goto(`${base}/reports?child=${child1}`, { waitUntil: "networkidle" });
     const teacherReports = await teacherPage.content();
-    check("教师成长回顾待办指向可整理记录", teacherReports.includes("先确认一条观察") && teacherReports.includes(`/observations/${observation1}/review`));
+    check("教师成长回顾展示已确认观察且无教学写入口", teacherReports.includes("成长回顾") && !teacherReports.includes("先确认一条观察"));
     await shoot(teacherPage, "09-teacher-reports-1440.png");
+    await teacherPage.goto(`${base}/reports?child=${child2}`, { waitUntil: "networkidle" });
+    const teacherPending = await teacherPage.content();
+    check("教师成长回顾待办指向可整理记录", teacherPending.includes("继续整理观察") && teacherPending.includes(`/observations/${observation2}/review`));
     await teacherPage.goto(`${base}/admin/teachers`, { waitUntil: "networkidle" });
     check("教师不能进入管理教师操作", (await teacherPage.content()).includes("仅管理员可管理教师"));
+
+    /* ---- administrator creation lands on the profile; teacher keeps the observation path ---- */
+    const adminChildName = `管理员建的${runId.slice(-4)}`;
+    await adminPage.goto(`${base}/children/new`, { waitUntil: "networkidle" });
+    await fillChildForm(adminPage, adminChildName, "芽芽班");
+    await adminPage.getByRole("button", { name: "建立成长档案" }).first().click();
+    await adminPage.waitForURL((url) => /^\/children\/[0-9a-f-]{36}$/.test(url.pathname), { timeout: 30_000 });
+    await waitFor(async () => (await adminPage.content()).includes(adminChildName), 20_000, "管理员建档后档案页显示幼儿");
+    check("管理员建档后进入成长档案而非观察页", !adminPage.url().includes("/observations/"));
+    const saved = await verifier.query<{ id: string }>("SELECT id FROM children WHERE name=$1", [adminChildName]);
+    check("管理员建档数据真实落库", saved.rowCount === 1);
+    await shoot(adminPage, "15-admin-created-child-profile-1440.png");
+
+    const teacherChildName = `教师建的${runId.slice(-4)}`;
+    await teacherPage.goto(`${base}/children/new`, { waitUntil: "networkidle" });
+    await fillChildForm(teacherPage, teacherChildName, "芽芽班");
+    await teacherPage.getByRole("button", { name: "建立成长档案并记录观察" }).first().click();
+    await teacherPage.waitForURL((url) => url.pathname === "/observations/new", { timeout: 30_000 });
+    check("教师建档后保持进入观察录入页", teacherPage.url().includes("child_id="));
 
     /* ---- unassigned teacher ---- */
     const unassignedContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -365,11 +443,19 @@ async function main(): Promise<void> {
     await adminPage.waitForTimeout(500);
     await noOverflow(adminPage, "教师管理 768×1024");
     await shoot(adminPage, "11-admin-teacher-management-768.png");
+    await adminPage.goto(`${base}/children/${child1}`, { waitUntil: "networkidle" });
+    await adminPage.waitForTimeout(500);
+    await noOverflow(adminPage, "管理员档案（活动支持只读）768×1024");
+    await shoot(adminPage, "16-admin-child-detail-768.png");
     await adminPage.setViewportSize({ width: 390, height: 844 });
-    await adminPage.reload({ waitUntil: "networkidle" });
+    await adminPage.goto(`${base}/admin/teachers`, { waitUntil: "networkidle" });
     await adminPage.waitForTimeout(500);
     await noOverflow(adminPage, "教师管理 390×844");
     await shoot(adminPage, "12-admin-teacher-management-390.png");
+    await adminPage.goto(`${base}/children/${child1}`, { waitUntil: "networkidle" });
+    await adminPage.waitForTimeout(500);
+    await noOverflow(adminPage, "管理员档案（活动支持只读）390×844");
+    await shoot(adminPage, "17-admin-child-detail-390.png");
     await teacherPage.setViewportSize({ width: 390, height: 844 });
     await teacherPage.goto(`${base}/children/new`, { waitUntil: "networkidle" });
     await teacherPage.waitForTimeout(800);
@@ -380,6 +466,38 @@ async function main(): Promise<void> {
     await noOverflow(teacherPage, "班级详情 390×844");
     await shoot(teacherPage, "14-teacher-class-detail-390.png");
 
+    /* ---- scope change drops the old class projection; a late response must not restore it ---- */
+    let holdFirstClassRequest = true;
+    await teacherPage.route("**/api/classes", async (route) => {
+      if (!holdFirstClassRequest) return route.continue();
+      holdFirstClassRequest = false;
+      const response = await route.fetch(); // real server response with the old scope
+      const body = await response.text();
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await route.fulfill({ status: response.status(), contentType: "application/json", body });
+    });
+    await teacherPage.goto(`${base}/children/new`, { waitUntil: "domcontentloaded" });
+    await waitFor(async () => (await teacherPage.content()).includes("班级加载中"), 10_000, "目录请求进行中");
+    const removal = await adminPage.evaluate(async ({ accountId, classIds }: { accountId: string; classIds: string[] }) => {
+      const status = await (await fetch("/api/auth/status", { cache: "no-store" })).json() as { csrf?: { header_name: string; token: string } };
+      if (!status.csrf) return { results: [0] };
+      const results: number[] = [];
+      for (const classId of classIds) {
+        const response = await fetch(`/api/admin/teachers/${accountId}/assignments/${classId}`, { method: "DELETE",
+          headers: { "content-type": "application/json", [status.csrf.header_name]: status.csrf.token },
+          body: JSON.stringify({ account_id: accountId, class_id: classId }) });
+        results.push(response.status);
+      }
+      return { results };
+    }, { accountId: seeds.teacher.account_id, classIds: [classA, classB] });
+    check("管理员撤销任教成功", removal.results.every((status) => status === 200), JSON.stringify(removal.results));
+    await teacherPage.evaluate(() => window.dispatchEvent(new Event("cga:auth-changed")));
+    await waitFor(async () => (await teacherPage.content()).includes("尚未分配任教班级"), 20_000, "范围变化后显示未分配");
+    await teacherPage.waitForTimeout(3000); // allow the held old-scope response to arrive
+    const afterLateResponse = await teacherPage.content();
+    check("迟到目录响应不能恢复过时班级投影", !afterLateResponse.includes("芽芽班") && !afterLateResponse.includes("苗苗班"));
+    await teacherPage.unroute("**/api/classes");
+
     results.checks = passed;
     results.screenshots = screenshots;
     check("真实模型请求为 0", guard.hits === 0, `hits=${guard.hits}`);
@@ -389,6 +507,7 @@ async function main(): Promise<void> {
     try { if (browser) await browser.close(); } catch { noteIssue("browser", "close failed"); }
     await runCleanupSteps([
       { label: "auth-ux-server", run: async () => service ? stopTrackedChildTree(service) : undefined },
+      { label: "auth-ux-verifier", run: async () => { if (verifier) await verifier.end(); } },
       { label: "auth-ux-pool", run: async () => { await globalThis.__pgPool?.end(); } },
       { label: "auth-ux-guard", run: async () => { if (guard) await guard.close(); } },
       { label: "auth-ux-db", run: () => db?.teardown() },

@@ -11,7 +11,7 @@ import ts from "typescript";
 import { AccountsError } from "../src/lib/accounts/errors";
 import type { AuthState, Principal } from "../src/lib/accounts/types";
 import type { ScopedObservation } from "../src/lib/accounts/scoped-queries";
-import type { Child, ChildClassEnrollment, SchoolClass } from "../src/lib/types";
+import type { ActivitySupport, Child, ChildClassEnrollment, GrowthProfile, SchoolClass } from "../src/lib/types";
 
 /**
  * Offline role-entry projection checks: pages render with substituted identity/data I/O only.
@@ -77,6 +77,31 @@ function observation(overridesObservation: Partial<ScopedObservation>): ScopedOb
   };
 }
 
+const activitySupport: ActivitySupport = {
+  suggestions: [{
+    title: "楼梯测量", purpose: "在真实情境中比较高低",
+    steps: ["用积木搭出台阶", "给玩偶量身高并记录"], materials: ["积木", "软尺"],
+    observe: "是否主动比较并说出理由", adaptation: "材料不够时改用椅子", evidence: ["童童连续跳过三条标线"],
+  }, {
+    title: "跳格子接力", purpose: "在游戏中练习连续跳跃",
+    steps: ["用粉笔画出不同间距格子", "与同伴轮流跳完全程"], materials: ["粉笔"],
+    observe: "落地是否稳定", adaptation: "缩小格子间距", evidence: ["连续跳过三条标线"],
+  }],
+  source_observation_ids: ["observation-confirmed"], ai_model: "fixture-model", generated_at: "2026-10-04T00:00:00.000Z",
+};
+const growthProfile: GrowthProfile = {
+  summary: "童童喜欢用身体动作探索空间。", recent_change: "连续跳跃更稳定。", development_clues: ["连续跳跃"],
+  next_support: "提供不同间距的标线。", next_focus: "落地方式。",
+  source_observation_ids: ["observation-confirmed"], ai_model: "fixture-model", updated_at: "2026-10-04T00:00:00.000Z",
+  activity_support: activitySupport,
+};
+const confirmedObservation = observation({ id: "observation-confirmed", status: "confirmed", can_write: true,
+  class_id: classA.id, confirmed_content: {
+    domain: "健康", sub_domain: "动作发展", objective_description: "幼儿连续跳过三条标线。",
+    highlights: ["连续跳跃"], support_suggestions: ["提供不同间距的标线。"], highlight_quote: "连续跳过三条标线",
+  } });
+const childWithSupport: Child = { ...child, growth_profile: growthProfile };
+
 const admin: Principal = { account_id: "admin-a", username: "admin", display_name: "园长", role: "admin", account_status: "active", scope: { kind: "school", school_id: "school-a" } };
 const teacher: Principal = { account_id: "teacher-a", username: "teacher", display_name: "林老师", role: "teacher", account_status: "active", scope: { kind: "classes", class_ids: [classA.id] } };
 const unassigned: Principal = { account_id: "teacher-u", username: "unassigned", display_name: "待分班老师", role: "teacher", account_status: "active", scope: { kind: "none", reason: "no_assignment" } };
@@ -122,9 +147,6 @@ overrides["@/components/class-dialogs"] = {
   ClassFormDialog: (props: { label: string }) => createElement("button", { type: "button" }, props.label),
   TransferClassDialog: () => createElement("button", { type: "button" }, "转班"),
 };
-overrides["@/components/activity-support-section"] = {
-  ActivitySupportSection: () => createElement("section", null, "activity-support-stub"),
-};
 overrides["@/components/growth-profile-retry"] = { GrowthProfileRetry: () => null };
 overrides["@/lib/accounts/client"] = {
   authIdentityKey: () => "identity",
@@ -134,7 +156,7 @@ overrides["@/components/teacher-provider"] = {
   useTeacher: () => ({
     loading: false, configured: true, isTeacher: scenario.viewer?.role === "teacher",
     canManageClasses: scenario.viewer?.role === "admin", canCreateProfiles: scenario.canCreateProfiles,
-    principal: scenario.viewer, auth: scenario.auth,
+    principal: scenario.viewer, auth: { state: scenario.auth, session: null, csrf: null },
     login: async () => ({ ok: true }), logout: async () => undefined, revalidate: async () => undefined,
   }),
 };
@@ -147,6 +169,10 @@ const childNewPage = loadSrc<{ default: () => ReactElement }>("src/app/children/
 const observationsPage = loadSrc<{ default: (props: { searchParams: Promise<Record<string, string>> }) => Promise<ReactElement> }>("src/app/observations/page.tsx");
 const reportsPage = loadSrc<{ default: (props: { searchParams: Promise<Record<string, string>> }) => Promise<ReactElement> }>("src/app/reports/page.tsx");
 const activitiesPage = loadSrc<{ default: () => Promise<ReactElement> }>("src/app/activities/page.tsx");
+const activitySupportSection = loadSrc<{ ActivitySupportSection: (props: {
+  childId: string; confirmedObservationCount: number; initialSupport: ActivitySupport | null;
+  hasStaleSupport?: boolean; readOnly?: boolean;
+}) => ReactElement }>("src/components/activity-support-section.tsx");
 
 async function render(page: { default: (props: never) => ReactElement | Promise<ReactElement> }, props: unknown): Promise<string> {
   return renderToStaticMarkup(await page.default(props as never));
@@ -228,17 +254,45 @@ async function main() {
     assert.ok(!html.includes("记录一次观察") && !html.includes("编辑班级"));
   });
 
-  await check("child detail gates transfer to administrators and observation/generation to teachers", async () => {
+  await check("child detail gates transfer to administrators and observation writes to teachers", async () => {
     reset({ observations: [], enrollments: [] });
     const adminHtml = await render(childDetailPage, { params: Promise.resolve({ id: child.id }) });
     assert.ok(adminHtml.includes("转班"));
     assert.ok(!adminHtml.includes("记录一次观察") && !adminHtml.includes("再记一条"));
-    assert.ok(!adminHtml.includes("activity-support-stub"));
+    assert.ok(adminHtml.includes("还没有活动支持建议"));
+    assert.ok(!adminHtml.includes(">生成活动支持</button>") && !adminHtml.includes(">重新生成</button>") && !adminHtml.includes(">再试一次</button>"));
     reset({ viewer: teacher, auth: { kind: "authenticated", principal: teacher }, observations: [], enrollments: [] });
     const teacherHtml = await render(childDetailPage, { params: Promise.resolve({ id: child.id }) });
     assert.ok(teacherHtml.includes("记录一次观察"));
-    assert.ok(teacherHtml.includes("activity-support-stub"));
+    assert.ok(teacherHtml.includes("先确认一条观察"));
     assert.ok(!teacherHtml.includes("转班"));
+  });
+  await check("administrators read full saved activity support without write controls", () => {
+    const render = (props: Parameters<typeof activitySupportSection.ActivitySupportSection>[0]) =>
+      renderToStaticMarkup(createElement(activitySupportSection.ActivitySupportSection, props));
+    const readOnlyHtml = render({ childId: child.id, confirmedObservationCount: 1, initialSupport: activitySupport, readOnly: true });
+    for (const text of ["楼梯测量", "在真实情境中比较高低", "用积木搭出台阶", "积木", "软尺", "是否主动比较并说出理由", "材料不够时改用椅子", "童童连续跳过三条标线", "跳格子接力", "粉笔"]) {
+      assert.ok(readOnlyHtml.includes(text), `missing read-only content: ${text}`);
+    }
+    assert.ok(!readOnlyHtml.includes(">生成活动支持</button>") && !readOnlyHtml.includes(">重新生成</button>") && !readOnlyHtml.includes(">再试一次</button>"));
+    const staleHtml = render({ childId: child.id, confirmedObservationCount: 1, initialSupport: null, hasStaleSupport: true, readOnly: true });
+    assert.ok(staleHtml.includes("请由教师重新生成"));
+    assert.ok(!staleHtml.includes(">重新生成</button>"));
+    const emptyHtml = render({ childId: child.id, confirmedObservationCount: 0, initialSupport: null, readOnly: true });
+    assert.ok(emptyHtml.includes("还没有活动支持建议") && emptyHtml.includes("由教师"));
+    assert.ok(!emptyHtml.includes("先确认一条观察") && !emptyHtml.includes(">生成活动支持</button>"));
+    scenario.viewer = teacher;
+    const teacherHtml = render({ childId: child.id, confirmedObservationCount: 1, initialSupport: activitySupport });
+    assert.ok(teacherHtml.includes("重新生成"));
+  });
+  await check("admin child detail shows the saved activity support body read-only", async () => {
+    reset({ child: childWithSupport, observations: [confirmedObservation], enrollments: [] });
+    const adminHtml = await render(childDetailPage, { params: Promise.resolve({ id: child.id }) });
+    assert.ok(adminHtml.includes("楼梯测量") && adminHtml.includes("用积木搭出台阶") && adminHtml.includes("软尺"));
+    assert.ok(!adminHtml.includes(">重新生成</button>") && !adminHtml.includes(">生成活动支持</button>"));
+    reset({ child: childWithSupport, observations: [confirmedObservation], viewer: teacher, auth: { kind: "authenticated", principal: teacher }, enrollments: [] });
+    const teacherHtml = await render(childDetailPage, { params: Promise.resolve({ id: child.id }) });
+    assert.ok(teacherHtml.includes("楼梯测量") && teacherHtml.includes("重新生成"));
   });
   await check("child detail read failure is not an empty profile", async () => {
     reset({ failure: new AccountsError("out_of_scope", "PRIVATE_SCOPE_DETAIL") });
@@ -323,7 +377,27 @@ async function main() {
     reset({ viewer: null, canCreateProfiles: false, auth: { kind: "anonymous" } });
     const html = renderToStaticMarkup(createElement(childNewPage.default));
     assert.ok(html.includes("需要园所账号登录"));
+    assert.ok(html.includes("/login?returnTo=%2Fchildren%2Fnew"));
     assert.ok(!html.includes("还没有可用班级"));
+  });
+  await check("expired session gets the login entry", () => {
+    reset({ viewer: null, canCreateProfiles: false, auth: { kind: "invalid_session", reason: "revoked" } });
+    const html = renderToStaticMarkup(createElement(childNewPage.default));
+    assert.ok(html.includes("需要园所账号登录") && html.includes("/login?returnTo=%2Fchildren%2Fnew"));
+  });
+  await check("identity outage is distinct from login and does not ask for credentials", () => {
+    reset({ viewer: null, canCreateProfiles: false, auth: { kind: "unavailable", reason: "identity_service_unavailable" } });
+    const html = renderToStaticMarkup(createElement(childNewPage.default));
+    assert.ok(html.includes("账号服务暂时不可用") && html.includes("重新核验"));
+    assert.ok(html.includes("重复输入账号密码"));
+    assert.ok(!html.includes("需要园所账号登录") && !html.includes("尚未分配任教班级"));
+  });
+  await check("late directory responses are generation-guarded and identity changes clear the projection", () => {
+    const source = readFileSync(path.join(root, "src/app/children/new/page.tsx"), "utf8");
+    assert.ok(source.includes("directoryGeneration"));
+    assert.ok(source.includes("requestGeneration === directoryGeneration.current"));
+    assert.ok(source.includes("requestGeneration !== directoryGeneration.current"));
+    assert.ok(/directoryGeneration\.current \+= 1;[\s\S]{0,120}setDirectory\(\{ status: 'loading' \}\)/.test(source));
   });
 
   console.log(`Role entry projection checks: ${passed}/${passed} passed (substituted identity/data; server authorization and browser not run).`);
