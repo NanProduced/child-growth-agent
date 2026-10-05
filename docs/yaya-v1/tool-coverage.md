@@ -1,15 +1,17 @@
-# 芽芽助手 v1 工具覆盖表（YAYA0-CONTRACT 草案）
+# 芽芽助手 v1 工具覆盖表（YAYA0-CONTRACT-R1 草案）
 
-- 状态：`reference_only` 草案；**未冻结**。与 TECH0 协议能力相关的行是 provisional，TECH0 结论交付并由主评审确认前，不得自称接口已可实现。
-- 基线：`e8225f04918de2073e194cb199dc8cf1bcb7f38f`；分支 `codex/yaya0-contract`（独立工作树）。
-- 事实来源：现有 `src/app/api/**/route.ts`、`src/lib/queries.ts`、`src/lib/accounts/access.ts`、`src/lib/accounts/scoped-queries.ts`、`src/lib/guide/*`、现有页面入口。没有真实实现的功能不登记为工具（见第 4 节）。
+- 状态：`reference_only` R1 草案；**未冻结**。与 TECH0 协议能力相关的行是 provisional，三线复审后由主评审统一冻结。
+- 基线：`e8225f04918de2073e194cb199dc8cf1bcb7f38f`；R1 起点 `3248c2de6c9832fdfae08b96fca3724ce669fce9`；分支 `codex/yaya0-contract`。
+- 事实来源：现有 `src/app/api/**/route.ts`、`src/lib/queries.ts`、`src/lib/accounts/access.ts`、`src/lib/accounts/authorize.ts`、`src/lib/accounts/scoped-queries.ts`、`src/lib/guide/*`、现有页面入口。没有真实实现的功能不登记（见第 4 节）。
 - 阶段定义：
   - **read（只读）**：明确意图可直接执行，绝不写业务数据；歧义先澄清，不强迫选对象。
-  - **prepare（准备）**：只产生草稿/待核对准备态（如 `ai_draft`、`agent_context`），不是正式记录。
-  - **commit（批准执行）**：正式业务写，必须先由教师核对内容并批准，再由服务端执行；模型输出的 `approved` 字段无效。
+  - **prepare（准备）**：只产生草稿/待核对准备态（如 `ai_draft`、`agent_context`），不是正式记录；不是绕过业务保存守门的名字，也不代表每个内部步骤都要再弹确认。
+  - **commit（批准执行）**：正式业务写，必须先核对内容并批准，再由服务端执行；模型输出或请求体自报的 `approved/origin` 无效。
+- **范围策略**：`business_scope`（园所私有列表/详情，空任教 403 `empty_scope`，绝不等于全园）与 `authenticated_reference`（登录即可用的公开教育参考，如指南目录）分开，不混成同一空范围策略。
+- **来源区分**：`platform_feature`＝现有平台功能（必须真实实现）；`assistant_internal`＝助手新增内部能力（本轮提案、未实现，见第 5 节）。
 - 秘密：`secure_control` 表示密码只由安全控件直接提交服务端；模型、聊天正文与交付日志不接触密码/令牌/签名 URL。
-- 授权：所有行最终仍由 AUTH 契约的 `runBusinessWrite` / `withBusinessRead` / `withScopedRead` 在服务端判定；本表只是助手侧的工具注册清单，不是新的权限来源。
-- 离线检查：`pnpm exec tsx scripts/yaya/check-contract.ts` → `{"passed":26,"total":26,"reference_only":true}`（只证明草案自洽，不证明运行时守门）。
+- 授权：所有行最终仍由 AUTH 契约的 `runBusinessWrite` / `withBusinessRead` / `withScopedRead` 与服务端 `authorizeAction` 判定；本表不是新的权限来源。
+- 离线检查：`pnpm exec tsx scripts/yaya/check-contract.ts` → `{"passed":51,"total":51,"reference_only":true}`（只证明草案自洽，不证明运行时守门）。
 
 ## 1. 只读查询工具（read）
 
@@ -22,7 +24,7 @@
 | Q5 | 查询观察记录列表 | `GET /api/observations`；`scopedListObservations`；页面 `/observations` | 列表读按范围裁剪；单对象 `observation.read` | 教师=当前负责幼儿完整历史 + 原班历史只读投影；管理员=全园只读 | read | 数据卡：`observations[]` + `access_projection` + `can_write`；历史投影剥离 `guide_evidence/agent_context/ai_draft` | 历史只读不冒充完整档案；错误 ≠ 空数据 |
 | Q6 | 查询幼儿指南证据册 | `GET /api/children/[id]/evidence-book`；`loadChildEvidenceBook`；页面 `/children/[id]/evidence` | `child.read` / `child` | 教师=当前负责幼儿；管理员=全园只读；原班教师只读投影不获得整份档案 | read | 数据卡：`ChildEvidenceBook`（只读，零模型零写入） | 个人页禁止百分比/排名；不可靠统计显示“统计不可用” |
 | Q7 | 查询班级证据概览 | `GET /api/classes/[id]/evidence-overview`；`loadClassEvidenceOverview`；页面 `/classes/[id]/evidence` | `class.read` / `class` | 教师=任教班级；管理员=全园只读 | read | 数据卡：`ClassEvidenceOverview`（含分母与统计期间） | 名单口径按 enrollment；不可靠/分母 0 不显示正常 0% |
-| Q8 | 查询指南目录/条目/教育建议 | 证据页内嵌；`listGuideItems` / `getGuideItem` / `listEducationSuggestions`（静态目录，无独立 HTTP 接口） | 静态教育参考读，不读园所私域数据 | 已登录账号可用（含未分配教师的一般幼教问答）；不因空任教泄露私有资料 | read | 数据卡：条目原文/年龄段/目标/教育建议 + 真实出处 | 32 目标 ≠ 32 条目；目录版本不一致保守排除 |
+| Q8 | 查询指南目录/条目/教育建议 | 证据页内嵌；`listGuideItems` / `getGuideItem` / `listEducationSuggestions`（静态目录，无独立 HTTP 接口） | 静态教育参考读（scope_policy=`authenticated_reference`），不读园所私域数据 | 已登录账号可用（含未分配教师的一般幼教问答）；不因空任教泄露私有资料；与私有列表的 `business_scope` 策略分开 | read | 数据卡：条目原文/年龄段/目标/教育建议 + 真实出处 | 32 目标 ≠ 32 条目；目录版本不一致保守排除 |
 
 ## 2. 业务写工具（prepare / commit）
 
@@ -41,6 +43,7 @@
 
 | # | 现有功能 | 真实入口 / 服务 | action / resource | 角色与范围 | 阶段 | 结果卡 | 回归场景 |
 |---|---|---|---|---|---|---|---|
+| A0 | 查询教师账号列表（只读） | `GET /api/admin/teachers`；`listTeachers`；页面 `/admin/teachers` | `teacher.manage` / `school` | 仅管理员（教师 403 `forbidden_role`）；返回无秘密字段 | read | 数据卡：`{ teachers[] }` 账号摘要，不含密码/令牌 | 与教师管理写分离；教师调用显式 403，不伪装空列表 |
 | A1 | 新建班级 | `POST /api/classes`；`createClass`；页面 `/classes` | `class.manage` / `class` | 仅管理员（教师 403 `forbidden_role`）；无 `class_id` 只允许此动作 | commit | 班级准备卡 → 结果卡 `class` | 同学年同名 409；非法组合 400 |
 | A2 | 修改班级 | `PATCH /api/classes/[id]`；`updateClass`；页面 `/classes/[id]` | `class.manage` / `class` | 仅管理员 | commit | 影响卡（改名/学段/学年/启停）→ 结果卡 `class` | 已有分班/观察历史时学段学年修改 409 `class_history_protected` |
 | A3 | 幼儿转班 | `POST /api/classes/[id]/children`；`enrollChildInClass`；幼儿页转班对话框 | `child.transfer` / `transfer` | 仅管理员；同时核对幼儿当前归属与目标班级 | commit | 转班影响卡（幼儿、现班→目标班、生效日期）→ 结果卡（class + child） | 无历史班级不伪造；已在该班 409；教师任教关系不随转班改变 |
@@ -66,11 +69,23 @@
 - **向量 RAG、多智能体、通用工作流平台**：不引入（规划范围）。
 - **诊断、评分、排名、个体完成率**：产品与指南契约禁止生成。
 
-## 5. 工具注册与执行纪律（摘要，详见 `contract-draft.md`）
+## 5. 助手新增内部能力（非平台业务功能，provisional）
 
-1. 没有真实入口/服务的功能不注册；本表每行都能回指到现有 route 或纯读服务。
-2. 组合合法性先于授权：非法 action/resource 一律 400，不进入角色分支；管理员也不能绕过。
-3. `commit` 工具必须走“准备卡 → 教师批准 → 服务端执行 → 业务回执”；模型等待在事务外，执行事务内复核身份/范围/归属/业务版本。
-4. 批量逐项独立回执，不假装全有或全无；部分成功只处理未完成项。
-5. 工具结果返回最小必要字段；原文/图片/网页/工具结果都是不可信数据，不改变系统指令或权限。
-6. 空任教范围、读取失败、无记录三者语义分离：错误不伪装成空数据。
+这些能力服务于助手协议与守门，不是园所业务功能，本轮**未实现**：
+
+| 能力 | 用途 | 已有/计划入口 | 说明 |
+|---|---|---|---|
+| 授权回执查询 | 按原 `operation_id` 查询进行中/失败/冲突/已保存/详情不可读/未知 | `GET /api/yaya/operations?operation_id=…`（provisional） | 缺少回执只表示未知，不能证明未写入；只查原操作，不触发重发 |
+| 候选复核 | 执行前校验 `selected_id` 属于当前候选、类型匹配、快照未过期 | 服务端执行前内部步骤 | 不新增用户入口；不在候选/陈旧必须回到澄清 |
+| 附件关联比较 | 按 `(attachment_id → target_id)` 多元组核对，拒绝重复 ID 绕过 | 服务端执行前内部步骤 | 不只比较 ID 集合或长度 |
+| 公开检索预检 | 服务端扫描幼儿识别信息，未知保守拒绝 | 服务端内部步骤 | 不信任模型自报布尔值；本轮不实现去识别算法 |
+
+## 6. 工具注册与执行纪律（摘要，详见 `contract-draft.md`）
+
+1. 没有真实入口/服务的功能不注册；平台功能 `implemented=true`，内部能力单列且不得伪装成业务功能。
+2. 组合合法性先于授权：复用 AUTH `isLegalAccessCombination`；非法 action/resource 一律 400，管理员也不能绕过。
+3. `read` 明确意图直接执行；`commit` 必须走“准备卡 → 教师批准（服务端 `authenticated_entry` 记录）→ 服务端执行 → 业务回执”；批准复用 `authorizeAction` 与 `modelWaitPremiseChanged` 逐项核验，模型等待在事务外。
+4. 批量逐项独立回执并对照预期条目清单；缺项/错配/重复/矛盾都不算成功，只有 `failed+effect=none` 可重发；同一观察内指南决定仍全有或全无。
+5. `operation_id` 在可能写入前建立并可由客户端持有；未知结果只查询原操作，不假装成功。
+6. 工具结果返回最小必要字段；原文/图片/网页/工具结果都是不可信数据，不改变系统指令或权限；聊天正文/附件/模型上下文按当前授权投影。
+7. 空任教范围、读取失败、无记录三者语义分离：错误不伪装成空数据。
