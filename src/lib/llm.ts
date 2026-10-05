@@ -1,4 +1,5 @@
 import { Config, LLMClient } from 'coze-coding-dev-sdk';
+import type { ContentPart, Message } from 'coze-coding-dev-sdk';
 
 import { FIVE_DOMAINS } from './types';
 
@@ -35,6 +36,65 @@ export type LlmOptions = {
   forwardHeaders?: Record<string, string>;
   responseType?: LlmResponseType;
 };
+
+/**
+ * 聊天图片输入：只接受服务端已授权、已处理的图片字节。
+ * 该类型没有 URL 字段，签名 URL / 公有链接不能进入模型调用。
+ */
+export type LlmChatImage = {
+  media_type: 'image/jpeg' | 'image/png' | 'image/webp';
+  data_base64: string;
+};
+
+export type LlmChatMessage = {
+  role: LlmMessage['role'];
+  content: string;
+  images?: readonly LlmChatImage[];
+};
+
+/** 应用自有结构化动作格式（如芽芽 answer/read/clarify/propose_write） */
+export type LlmChatResponseFormat = {
+  name: string;
+  schema: object;
+};
+
+export type LlmChatOptions = {
+  temperature?: number;
+  thinking?: 'enabled' | 'disabled';
+  forwardHeaders?: Record<string, string>;
+  /** 原 6 类 strict json_schema 之一 */
+  responseType?: LlmResponseType;
+  /** 应用自有 strict json_schema；与 responseType 同时给出时优先本项 */
+  responseFormat?: LlmChatResponseFormat;
+  /** 调用方取消传播；上游物理取消效果另记 NOT_RUN */
+  signal?: AbortSignal;
+};
+
+export type LlmChatResult = {
+  content: string;
+  provider: LlmProvider;
+  model: string;
+  /** 未知 usage 记 null，不填 0 */
+  usage: LlmUsage | null;
+};
+
+/** provider 不具备所需能力（如图片输入）时显式抛出；不静默切换 provider */
+export class LlmUnsupportedCapabilityError extends Error {
+  readonly code = 'unsupported_capability' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'LlmUnsupportedCapabilityError';
+  }
+}
+
+/** 调用方取消（AbortSignal） */
+export class LlmAbortedError extends Error {
+  readonly code = 'aborted' as const;
+  constructor(message = '模型请求已取消') {
+    super(message);
+    this.name = 'LlmAbortedError';
+  }
+}
 
 export const COZE_ORGANIZE_MODEL = 'doubao-seed-2-0-lite-260215';
 const DEFAULT_STEPFUN_BASE_URL = 'https://api.stepfun.com/step_plan/v1';
@@ -344,15 +404,24 @@ async function invokeCoze(messages: LlmMessage[], options: LlmOptions): Promise<
   };
 }
 
-async function invokeStepFun(messages: LlmMessage[], options: LlmOptions): Promise<LlmResult> {
+/**
+ * StepFun HTTP 请求公共路径：超时 + 可选调用方取消；错误文案与旧实现一致。
+ * callerSignal 存在时与超时信号合并；调用方取消与超时分别报告。
+ */
+async function postStepFun(
+  body: Record<string, unknown>,
+  callerSignal: AbortSignal | undefined,
+): Promise<unknown> {
   const apiKey = requiredEnv('STEPFUN_API_KEY');
   const baseUrl = (process.env.STEPFUN_BASE_URL?.trim() || DEFAULT_STEPFUN_BASE_URL).replace(
     /\/+$/,
     '',
   );
-  const model = getStepFunModel();
   const timeoutMs = getStepFunTimeoutMs();
-  const signal = AbortSignal.timeout(timeoutMs);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = callerSignal
+    ? AbortSignal.any([timeoutSignal, callerSignal])
+    : timeoutSignal;
   const requestUrl = `${baseUrl}/chat/completions`;
 
   let response: Response;
@@ -363,15 +432,11 @@ async function invokeStepFun(messages: LlmMessage[], options: LlmOptions): Promi
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: options.temperature ?? 0.3,
-        response_format: STEPFUN_RESPONSE_FORMATS[options.responseType ?? 'observation_draft'],
-      }),
+      body: JSON.stringify(body),
       signal,
     });
   } catch (error) {
+    if (callerSignal?.aborted) throw new LlmAbortedError();
     if (isStepFunTimeout(error, signal)) {
       throw new Error(`StepFun 请求超时（${timeoutMs}ms），请稍后重试`);
     }
@@ -383,6 +448,7 @@ async function invokeStepFun(messages: LlmMessage[], options: LlmOptions): Promi
   try {
     payload = await readJsonWithSignal(response, signal, timeoutMs);
   } catch (error) {
+    if (callerSignal?.aborted) throw new LlmAbortedError();
     if (isStepFunTimeout(error, signal)) {
       throw new Error(`StepFun 请求超时（${timeoutMs}ms），请稍后重试`);
     }
@@ -392,7 +458,10 @@ async function invokeStepFun(messages: LlmMessage[], options: LlmOptions): Promi
     const message = errorMessage(payload) ?? `HTTP ${response.status}`;
     throw new Error(`StepFun 请求失败：${redact(message, apiKey)}`);
   }
+  return payload;
+}
 
+function stepFunContent(payload: unknown): string {
   const choices = isRecord(payload) && Array.isArray(payload.choices) ? payload.choices : [];
   const firstChoice = choices[0];
   const message = isRecord(firstChoice) ? firstChoice.message : null;
@@ -402,9 +471,23 @@ async function invokeStepFun(messages: LlmMessage[], options: LlmOptions): Promi
   if (!content.trim()) {
     throw new Error('StepFun 响应缺少 choices[0].message.content');
   }
+  return content;
+}
+
+async function invokeStepFun(messages: LlmMessage[], options: LlmOptions): Promise<LlmResult> {
+  const model = getStepFunModel();
+  const payload = await postStepFun(
+    {
+      model,
+      messages,
+      temperature: options.temperature ?? 0.3,
+      response_format: STEPFUN_RESPONSE_FORMATS[options.responseType ?? 'observation_draft'],
+    },
+    undefined,
+  );
 
   return {
-    content,
+    content: stepFunContent(payload),
     provider: 'stepfun',
     model,
     usage: isRecord(payload) ? normalizeUsage(payload.usage) : undefined,
@@ -418,4 +501,122 @@ export async function invokeLlm(
   return getLlmProvider() === 'stepfun'
     ? invokeStepFun(messages, options)
     : invokeCoze(messages, options);
+}
+
+/* ----------------------------- 聊天 / 多模态调用 ----------------------------- */
+
+export function imageDataUri(image: LlmChatImage): string {
+  return `data:${image.media_type};base64,${image.data_base64}`;
+}
+
+/** Coze 聊天消息映射：图片只以 base64 data URI 进入 ContentPart，不接受 URL */
+export function buildCozeChatMessages(messages: readonly LlmChatMessage[]): Message[] {
+  return messages.map((message) => {
+    const images = message.images ?? [];
+    if (images.length === 0) return { role: message.role, content: message.content };
+    const parts: ContentPart[] = [
+      ...images.map((image) => ({
+        type: 'image_url' as const,
+        image_url: { url: imageDataUri(image) },
+      })),
+      { type: 'text' as const, text: message.content },
+    ];
+    return { role: message.role, content: parts };
+  });
+}
+
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new LlmAbortedError());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new LlmAbortedError());
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+function stepFunChatResponseFormat(options: LlmChatOptions): object | undefined {
+  if (options.responseFormat) {
+    return {
+      type: 'json_schema',
+      json_schema: {
+        name: options.responseFormat.name,
+        strict: true,
+        schema: options.responseFormat.schema,
+      },
+    };
+  }
+  return options.responseType ? STEPFUN_RESPONSE_FORMATS[options.responseType] : undefined;
+}
+
+async function invokeCozeChat(
+  messages: readonly LlmChatMessage[],
+  options: LlmChatOptions,
+): Promise<LlmChatResult> {
+  // Coze 已安装 SDK 没有 response_format/tools 参数：结构化动作由 Prompt 承载，Zod 校验在应用层。
+  const response = await raceWithAbort(
+    new LLMClient(new Config(), options.forwardHeaders).invoke(buildCozeChatMessages(messages), {
+      model: COZE_ORGANIZE_MODEL,
+      temperature: options.temperature ?? 0.3,
+      thinking: options.thinking ?? 'disabled',
+    }),
+    options.signal,
+  );
+  if (!response.content.trim()) throw new Error('Coze 返回空内容');
+  return {
+    content: response.content,
+    provider: 'coze',
+    model: COZE_ORGANIZE_MODEL,
+    usage: null,
+  };
+}
+
+async function invokeStepFunChat(
+  messages: readonly LlmChatMessage[],
+  options: LlmChatOptions,
+): Promise<LlmChatResult> {
+  if (messages.some((message) => (message.images?.length ?? 0) > 0)) {
+    throw new LlmUnsupportedCapabilityError(
+      'StepFun 当前路径不支持图片输入；不会静默切换 provider',
+    );
+  }
+  const model = getStepFunModel();
+  const responseFormat = stepFunChatResponseFormat(options);
+  const payload = await postStepFun(
+    {
+      model,
+      messages: messages.map((message) => ({ role: message.role, content: message.content })),
+      temperature: options.temperature ?? 0.3,
+      ...(responseFormat ? { response_format: responseFormat } : {}),
+    },
+    options.signal,
+  );
+  return {
+    content: stepFunContent(payload),
+    provider: 'stepfun',
+    model,
+    usage: isRecord(payload) ? (normalizeUsage(payload.usage) ?? null) : null,
+  };
+}
+
+/**
+ * 聊天/多模态调用入口：复用同一 llm.ts 的 provider 选择、超时、错误文案与
+ * 调用方取消传播；保留 invokeLlm 旧文本调用与原 6 类 strict schema 不变。
+ */
+export async function invokeChatLlm(
+  messages: readonly LlmChatMessage[],
+  options: LlmChatOptions = {},
+): Promise<LlmChatResult> {
+  return getLlmProvider() === 'stepfun'
+    ? invokeStepFunChat(messages, options)
+    : invokeCozeChat(messages, options);
 }
