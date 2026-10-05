@@ -87,11 +87,11 @@
 - 旧 `TEACHER_PASSCODE` 口令 Cookie 不再授权新业务，仅保留失败兼容入口；不应作为新版授权或部署前提。
 - 错误语义：401 未认证、403 无权限、400 非法动作/资源组合、409 业务冲突、503 身份服务不可用（fail closed，配置缺失时同样 503）。
 
-## 指南证据链（G5，读模型/后端已实现）
+## 指南证据链（G5 读模型 + G6 前端写闭环，本地整合候选）
 
 - 目录、读模型、建议与决定 API、儿童证据册/班级概览只读页面已实现（`src/lib/guide/`、`/api/observations/[id]/guide-evidence`、`/children/[id]/evidence`、`/classes/[id]/evidence`）。
-- **前端关联写闭环仍待完成**：正式页面尚未接入观察与表现条目的手动关联/决定写入；后端已具备该能力，接入时须复用现有授权与事务入口。
-- 活动反馈、学期快照尚未实现，不属于当前 Demo 范围。
+- **前端关联写闭环已在 CLOSE-QA1 整合候选接入**（`scripts/check-flow-close-joint.ts` 联合验收）：从指南条目进入记录 → 录入原始观察 → 整理（测试替身）→ 教师确认并提交指南决定（与归档同一事务）→ 个人证据册展开引用 → 班级同期聚合与下钻。整合记录见 `docs/guide-evidence-v1/close-qa1-integration.md`。
+- 真实模型质量、托管库迁移与生产发布均未验收；活动反馈、学期快照尚未实现，不属于当前 Demo 范围。
 
 ## 环境变量
 
@@ -108,10 +108,12 @@
 
 ## 迁移
 
+**区分演示库初始化与已有库升级**：`initialize-demo-db.sql` 是**演示库初始化脚本**，除建表/索引外还包含 `INSERT INTO children/observations/classes/child_class_enrollments` 合成种子数据，**不是生产纯结构迁移**（可按需截取 `INSERT INTO children` 之前的纯建表部分）；`upgrade-classes.sql` 除结构外**包含既有数据的回填**（班级快照等），也不是纯 DDL。本轮（CLOSE-QA1）未执行任何生产 SQL。
+
 已存在增量迁移文件，**按以下顺序执行**（均可重复执行，先建表/索引/约束再回填）：
 
 1. `scripts/initialize-demo-db.sql` —— 基础 schema + 合成演示数据（在 `INSERT INTO children` 前为纯建表/建索引部分，可按需截取）
-2. `scripts/upgrade-classes.sql` —— 班级、分班与观察发生时班级快照
+2. `scripts/upgrade-classes.sql` —— 班级、分班与观察发生时班级快照（含数据回填）
 3. `scripts/upgrade-guide-evidence-v1.sql` —— 指南证据列（须在 `upgrade-classes.sql` 之后，依赖 observations 与 classes.stage）
 4. `scripts/upgrade-auth-v1.sql` —— 账号、会话、任教关系（AUTH1）
 
