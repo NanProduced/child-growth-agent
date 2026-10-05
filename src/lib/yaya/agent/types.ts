@@ -143,12 +143,54 @@ export type YayaParamValidation =
   | { ok: true; params: unknown }
   | { ok: false; error: string };
 
-/** 参数校验端口：最小结构接口，TOOLS1 可用 Zod 适配（zodToolParams） */
+/** 模型可见参数协议；只能从服务端校验用的同一 schema 导出，禁止手写影子 schema */
+export interface YayaToolParamProtocol {
+  /** 输入侧 JSON Schema（已剔除 $schema 声明）；模型按此填写 params_json */
+  json_schema: object;
+}
+
+/** 参数 schema 无法导出为模型可见协议或协议为空时明确抛出，不冒充完整协议 */
+export class YayaToolProtocolError extends Error {
+  readonly code = 'tool_protocol_unavailable' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'YayaToolProtocolError';
+  }
+}
+
+/**
+ * 参数校验与模型可见协议同源：
+ * - validate 使用原 Zod schema；
+ * - describe 使用 zod v4 公开的 `z.toJSONSchema(io=input, unrepresentable=throw)`；
+ * - 无法导出或导出为空（等价任意参数）时抛 YayaToolProtocolError。
+ */
 export interface YayaToolParamSchema {
   validate(value: unknown): YayaParamValidation;
+  describe(): YayaToolParamProtocol;
+}
+
+function exportToolParamJsonSchema(schema: z.ZodType): object {
+  let exported: unknown;
+  try {
+    exported = z.toJSONSchema(schema, { io: 'input', unrepresentable: 'throw' });
+  } catch (error) {
+    throw new YayaToolProtocolError(
+      `参数 schema 无法导出为模型可见协议：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (typeof exported !== 'object' || exported === null || Array.isArray(exported)) {
+    throw new YayaToolProtocolError('参数 schema 导出结果不是 JSON Schema 对象');
+  }
+  const record: Record<string, unknown> = { ...exported };
+  delete record.$schema;
+  if (Object.keys(record).length === 0) {
+    throw new YayaToolProtocolError('参数 schema 为空（等价任意参数），请声明具体结构');
+  }
+  return record;
 }
 
 export function zodToolParams<T>(schema: z.ZodType<T>): YayaToolParamSchema {
+  const jsonSchema = exportToolParamJsonSchema(schema);
   return {
     validate: (value) => {
       const parsed = schema.safeParse(value);
@@ -157,6 +199,7 @@ export function zodToolParams<T>(schema: z.ZodType<T>): YayaToolParamSchema {
       const where = issue ? issue.path.join('.') || 'params' : 'params';
       return { ok: false, error: `${where}: ${issue?.message ?? '不符合参数要求'}` };
     },
+    describe: () => ({ json_schema: jsonSchema }),
   };
 }
 
@@ -307,11 +350,33 @@ export interface YayaPublicSearchPolicyPort {
   scanChildIdentifiers(input: { tool: string; params: unknown }): Promise<YayaChildIdentifierScan>;
 }
 
+/* ------------------------------- 已装载上下文的授权重核 ------------------------------- */
+
+/**
+ * 已装载进本次模型上下文的来源/图片。模型派发、异步结果消费与回答/提案发布前，
+ * 由依赖端复用 AUTH/DATA/MEDIA 当前事实逐项重新核验（含幼儿归属变化等资源事实），
+ * 引擎不比较账号/范围数组快照，也不复制授权算法。
+ */
+export interface YayaContextRevalidationInput {
+  run_id: string;
+  identity: YayaCurrentIdentity;
+  sources: readonly YayaSourceRef[];
+  image_ids: readonly string[];
+}
+
+export type YayaContextRevalidation =
+  | { ok: true }
+  | { ok: false; reason: 'context_revoked'; denied_refs: readonly string[] };
+
 /** 全部最小端口；正式服务在 TOOLS/DATA/MEDIA/AUTH 装配，测试使用替身 */
 export interface YayaAgentDependencies {
   model: YayaModelGateway;
   resolveCurrentIdentity(input: { run_id: string }): Promise<YayaCurrentIdentity>;
   loadProjectedContext(input: YayaContextRequest): Promise<YayaProjectedContext>;
+  /** 对已装载上下文做当前授权重核；失败/不可用一律保守停止，不继续消费旧私域数据 */
+  revalidateProjectedContext(
+    input: YayaContextRevalidationInput,
+  ): Promise<YayaContextRevalidation>;
   readTool(input: YayaReadToolInput): Promise<YayaReadToolOutcome>;
   proposeWrite(input: YayaProposeWriteInput): Promise<YayaProposeWriteOutcome>;
   queryOperation(input: YayaOperationQueryInput): Promise<YayaOperationQueryOutcome>;
@@ -372,6 +437,8 @@ export const YAYA_AGENT_STOP_REASONS = [
   'tool_unauthorized',
   'propose_failed',
   'source_mismatch',
+  'context_revoked',
+  'tool_protocol_unavailable',
 ] as const;
 export type YayaAgentStopReason = (typeof YAYA_AGENT_STOP_REASONS)[number];
 

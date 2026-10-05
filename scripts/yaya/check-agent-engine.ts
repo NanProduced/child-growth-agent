@@ -25,6 +25,8 @@ import {
   type YayaAgentLimits,
   type YayaAuthorizedImage,
   type YayaContextRequest,
+  type YayaContextRevalidation,
+  type YayaContextRevalidationInput,
   type YayaCurrentIdentity,
   type YayaModelRequest,
   type YayaModelResponse,
@@ -34,6 +36,7 @@ import {
   type YayaProjectedContext,
   type YayaReadToolInput,
   type YayaReadToolOutcome,
+  type YayaReadToolDefinition,
   type YayaRunOutcome,
   type YayaRunResult,
   type YayaToolCatalog,
@@ -231,6 +234,14 @@ type ScanResponder = (
   input: { tool: string; params: unknown },
   index: number,
 ) => YayaChildIdentifierScan | Promise<YayaChildIdentifierScan>;
+type RevalidateResponder = (
+  input: YayaContextRevalidationInput,
+  index: number,
+) => YayaContextRevalidation | Promise<YayaContextRevalidation>;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 interface Doubles {
   state: {
@@ -239,7 +250,8 @@ interface Doubles {
     read: ReadResponder;
     propose: ProposeResponder;
     query: QueryResponder;
-    context: () => YayaProjectedContext;
+    context: () => YayaProjectedContext | Promise<YayaProjectedContext>;
+    revalidate: RevalidateResponder;
     tools: YayaToolCatalog;
     providerEnabled: boolean;
     scan: ScanResponder;
@@ -252,6 +264,7 @@ interface Doubles {
     propose: YayaProposeWriteInput[];
     query: YayaOperationQueryInput[];
     context: YayaContextRequest[];
+    revalidate: YayaContextRevalidationInput[];
     identity: number;
   };
 }
@@ -263,7 +276,8 @@ function createDoubles(
     read: ReadResponder;
     propose: ProposeResponder;
     query: QueryResponder;
-    context: () => YayaProjectedContext;
+    context: () => YayaProjectedContext | Promise<YayaProjectedContext>;
+    revalidate: RevalidateResponder;
     tools: YayaToolCatalog;
     providerEnabled: boolean;
     scan: ScanResponder;
@@ -275,6 +289,7 @@ function createDoubles(
     propose: [],
     query: [],
     context: [],
+    revalidate: [],
     identity: 0,
   };
   const state: Doubles['state'] = {
@@ -299,6 +314,7 @@ function createDoubles(
         images: [],
         guide_catalog: '指南目录（替身）',
       })),
+    revalidate: overrides.revalidate ?? (() => ({ ok: true as const })),
     tools: overrides.tools ?? DEFAULT_TEST_TOOLS,
     providerEnabled: overrides.providerEnabled ?? false,
     scan: overrides.scan ?? (() => 'unknown'),
@@ -318,6 +334,10 @@ function createDoubles(
     loadProjectedContext: (input) => {
       calls.context.push(input);
       return Promise.resolve(state.context());
+    },
+    revalidateProjectedContext: (input) => {
+      calls.revalidate.push(input);
+      return Promise.resolve(state.revalidate(input, calls.revalidate.length - 1));
     },
     readTool: (input) => {
       calls.read.push(input);
@@ -1126,6 +1146,314 @@ async function main(): Promise<void> {
       allowed.calls.model.length +
       selfReport.calls.model.length;
     counters.engine_read += allowed.calls.read.length;
+  });
+
+  await check('engine/context-revoked-during-load-blocks-model', async () => {
+    let revoked = false;
+    const privateImage: YayaAuthorizedImage = {
+      image_id: 'image-private',
+      media_type: 'image/png',
+      data_base64: 'QUJD',
+      source: sourceRef('image_interpretation', 'image-private', '班级私有图片'),
+    };
+    const d = createDoubles({
+      context: async () => {
+        await delay(5);
+        revoked = true;
+        return {
+          history: [{ role: 'user', content: '小满今天在建构区搭了很长的桥。' }],
+          sources: [
+            CONTEXT_SOURCE,
+            sourceRef('image_interpretation', 'image-private', '班级私有图片'),
+          ],
+          images: [privateImage],
+          guide_catalog: null,
+        };
+      },
+      revalidate: () =>
+        revoked
+          ? { ok: false, reason: 'context_revoked', denied_refs: ['obs-1', 'image-private'] }
+          : { ok: true },
+      model: () =>
+        modelReply(actionJson('answer', { content: '小满在搭桥。', source_refs: ['obs-1'] })),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '小满怎么样' });
+    assert.equal(stoppedReason(result), 'context_revoked');
+    assert.equal(d.calls.model.length, 0, '撤权后旧历史/图片不得进入模型');
+    assert.equal(result.events.some((event) => event.type === 'answer'), false);
+    redGreen.push({
+      name: 'context-revoked-during-load',
+      red: 'naive sends stale history/images to model',
+      green: `engine context_revoked, model=${d.calls.model.length}`,
+    });
+  });
+
+  await check('engine/context-revoked-during-read-blocks-result', async () => {
+    let revoked = false;
+    const d = createDoubles({
+      model: (_request, index) =>
+        modelReply(
+          index === 0
+            ? actionJson('read', {
+                tool: 'list_child_observations',
+                params_json: JSON.stringify({ child_id: 'child-1' }),
+              })
+            : actionJson('answer', { content: '根据刚读到的私域事实回答。' }),
+        ),
+      read: async () => {
+        await delay(5);
+        revoked = true;
+        return {
+          ok: true,
+          data: { raw_text: 'PRIVATE_CHILD_FACT' },
+          source: sourceRef('child_fact', 'obs-1', '观察 obs-1'),
+        };
+      },
+      revalidate: () =>
+        revoked ? { ok: false, reason: 'context_revoked', denied_refs: ['obs-1'] } : { ok: true },
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '看下小满的记录' });
+    assert.equal(stoppedReason(result), 'context_revoked');
+    assert.equal(d.calls.model.length, 1, 'read 结果不得进入下一轮模型调用');
+    assert.equal(result.events.some((event) => event.type === 'tool_result'), false);
+    assert.equal(result.events.some((event) => event.type === 'answer'), false);
+    const lastRevalidation = d.calls.revalidate[d.calls.revalidate.length - 1];
+    assert.ok(
+      lastRevalidation.sources.some((source) => source.ref_id === 'obs-1'),
+      'read 结果来源必须进入消费前的重核输入',
+    );
+    redGreen.push({
+      name: 'context-revoked-during-read',
+      red: 'naive model=2, stale fact resent, answer published',
+      green: `engine model=${d.calls.model.length}, result dropped`,
+    });
+    counters.engine_model += d.calls.model.length;
+    counters.engine_read += d.calls.read.length;
+  });
+
+  await check('engine/context-revoked-during-model-blocks-answer', async () => {
+    let revoked = false;
+    const d = createDoubles({
+      model: async () => {
+        await delay(5);
+        revoked = true;
+        return modelReply(
+          actionJson('answer', { content: '基于已装载私域上下文的答案。', source_refs: ['obs-1'] }),
+        );
+      },
+      revalidate: () =>
+        revoked ? { ok: false, reason: 'context_revoked', denied_refs: ['obs-1'] } : { ok: true },
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '小满怎么样' });
+    assert.equal(stoppedReason(result), 'context_revoked');
+    assert.equal(result.events.some((event) => event.type === 'answer'), false);
+    assert.equal(d.calls.model.length, 1);
+    redGreen.push({
+      name: 'context-revoked-during-model',
+      red: 'naive publishes stale answer',
+      green: `engine context_revoked, answer events=0`,
+    });
+    counters.engine_model += d.calls.model.length;
+  });
+
+  await check('engine/child-attribution-change-same-scope-array', async () => {
+    const scopeSnapshots: string[] = [];
+    const stablePrincipal = principalWith({ scope: { kind: 'classes', class_ids: ['class-1'] } });
+    const d = createDoubles({
+      identity: () => {
+        scopeSnapshots.push(JSON.stringify(stablePrincipal.scope));
+        return identityOf('run-1', { principal: stablePrincipal });
+      },
+      context: () => ({
+        history: [],
+        sources: [sourceRef('child_fact', 'obs-moved-child', '转班幼儿观察')],
+        images: [],
+        guide_catalog: null,
+      }),
+      revalidate: () => ({ ok: false, reason: 'context_revoked', denied_refs: ['obs-moved-child'] }),
+      model: () => modelReply(actionJson('answer', { content: '不应出现。' })),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '看看这个孩子' });
+    assert.equal(stoppedReason(result), 'context_revoked');
+    assert.equal(d.calls.model.length, 0);
+    assert.ok(scopeSnapshots.length >= 1);
+    assert.ok(
+      scopeSnapshots.every((snapshot) => snapshot === scopeSnapshots[0]),
+      'scope 数组始终未变；停止必须来自资源级重核',
+    );
+    redGreen.push({
+      name: 'child-attribution-change',
+      red: 'naive scope-array compare passes, model called',
+      green: 'engine per-resource revalidation stops, model=0',
+    });
+  });
+
+  await check('engine/empty-source-refs-cannot-hide-revoked-context', async () => {
+    let revoked = false;
+    const d = createDoubles({
+      model: (_request, index) => {
+        if (index === 0) {
+          return modelReply(
+            actionJson('read', {
+              tool: 'list_class_children',
+              params_json: JSON.stringify({ class_id: 'class-1' }),
+            }),
+          );
+        }
+        return (async () => {
+          await delay(5);
+          revoked = true;
+          return modelReply(
+            actionJson('answer', { content: '综合总结（不引用任何来源）。', source_refs: [] }),
+          );
+        })();
+      },
+      read: () => ({
+        ok: true,
+        data: { children: [{ id: 'c1' }] },
+        source: sourceRef('child_fact', 'obs-1', '观察 obs-1'),
+      }),
+      revalidate: () =>
+        revoked ? { ok: false, reason: 'context_revoked', denied_refs: ['obs-1'] } : { ok: true },
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '总结一下' });
+    assert.equal(stoppedReason(result), 'context_revoked');
+    assert.equal(result.events.some((event) => event.type === 'answer'), false);
+    assert.equal(d.calls.model.length, 2, '第一轮 + 依赖私域的第二轮');
+    redGreen.push({
+      name: 'empty-source-refs',
+      red: 'naive trusts source_refs=[] and publishes',
+      green: 'engine revalidates all loaded context, answer=0',
+    });
+    counters.engine_model += d.calls.model.length;
+    counters.engine_read += d.calls.read.length;
+  });
+
+  await check('engine/unassigned-general-qa-remains-available', async () => {
+    const d = createDoubles({
+      identity: () =>
+        identityOf('run-1', {
+          principal: principalWith({ scope: { kind: 'none', reason: 'no_assignment' } }),
+        }),
+      context: () => ({ history: [], sources: [], images: [], guide_catalog: '指南目录（替身）' }),
+      model: () => modelReply(actionJson('answer', { content: '可以，我们先聊保教工作。' })),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '你好' });
+    expectOutcome(result, 'answered');
+    assert.ok(d.calls.revalidate.length >= 1, '一般问答也必须走当前授权重核');
+    const first = d.calls.revalidate[0];
+    assert.equal(first.sources.length, 0);
+    assert.equal(first.image_ids.length, 0);
+    redGreen.push({
+      name: 'unassigned-general-qa',
+      red: 'naive treats empty scope as revoked',
+      green: `engine answered, revalidate calls=${d.calls.revalidate.length}`,
+    });
+    counters.engine_model += d.calls.model.length;
+  });
+
+  await check('engine/data-driven-loop-with-revalidation-unchanged', async () => {
+    const d = createDoubles({
+      model: (_request, index) =>
+        modelReply(
+          index === 0
+            ? actionJson('read', { tool: 'list_class_children', params_json: '{}' })
+            : index === 1
+              ? actionJson('read', {
+                  tool: 'list_child_observations',
+                  params_json: JSON.stringify({ child_id: 'c2' }),
+                })
+              : actionJson('answer', { content: '看到 c2 的记录。', source_refs: ['obs-o2'] }),
+        ),
+      read: (_input, index) =>
+        index === 0
+          ? {
+              ok: true,
+              data: { children: [{ id: 'c1' }, { id: 'c2' }] },
+              source: sourceRef('tool_result', 'children-list'),
+            }
+          : {
+              ok: true,
+              data: { observations: [{ id: 'o2' }] },
+              source: sourceRef('child_fact', 'obs-o2', '观察 o2'),
+            },
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '看 c2' });
+    const outcome = expectOutcome(result, 'answered');
+    assert.equal(outcome.sources[0].ref_id, 'obs-o2');
+    assert.equal(d.calls.model.length, 3);
+    assert.equal(d.calls.read.length, 2);
+    assert.ok(d.calls.revalidate.length >= 3, '多步读取每步都重核且未被误停');
+    redGreen.push({
+      name: 'data-driven-with-revalidation',
+      red: 'naive has no revalidation boundary',
+      green: `engine answered, model=3, reads=2, revalidate=${d.calls.revalidate.length}`,
+    });
+    counters.engine_model += d.calls.model.length;
+    counters.engine_read += d.calls.read.length;
+  });
+
+  await check('engine/tool-param-protocol-visible-to-model', async () => {
+    const d = createDoubles({
+      model: () => modelReply(actionJson('answer', { content: '好的。' })),
+    });
+    await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '帮助' });
+    assert.ok(d.calls.model.length >= 1);
+    const promptText = d.calls.model[0].messages.map((message) => message.text).join('\n');
+    const lines = promptText.split('\n');
+    const readLine = lines.find((line) => line.includes('list_child_observations'));
+    assert.ok(readLine, '模型消息缺少只读工具行');
+    assert.ok(
+      readLine.includes('"required"') && readLine.includes('"child_id"'),
+      '只读工具必须展示必需参数结构',
+    );
+    const writeLine = lines.find((line) => line.includes('create_observation'));
+    assert.ok(writeLine, '模型消息缺少写入工具行');
+    assert.ok(
+      writeLine.includes('"child_id"') && writeLine.includes('"raw_text"'),
+      '写入工具必须展示全部参数',
+    );
+    assert.ok(writeLine.includes('"required"'), '写入工具必须展示必需字段');
+    const searchLine = lines.find((line) => line.includes('public_web_search'));
+    assert.ok(searchLine, '模型消息缺少检索工具行');
+    assert.ok(searchLine.includes('"query"'), '检索工具必须展示 query 参数');
+
+    const bad = createDoubles({
+      model: () =>
+        modelReply(
+          actionJson('propose_write', {
+            tool: 'create_observation',
+            params_json: JSON.stringify({ child_id: 'child-1' }),
+          }),
+        ),
+    });
+    const badResult = await runYayaAgent(bad.deps, { run_id: 'run-1', user_text: '记一下' });
+    assert.equal(stoppedReason(badResult), 'invalid_params');
+    assert.equal(bad.calls.propose.length, 0, '运行时参数校验不因模型可见协议而放松');
+
+    // 参数协议缺失/为空时明确拒绝：不把坏工具发给模型，也不静默省略参数。
+    const brokenTool: YayaReadToolDefinition = {
+      tool: 'broken_tool',
+      description: '坏协议工具',
+      scope_policy: 'business_scope',
+      params: {
+        validate: () => ({ ok: true, params: {} }),
+        describe: () => ({ json_schema: {} }),
+      },
+    };
+    const broken = createDoubles({
+      tools: { read_tools: [brokenTool], write_tools: [] },
+    });
+    const brokenResult = await runYayaAgent(broken.deps, { run_id: 'run-1', user_text: '试试' });
+    assert.equal(stoppedReason(brokenResult), 'tool_protocol_unavailable');
+    assert.equal(broken.calls.model.length, 0, '协议不可用时不得派发模型');
+
+    redGreen.push({
+      name: 'tool-param-visible',
+      red: 'naive catalog lists names only',
+      green: 'engine message carries required/type JSON Schema; validation unchanged',
+    });
+    counters.engine_model += d.calls.model.length + bad.calls.model.length;
   });
 
   console.log(

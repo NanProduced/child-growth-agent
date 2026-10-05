@@ -6,6 +6,8 @@
  *
  * 守门要点：
  * - 每次 await、重试与派发前重核运行/取消/deadline/身份（guardRun）；
+ * - 模型派发、异步结果消费与回答/提案发布前，对已装载上下文做当前授权重核
+ *   （revalidateContextOrStop）；同账号同 scope、但资源归属变化也必须识别；
  * - 所有实际尝试（含失败、超时、重试、被拒绝的公开检索）计入预算；
  * - 等待全部有上界（finiteCall），没有悬挂计时器；
  * - 恢复只按原 operation 查询，不执行旧批准内容，回执只来自依赖端；
@@ -38,6 +40,7 @@ import {
   type YayaAgentLimits,
   type YayaAgentStopReason,
   type YayaAuthorizedImage,
+  type YayaContextRevalidation,
   type YayaCurrentIdentity,
   type YayaModelMessage,
   type YayaModelResponse,
@@ -46,6 +49,7 @@ import {
   type YayaRunOutcome,
   type YayaRunRequest,
   type YayaRunResult,
+  YayaToolProtocolError,
 } from './types';
 
 class YayaStopSignal extends Error {
@@ -76,10 +80,34 @@ interface EngineState {
   budget: YayaAgentBudgetState;
   turns: YayaModelMessage[];
   knownSources: Map<string, YayaSourceRef>;
+  /** 已装载进模型上下文的来源（历史/工具结果）；每次派发/消费/发布前重核 */
+  loadedSources: Map<string, YayaSourceRef>;
+  /** 已装载的授权图片 id */
+  loadedImageIds: Set<string>;
   controller: AbortController;
   deadlineAt: number;
   limits: YayaAgentLimits;
   expectedAccountId: string | null;
+}
+
+function sourceKey(source: YayaSourceRef): string {
+  return `${source.kind}\u0000${source.ref_id ?? ''}\u0000${source.derived_from ?? ''}`;
+}
+
+function rememberSource(state: EngineState, source: YayaSourceRef): void {
+  state.loadedSources.set(sourceKey(source), source);
+}
+
+function isContextRevalidation(value: unknown): value is YayaContextRevalidation {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (record.ok === true) return true;
+  return (
+    record.ok === false &&
+    record.reason === 'context_revoked' &&
+    Array.isArray(record.denied_refs) &&
+    record.denied_refs.every((entry) => typeof entry === 'string')
+  );
 }
 
 function emit(state: EngineState, event: YayaAgentEvent): void {
@@ -112,6 +140,8 @@ function createEngineState(
     budget: { model_attempts: 0, tool_steps: 0, tool_attempts: 0, tool_retries: 0 },
     turns: [],
     knownSources: new Map(),
+    loadedSources: new Map(),
+    loadedImageIds: new Set(),
     controller,
     deadlineAt: Date.now() + limits.deadline_ms,
     limits,
@@ -182,6 +212,59 @@ async function guardRun(
   if (identity.principal.account_id !== state.expectedAccountId) {
     throw stop('identity_changed');
   }
+  return identity;
+}
+
+/**
+ * 已装载上下文的当前授权重核（共享边界，单点实现）：
+ * - 逐项交给依赖端复用 AUTH/DATA/MEDIA 当前事实判定，不做账号/范围数组快照比较；
+ * - 依赖端不可用或返回不可用结果一律保守停止，不继续消费旧私域数据；
+ * - 有效未分配账号的一般问答没有私域依赖，依赖端返回 ok 即照常继续。
+ */
+async function revalidateContextOrStop(
+  state: EngineState,
+  deps: YayaAgentDependencies,
+  identity: YayaCurrentIdentity,
+): Promise<void> {
+  checkDeadline(state);
+  let verdict: unknown;
+  try {
+    verdict = await finiteCall(
+      () =>
+        deps.revalidateProjectedContext({
+          run_id: state.runId,
+          identity,
+          sources: [...state.loadedSources.values()],
+          image_ids: [...state.loadedImageIds],
+        }),
+      state,
+      state.limits.tool_wait_ms,
+    );
+  } catch (error) {
+    if (error instanceof YayaStopSignal) throw error;
+    throw stop('context_revoked', `无法核验当前授权：${messageOf(error)}`);
+  }
+  checkDeadline(state);
+  if (!isContextRevalidation(verdict)) {
+    throw stop('context_revoked', '授权重核返回不可用结果');
+  }
+  if (!verdict.ok) {
+    throw stop(
+      'context_revoked',
+      verdict.denied_refs.length > 0
+        ? `已失效授权：${verdict.denied_refs.join(', ')}`
+        : '当前授权已变化',
+    );
+  }
+}
+
+/** 运行/身份守门 + 已装载上下文重核；派发与消费前的统一入口 */
+async function enforceRunAndContext(
+  state: EngineState,
+  deps: YayaAgentDependencies,
+): Promise<YayaCurrentIdentity> {
+  const identity = await guardRun(state, deps);
+  await revalidateContextOrStop(state, deps, identity);
   return identity;
 }
 
@@ -293,7 +376,7 @@ async function executeRead(
       throw stop('max_tool_attempts');
     }
     state.budget.tool_attempts += 1;
-    await guardRun(state, deps);
+    await enforceRunAndContext(state, deps);
     const policy = deps.publicSearchPolicy;
     let scan: YayaChildIdentifierScan = 'unknown';
     if (policy.provider_enabled) {
@@ -348,7 +431,7 @@ async function executeRead(
       throw stop('max_tool_attempts');
     }
     state.budget.tool_attempts += 1;
-    const identity = await guardRun(state, deps);
+    const identity = await enforceRunAndContext(state, deps);
 
     let outcome: Awaited<ReturnType<YayaAgentDependencies['readTool']>>;
     try {
@@ -372,7 +455,9 @@ async function executeRead(
       }
       throw stop('tool_failed', `${action.tool}: ${messageOf(error)}`);
     }
-    await guardRun(state, deps);
+    // 结果来源先登记，再与已装载上下文一起重核；失效则不消费、不进入下一轮。
+    if (outcome.ok) rememberSource(state, outcome.source);
+    await enforceRunAndContext(state, deps);
 
     if (outcome.ok) {
       const envelope: YayaUntrustedEnvelope<unknown> = {
@@ -439,7 +524,7 @@ async function executeProposeWrite(
   }
   state.budget.tool_attempts += 1;
 
-  const identity = await guardRun(state, deps);
+  const identity = await enforceRunAndContext(state, deps);
   let outcome: Awaited<ReturnType<YayaAgentDependencies['proposeWrite']>>;
   try {
     outcome = await finiteCall(
@@ -458,7 +543,7 @@ async function executeProposeWrite(
     if (error instanceof YayaStopSignal) throw error;
     throw stop('propose_failed', `${action.tool}: ${messageOf(error)}`);
   }
-  await guardRun(state, deps);
+  await enforceRunAndContext(state, deps);
 
   if (!outcome.ok) {
     switch (outcome.code) {
@@ -510,12 +595,34 @@ async function runLoop(
     state,
     state.limits.model_wait_ms,
   );
-  await guardRun(state, deps);
+  const contextIdentity = await guardRun(state, deps);
   validateAuthorizedImages(context.images);
   for (const source of context.sources) {
     if (typeof source.ref_id === 'string' && source.ref_id.length > 0) {
       state.knownSources.set(source.ref_id, source);
     }
+    rememberSource(state, source);
+  }
+  for (const image of context.images) {
+    state.loadedImageIds.add(image.image_id);
+  }
+  // 装载后、任何模型派发前，先按当前授权重核；失效则不把旧投影送入模型。
+  await revalidateContextOrStop(state, deps, contextIdentity);
+
+  let userMessageText: string;
+  try {
+    userMessageText = formatYayaUserMessage({
+      user_text: state.userText,
+      images: context.images,
+      sources: context.sources,
+      guide_catalog: context.guide_catalog,
+      tools: deps.tools,
+    });
+  } catch (error) {
+    if (error instanceof YayaToolProtocolError) {
+      throw stop('tool_protocol_unavailable', error.message);
+    }
+    throw error;
   }
   state.turns.push({ role: 'system', text: buildYayaSystemPrompt() });
   for (const turn of context.history) {
@@ -523,13 +630,7 @@ async function runLoop(
   }
   state.turns.push({
     role: 'user',
-    text: formatYayaUserMessage({
-      user_text: state.userText,
-      images: context.images,
-      sources: context.sources,
-      guide_catalog: context.guide_catalog,
-      tools: deps.tools,
-    }),
+    text: userMessageText,
     images: context.images,
   });
 
@@ -537,7 +638,7 @@ async function runLoop(
     assertBudget(state.budget.model_attempts, state.limits);
     state.budget.model_attempts += 1;
     emit(state, { type: 'model_attempted', attempt: state.budget.model_attempts });
-    await guardRun(state, deps);
+    await enforceRunAndContext(state, deps);
 
     let response: YayaModelResponse;
     try {
@@ -558,7 +659,8 @@ async function runLoop(
       }
       throw stop('model_failed', messageOf(error));
     }
-    await guardRun(state, deps);
+    // 模型输出的旧答案可能依赖已失效私域数据；发布前重核，source_refs=[] 也不豁免。
+    await enforceRunAndContext(state, deps);
     emit(state, {
       type: 'model_completed',
       provider: response.provider,

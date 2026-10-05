@@ -7,6 +7,7 @@
  * - 真实模型行为 NOT_RUN。
  */
 import assert from 'node:assert/strict';
+import { z } from 'zod';
 
 import {
   buildYayaSystemPrompt,
@@ -17,9 +18,12 @@ import {
   YAYA_SYSTEM_PROMPT,
 } from '../../src/lib/yaya/agent/prompt';
 import {
+  YayaToolProtocolError,
   yayaAgentActionSchema,
   YAYA_ACTION_WIRE_FORMAT,
+  zodToolParams,
   type YayaAuthorizedImage,
+  type YayaReadToolDefinition,
   type YayaToolCatalog,
 } from '../../src/lib/yaya/agent/types';
 import type { YayaSourceRef } from '../../src/lib/yaya/types';
@@ -47,13 +51,13 @@ const TOOLS: YayaToolCatalog = {
       tool: 'list_class_children',
       description: '列出班级幼儿',
       scope_policy: 'business_scope',
-      params: { validate: () => ({ ok: true, params: {} }) },
+      params: zodToolParams(z.object({ class_id: z.string().optional() })),
     },
     {
       tool: 'public_web_search',
       description: '公开教育检索',
       scope_policy: 'authenticated_reference',
-      params: { validate: () => ({ ok: true, params: {} }) },
+      params: zodToolParams(z.object({ query: z.string().min(1) }).strict()),
       public_search: true,
     },
   ],
@@ -62,7 +66,7 @@ const TOOLS: YayaToolCatalog = {
       tool: 'create_observation',
       description: '录入观察（只准备）',
       auth: { kind: 'action', action: 'observation.write', resource: 'child' },
-      params: { validate: () => ({ ok: true, params: {} }) },
+      params: zodToolParams(z.object({ child_id: z.string(), raw_text: z.string() })),
     },
   ],
 };
@@ -187,6 +191,88 @@ function main(): void {
     assert.ok(formatted.includes('需服务端无识别信息预检'));
     assert.ok(formatted.includes('read 只能从这里选'));
     assert.ok(formatted.includes('propose_write 只能从这里选'));
+  });
+
+  check('prompt/tool-param-protocol-same-source-as-validation', () => {
+    const schema = z.object({
+      child_id: z.string(),
+      mode: z.enum(['create', 'update']).optional(),
+      limit: z.number().int().min(1).max(10).optional(),
+    });
+    const params = zodToolParams(schema);
+    const protocol = params.describe().json_schema;
+    const serialized = JSON.stringify(protocol);
+    assert.ok(serialized.includes('"required":["child_id"]'), '协议必须含必需字段');
+    assert.ok(serialized.includes('"enum":["create","update"]'), '协议必须含枚举');
+    assert.ok(serialized.includes('"minimum":1'), '协议必须含数值约束');
+    assert.equal(serialized.includes('$schema'), false, '协议不携带 $schema 声明');
+
+    const raw: Record<string, unknown> = {
+      ...(z.toJSONSchema(schema, { io: 'input', unrepresentable: 'throw' }) as Record<
+        string,
+        unknown
+      >),
+    };
+    delete raw.$schema;
+    assert.deepEqual(protocol, raw, 'describe 必须与同一 schema 的公开导出逐字段一致');
+
+    assert.equal(params.validate({ child_id: 'c1', mode: 'create' }).ok, true);
+    assert.equal(params.validate({ mode: 'create' }).ok, false, '缺必需字段仍被拒绝');
+    assert.equal(params.validate({ child_id: 1 }).ok, false, '类型错误仍被拒绝');
+
+    const catalog: YayaToolCatalog = {
+      read_tools: [
+        {
+          tool: 'lookup_child',
+          description: '查询幼儿',
+          scope_policy: 'business_scope',
+          params,
+        },
+      ],
+      write_tools: [],
+    };
+    const formatted = formatYayaUserMessage({
+      user_text: '查一下',
+      images: [],
+      sources: [],
+      guide_catalog: null,
+      tools: catalog,
+    });
+    assert.ok(
+      formatted.includes(serialized),
+      '模型消息必须包含同一 schema 导出的参数协议，不能只给工具名',
+    );
+  });
+
+  check('prompt/tool-param-export-refusal-is-explicit', () => {
+    for (const schema of [z.unknown(), z.date(), z.map(z.string(), z.string())]) {
+      assert.throws(
+        () => zodToolParams(schema),
+        (error: unknown) => error instanceof YayaToolProtocolError,
+        '不可导出的 schema 必须明确拒绝，不能冒充完整协议',
+      );
+    }
+    const fake: YayaReadToolDefinition = {
+      tool: 'fake_tool',
+      description: '伪造空协议',
+      scope_policy: 'business_scope',
+      params: {
+        validate: () => ({ ok: true, params: {} }),
+        describe: () => ({ json_schema: {} }),
+      },
+    };
+    assert.throws(
+      () =>
+        formatYayaUserMessage({
+          user_text: 'x',
+          images: [],
+          sources: [],
+          guide_catalog: null,
+          tools: { read_tools: [fake], write_tools: [] },
+        }),
+      (error: unknown) => error instanceof YayaToolProtocolError,
+      '空协议对象必须在组装模型消息时被明确拒绝',
+    );
   });
 
   console.log(
