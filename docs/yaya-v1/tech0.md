@@ -1,211 +1,227 @@
-# YAYA-TECH0｜聊天与多模态技术兼容性前置报告（PARTIAL）
+# YAYA-TECH0-R1｜聊天与多模态技术兼容性前置（修订版，PARTIAL）
 
-状态：本轮为**离线前置核验**。未安装项目依赖、未改产品源码/共享类型/依赖锁、未读 `.env`、未对真实 provider/搜索/对象存储/托管库发起任何请求。真实协议、视觉质量、部署存储与浏览器联合验收均为 **NOT_RUN**，需追加预算与资源授权。
+状态：离线前置核验 + 离线替身 PoC。未安装项目依赖、未改产品源码/共享类型/依赖锁、未读 `.env`、未对真实 provider/搜索/对象存储/托管库发起任何请求。真实协议、视觉质量、部署存储、真实 Agent 质量与浏览器联合验收均为 **NOT_RUN**，需追加预算与资源授权。
 
-- 基线：`e8225f04918de2073e194cb199dc8cf1bcb7f38f`（工作树 `codex/yaya-tech0`，路径 `C:\Users\nanpr\AppData\Local\Temp\opencode\child-growth-yaya-tech0`）
-- 固定装置：`scripts/harness-safety.ts` blob `6702f2ddf3b436e79f8c92ae8756c33f611a8503`，核验一致，未改动
-- `RTK.md`：不存在（仅记录，未补造）
-- 真实模型账本：仓库 `logs/ai-quality/budget.json` 仍为 `used=40,total=40`，本轮真实模型请求 0，未重置、未新建预算轮次
+- 本修订起点：`b652557da305bd684d6e564803a620bc9866c224`（TECH0 首版提交）；共同产品基线 `e8225f04918de2073e194cb199dc8cf1bcb7f38f`
+- 工作树：`codex/yaya-tech0`，`C:\Users\nanpr\AppData\Local\Temp\opencode\child-growth-yaya-tech0`
+- 固定装置：`scripts/harness-safety.ts` blob `6702f2ddf3b436e79f8c92ae8756c33f611a8503`，核验一致
+- `RTK.md`：不存在（仅记录）；真实模型账本 40/40，本轮真实模型请求 0
+
+---
+
+## 0. 本修订相对首版的变化（对应返修必修项）
+
+| 必修 | 变化 |
+| --- | --- |
+| A | 5.1 由“单次计划 + 受控执行”改为**结构化动作协议 + 服务端有界 Agent 工具反馈循环**；限定语改为“已安装 SDK 与当前应用路径未暴露原生工具协议”，不再推导供应商全部模型/官方通道不支持；新增闭环替身探针（有界、数据驱动第二步、歧义/写入暂停、白名单与参数校验、步数/请求/重试/时间上界） |
+| B | 明确定义 LocalRuntime 自动续跑只是 UI runtime 行为；补充服务端提案状态机、`resolution:cancelled` 的本地性质、跨设备/换登录的重新批准协议、三类灵活性场景与反例对照 ExternalStoreRuntime |
+| C | 取消分层表（UI/abortSignal/关闭迭代器/上游物理请求/服务端运行状态）；补迟到结果、旧 adapter 自动恢复、重复恢复的可运行反例；明确已开始写入不回滚、按回执核对 |
+| D | 撤销“CLI 必然无增量依赖”的未核验承诺；给出 registry 实际声明依赖、锁定/最小手工两方案；核对 zod 根 4.3.6 与传递 4.6.5 的实际边界（Standard Schema 结构边界，两个场景均编译通过）；PoC 记录全部实际解析版本 |
+| E | 对象存储改为引用官方文档的开发/生产**物理隔离**事实；前缀只作命名管理；能力表区分“接口存在”与“真实选定模型可用”；区分原生 JSON Schema 与应用 Zod 守门；Coze invoke/stream 的 usage 分别核对，无数据记 unknown/NOT_RUN |
 
 ---
 
 ## 1. 推荐结论（供主评审）
 
-**推荐 UI/runtime 组合（只装一套）**：
-
 | 项 | 结论 |
 | --- | --- |
-| 库与版本 | `@assistant-ui/react` **精确 0.15.23**（peerDependencies `react ^18 \|\| ^19`，本项目 React 19.2.3） |
-| 状态/runtime | `useLocalRuntime`（LocalRuntime）+ 自有 `ChatModelAdapter` / `AttachmentAdapter` / `ThreadHistoryAdapter`；多会话用 `useRemoteThreadListRuntime` + 自有 `RemoteThreadListAdapter`（服务端仍是会话事实源） |
-| 组件 | assistant-ui 官方 registry 的 shadcn 风格组件（`pnpm dlx assistant-ui@latest add thread`，拷入 `src/components/`，不再新增运行时依赖）；业务确认卡与回执卡用自有 shadcn 组件渲染 `tool-call`/`data` part |
-| 明确不用 | AssistantCloud、`useCloudThreadListRuntime`、托管会话、任何云遥测；AI Elements 与 `ai`/`@ai-sdk/react`；Redux/Zustand 或第二套消息状态源 |
-| 备选（本轮未选） | `ExternalStoreRuntime`：仅在需要「服务端投影/外部 store 已是唯一事实源」时改用；它会接管消息状态，但运行循环与流式回传要全部自己实现，成本高于 LocalRuntime + adapters |
-| 模型接入 | 保留现有 `src/lib/llm.ts` 与 provider 选择不动；新聊天后端独立新增适配层，普通对话与工具规划走成对的服务端端点 |
-
-选择依据摘要（详见第 4、5 节）：LocalRuntime 恰好覆盖「自有后端 + 附件 + 暂停审批 + 自有历史」且不需要引入新状态库；ExternalStoreRuntime 需要我们自己维护消息状态与运行循环；AI Elements 不是 runtime，是 AI SDK 之上的组件注册表，接入前提是安装并配置 `ai` + `@ai-sdk/react`、后端输出 AI SDK UIMessage 流协议，与现有 Coze 链路叠加成本明显更高。
+| 库与版本 | `@assistant-ui/react` **精确 0.15.23**（peer `react ^18 \|\| ^19`，本项目 React 19.2.3） |
+| 状态/runtime | `useLocalRuntime`（LocalRuntime）+ 自有 `ChatModelAdapter`/`AttachmentAdapter`/`ThreadHistoryAdapter`；多会话用 `useRemoteThreadListRuntime` + 自有 `RemoteThreadListAdapter`（服务端是会话事实源） |
+| 组件 | **最小手工组件优先**：用 assistant-ui primitives 渲染消息/输入框/审批卡，配项目已有 shadcn（button/textarea/alert/card/avatar/dialog/tooltip 等），不跑 CLI、不引 markdown/shimmer 链。备选：锁定 `assistant-ui@0.0.119` 跑 registry 生成后逐文件评审（见第 2 节依赖清单） |
+| 明确不用 | AssistantCloud/云会话/遥测；AI Elements 与 `ai`/`@ai-sdk/react`；Redux/Zustand 或第二套消息状态源 |
+| 模型协议 | **结构化动作协议 + 服务端有界 Agent 反馈循环**（不是原生 Function Calling，也不是“单次计划宏”）：只读工具在已授权且意图明确时自动执行，结果作为数据反馈给模型继续判断；歧义先问；写入暂停提案，真实用户批准后由服务端执行（见 5.1） |
+| 审批 | 前端 `respondToToolApproval` 只是请求；服务端必须读取可信提案记录并核对 actor/session/内容/附件/目标/版本，执行走 `runBusinessWrite`（`src/lib/accounts/access.ts:196`）并保持回执原子性（见 3.2） |
+| 备选（未选） | `ExternalStoreRuntime`：仅在服务端投影/既有外部 store 已是唯一事实源时；它需要自建消息状态与运行循环，成本更高。当前反例（3.2/7）都可由适配纪律解决，不需要第二套状态源 |
 
 ---
 
-## 2. 依赖增量（下一阶段 YAYA-UI1 才允许执行）
+## 2. 依赖与 registry（修订）
 
-本轮只在自有 scratch（`%TEMP%\opencode\yaya-tech0-poc`）安装验证，**未改 package.json / pnpm-lock.yaml**。
+### 2.1 事实
 
-| 增量 | 内容 | 风险/备注 |
+- `@assistant-ui/react@0.15.23`：peer `react ^18 || ^19`；依赖含 `@assistant-ui/core ^0.3.22`、`store ^0.3.16`、`tap ^0.9.20`、`assistant-stream ^0.3.46`、`assistant-cloud ^0.2.4`、`zustand ^5.0.15`、`radix-ui ^1.6.7`、`react-textarea-autosize`、`safe-content-frame`、`zod ^4.6.5`。
+- `@assistant-ui/core@0.3.22` 自身**不声明 zod 依赖**；工具参数类型走 **Standard Schema（`~standard`）结构接口**，不是直接引用 zod 类型。
+- 本地 scratch 实测解析：`@assistant-ui/react` 自带 zod **4.6.5**；项目/scratch 根 zod **4.3.6**，两者在同一依赖图中并存（pnpm 独立解析）。
+
+### 2.2 “根保持 4.3.6”对比“统一升级”的实际边界
+
+用同一份类型探针（scratch `zod-boundary/toolkit-check.ts`：`tool({ parameters: z.object({...}), execute: async ({q}) => q.length })` + `z.infer` 结构断言）：
+
+| 场景 | 根 zod | 结果 | 说明 |
+| --- | --- | --- | --- |
+| 根保持 | 4.3.6 | tsc strict **exit 0** | 根 schema 通过 `~standard` 进入 assistant-ui 类型推断，无跨版本类型冲突 |
+| 统一升级 | 4.6.5 | tsc strict **exit 0** | 可行但需改项目锁，属 YAYA-UI1 决策，不是 TECH0 前置 |
+
+本轮**没有找到**支持“根必须升级”的反例；首版的“需要更新锁”修正为：**不自动要求升级**。若接入时要在应用代码里把根 zod schema 直接交给 assistant-ui（如自定义 toolkit），按上述边界验证；不注册前端工具时两者无共享 schema 实例。**本任务不改项目锁**。
+
+### 2.3 组件来源（撤销“CLI 必然无增量依赖”）
+
+- 仓库 `components.json` 为 shadcn `style: "new-york"`；按 CLI `assistant-ui@0.0.119`（当前 latest）源码 `dist/lib/utils/registry.js`，该风格解析到 `https://r.assistant-ui.com/<component>.json`。
+- 2026-10-05 实取 registry 声明（非文档承诺，registry 内容可变）：
+
+| registry item | 声明 dependencies | 声明的 registryDependencies |
 | --- | --- | --- |
-| `pnpm add @assistant-ui/react@0.15.23` | 精确版本，不用 `^` | 官网文档已出现 0.16 的弃用提示，API 仍在演进；必须锁死版本再升级 |
-| 传递依赖（自动） | `@assistant-ui/core@0.3.22`、`store`、`tap`、`assistant-stream@0.3.46`、`zustand@^5`、`radix-ui`（伞包）、`react-textarea-autosize`、`safe-content-frame`、`assistant-cloud@0.2.4` | 我方代码不直接 import zustand/assistant-cloud；伞包 `radix-ui` 与现有 `@radix-ui/react-*` 并存，pnpm 会分别保留 |
-| 锁影响 | `zod`：发布包要求 `^4.6.5`，当前锁为 `4.3.6`（package.json 范围 `^4.3.5`） | 需更新锁（可提升到 4.6.x 单版本）；属 YAYA-UI1 的依赖变更，TECH0 不动 |
-| 明确不新增 | `ai`、`@ai-sdk/react`、AG-UI/LangChain runtime、Redux/Zustand（自用）、`@assistant-ui/react-ai-sdk` | AI Elements 路线才需要 `ai` 系依赖，本推荐不使用 |
-| 组件文件 | registry 命令拷入组件源码（可选，不做也行） | 只拷组件、不带 runtime；与现有 `src/components/ui/` shadcn 规范一致 |
+| `thread` | `@assistant-ui/react@^0.15.23`、`lucide-react` | shadcn `button`、`skeleton` + attachment/file/follow-up-suggestions/image/markdown-text/reasoning/tooltip-icon-button/tool-fallback/tool-group |
+| `attachment` | `@assistant-ui/react@^0.15.23`、`lucide-react` | shadcn `dialog`、`tooltip`、`avatar` + tooltip-icon-button、use-attachment-src |
+| `markdown-text` | `@assistant-ui/react-markdown@^0.14.18`、`remark-gfm`、`lucide-react` | tooltip-icon-button、use-copy-to-clipboard |
+| `tool-fallback` / `tool-group` | `@assistant-ui/react@^0.15.23`、`lucide-react`、`class-variance-authority`、`tw-shimmer@^0.4.13` | shadcn `button`/`collapsible`/`textarea` 等 |
+| `tooltip-icon-button` | `radix-ui` | shadcn `tooltip`、`button` |
+
+- 即：**完整 `thread` 链至少新增** `@assistant-ui/react`、`@assistant-ui/react-markdown`、`remark-gfm`、`tw-shimmer`、`radix-ui`（`lucide-react`、`class-variance-authority` 项目已有；shadcn 组件项目已有 7 个中的全部）。registry 生成的 `thread` 还自带 `ActionBarPrimitive.Reload`（重生成）与 Edit composer，需要按产品要求删除/替换。
+- 方案 A（锁定 CLI）：`pnpm dlx assistant-ui@0.0.119 add thread`，在独立分支生成后逐文件评审、移除重生成/编辑入口、记录 registry 内容哈希；不接受 `@latest` 无人值守，CLI 运行会改项目，属 YAYA-UI1。
+- 方案 B（推荐）：不跑 CLI，手写最小 `Thread`/`Composer`/`ApprovalCard` 组件，仅依赖 primitives + 现有 shadcn；不引 markdown/shimmer/CLI。文本先按纯文本渲染，确有需求再加 markdown 链。
 
 ---
 
-## 3. assistant-ui@0.15.23 实际接口核验（发布包 + 官方文档）
+## 3. runtime 生命周期与批准（修订）
 
-证据来自 scratch 安装的发布包：`@assistant-ui/react@0.15.23` → `@assistant-ui/core@0.3.22`（下文路径均相对包根）。官方文档（2026-10-05 查阅）与发布类型一致：`unstable_humanToolNames`、approval gate、resume、adapters 章节均可对上。
+### 3.1 已核实的发布行为（真实包 + jsdom 替身）
 
-### 3.1 LocalRuntime + 自有 adapters
+- `respondToToolApproval` 后 LocalRuntime **自动再调用 adapter**（`@assistant-ui/core@0.3.22` `dist/runtimes/local/local-thread-runtime-core.js:883-928`）。这是 UI runtime 行为，**不是业务授权**。
+- `cancelRun()` → adapter `abortSignal` 触发、消息 `incomplete/cancelled`；此后迟到的 yield 被 runtime 丢弃，**但 adapter 的副作用继续发生**（没有 `iterator.return`），adapter 必须自检 `abortSignal`/run 标识（探针 `runtime/late-yield-dropped`）。
+- `history.load()` 返回 `unstable_resume:true` 时自动 `resumeRun`（同文件 `:308-313`）——历史 adapter 禁止返回该标记。
+- 未决 approval 在“后续消息跟随”时被本地标记 `resolution:"cancelled"`（`:29-52,176`）——**这是本地 part 状态，不是服务端提案状态**；服务端必须有独立的取消/过期语义。
 
-- `useLocalRuntime(chatModel, options)`：`LocalRuntimeOptions = { maxSteps?, adapters?: { history?, attachments?, speech?, ... }, unstable_humanToolNames?, unstable_enableMessageQueue?, initialMessages? }`（`dist/react/runtimes/useLocalRuntime.d.ts`）。`chatModel` 单独注入。
-- `ChatModelAdapter.run(options)` 返回 `Promise<ChatModelRunResult> | AsyncGenerator<ChatModelRunResult>`；options 含 `messages`（整条线程，含附件 part）、`runConfig`、`abortSignal`、`context`、`unstable_assistantMessageId`、`unstable_threadId`、`unstable_getMessage()`（`dist/runtime/utils/chat-model-adapter.d.ts`）。
-- 流式语义（源码 + 行为验证）：每次 yield 的 `content` 追加到本轮初始内容之后（`local-thread-runtime-core.js:582,656`）；连续文本 part 合并为一条（行为验证 A：两次 yield `a`/`ab` 最终只有 `text: "ab"`）；**审批恢复时不要在 yield 里重复 tool-call part**，否则 store 报 `Duplicate key toolCallId`（行为验证中出现过，改为只 yield 后续文本即通过）。
-- 默认 `maxSteps=2`（`local-thread-runtime-core.js:678`），应显式配置并设上界，不放开无限循环。
-- `cancelRun()` → adapter 的 `abortSignal` 触发 abort，消息settle 为 `incomplete/cancelled`（`local-thread-runtime-core.js:714-727`；行为验证 B 通过）。
+### 3.2 服务端提案协议映射（必须由契约/YAYA0 冻结）
 
-### 3.2 暂停/审批（HITL）
+- **提案**是服务端事实：`proposal { id, run_id, actor, session_scope, tool, args_hash, target, content_version, attachments_version, status, receipt }`。
+- 本地 part 映射：无 `approval` = 尚无提案；`approval.id` = 服务端提案 id；本地 `approved=true` 只代表“用户点过批准按钮”；本地 `resolution:"cancelled"` 只代表该 part 在当前线程不再可操作。
+- 服务端状态机：`pending → approved(consume) → executed(receipt) | rejected | cancelled | superseded | expired`。执行必须是「消费提案 + 业务写」的原子路径（`runBusinessWrite` 内提交），重复消费返回原回执（`already_consumed`），不重复写（探针 `unit/duplicate-execution-idempotent`）。
+- 核对要求：消费时重查 actor/session（跨设备即新一轮身份）、内容哈希/版本、附件版本、目标归属；任一不匹配 → 拒绝并提示重新核对（探针 `runtime/restored-approval-guarded-stale-GREEN`：`premise_version_mismatch` → 写 0）。
+- 跨设备/换登录：不继承旧 `approved`；对原提案做“重新核对”后**新建提案 id**，重新渲染确认卡，由当前用户批准后执行（探针 `guarded-match` 正常执行一次，`approved-without-receipt-lockout` 显示旧批准不能本地复活也不永久锁死——协议重开即可）。
+- 删除/撤权/转班：沿用 AUTH 在保存时重查；模型等待在事务外。运行标识（run_id）用于挡住迟到的模型/工具结果触发新动作，与 AUTH 撤权防护是**两件事**，都要有。
 
-- 审批门：assistant 消息 `status:{type:"requires-action",reason:"tool-calls"}` + tool-call part 携带 `approval:{id}`（无 `approved` 字段）→ run 暂停（源码 `should-continue.js`：存在未决 approval 即不继续）。
-- UI 调用：`thread.getMessageById(id).getMessagePartByToolCallId(toolCallId).respondToToolApproval({approved, optionId?, text?, reason?})`（`dist/runtime/api/message-part-runtime.d.ts`；新 store API 通过 part scope 暴露，见 `store/scopes/part.d.ts`）。
-- 批准后：LocalRuntime **自动再次调用** `ChatModelAdapter.run`，恢复调用可在 `unstable_getMessage().content` 读到 `approval.approved=true`，由 adapter 去服务端执行；拒绝则合成 `isError` 结果（`local-thread-runtime-core.js:883-928`）。行为验证：审批后 adapter 第二次运行、`approved===true`、后续文本落到同一条 assistant 消息。
-- 安全结论：**前端回调只是「请求」**。服务端执行必须走现有 `runBusinessWrite`（`src/lib/accounts/access.ts:196`），在保存时重查账号/会话/班级归属/草稿/证据快照；模型等待在事务外（现有 `pg-client.ts` 的 `withSaveAuthorization` 机制不变）。审批卡只携带 `approvalId + 内容摘要`，不能携带可复用的授权凭证。
-- 「历史批准恢复不能自动调用业务写」：`history.load()` 返回 `unstable_resume:true` 时 LocalRuntime 会自动 `resumeRun`（`local-thread-runtime-core.js:308-313`）——**历史 adapter 永远不得返回该标记**，也不要实现 `resume()` 执行语义；未决 approval 在后续消息跟随时会被标记 `resolution:"cancelled"`（`:29-52,176`），旧批准自然失效。
+### 3.3 三类灵活性（不因守门牺牲产品行为）
 
-### 3.3 附件
+1. **待批准时继续普通问答**：新用户消息会本地结束旧 part 的暂停；旧提案在服务端保持其状态（由协议决定 cancel/keep），普通问答走只读路径；私有草稿存服务端，不因本地 part 取消而丢。
+2. **批量一项待核对不阻塞其他项**：每项独立提案与独立回执；已核对项照常执行，待核对项单独展示（探针 `unit/batch-does-not-block`：2 执行 / 1 pending）。
+3. **历史恢复后显式重新核对/批准**：恢复只读、不自动执行；用户明确重新核对后建立新提案与新批准；不复用旧 `approved`（探针 `history-load-no-autorun` + `guarded-match` + `lockout`）。
 
-- `AttachmentAdapter = { accept, add(File), send(PendingAttachment,{signal}), remove() }`（`dist/adapters/attachment.d.ts`）。`send` 返回 `CompleteAttachment`，其 `content: ThreadUserMessagePart[]` 可含 `{type:"image", image: "<url 或 data>"}`；此后 `ChatModelAdapter` 的 `messages` 里可直接读到该图片 part。
-- 建议实现：`add` 走现有鉴权的上传端点（对象存储），`send` 返回服务端对象引用 + 短期签名 URL（或仅对象 key + 服务端按需取字节）；失败/重试状态用 `PendingAttachmentStatus` 呈现，不伪装成功。
-- 不做匿名长效公开 URL；签名过期后由 `send`/预览端刷新（见第 6 节）。
+### 3.4 与 ExternalStoreRuntime 的对照（不换轨）
 
-### 3.4 自有历史与会话列表
+观察到的最强反例是“恢复后的本地批准会自动再跑 adapter”（`restored-approval-naive-RED`，弱 adapter 直接发生业务写）。该问题由 **adapter 必须消费服务端提案** 解决（minimal adapter 纪律），ExternalStoreRuntime 不会自动免除这个问题（外部 store 的 `onRespondToToolApproval` 同样需要服务端核对），却要自己维护消息状态/approval 生命周期/历史投影。因此维持 LocalRuntime 推荐，不引入第二套状态库。
 
-- 单线程历史：`ThreadHistoryAdapter = { load(), append(item), update?(item), delete?(items), resume?, unstable_copy? }`（`dist/adapters/thread-history.d.ts`）。`load()` 返回 `ExportedMessageRepository & { unstable_resume? }`；`update?` 是「暂停审批后同一消息先落库、恢复后定稿」的受支持路径；`unstable_copy` 用于「消息事实源在服务端，adapter 只维护副本」。
-- 多线程列表：`useRemoteThreadListRuntime({ runtimeHook, adapter })` + `RemoteThreadListAdapter = { list, rename, archive, unarchive, delete, initialize, fetch, generateTitle, unstable_useAdapters? }`（`dist/runtimes/remote-thread-list/types.d.ts`），全部可由自有 API 实现，`generateTitle` 返回 `AssistantStream`（可用服务端生成后返回最小流）。**不接 AssistantCloud**。
-- 侧栏/工作区切换：同一 `AssistantRuntimeProvider` 下，侧栏用 `ThreadListPrimitive`，工作区用 `ThreadPrimitive`；两者共享同一 runtime 与线程状态，无需额外状态库。需在真实浏览器验证切线程后历史加载与 composer 状态（NOT_RUN）。
+### 3.5 云与遥测的网络守门
 
-### 3.5 关闭不需要的自动行为
-
-- 不注册任何带 `execute` 的前端工具（`defineToolkit`/`useAssistantTool`）；ExternalStore 的 `unstable_enableToolInvocations` 也不会开启（而 LocalRuntime 本身不自动执行未注册工具）。
-- 「消息重生成/编辑」由 UI 决定：不渲染 `ActionBarPrimitive.Reload`、Edit composer 即可；runtime 的 capabilities 仍有 edit/reload 位，但产品入口可以关。
-- 不在历史中恢复「待执行」动作：见 3.2 的 `unstable_resume` 禁令。
-
-### 3.6 遥测/云
-
-- `AssistantCloud` 与 `CloudEngagementReporter` 只在显式 `new AssistantCloud(...)` / cloud hooks / `NEXT_PUBLIC_ASSISTANT_BASE_URL` 存在时才生效（`@assistant-ui/core dist/react/runtimes/cloud/createCloudThreadListAdapter.js:12-17`；`assistant-cloud` 的 telemetry 默认开启但仅在实例化后）。本方案不实例化、不设置该环境变量，不发送私有数据。
-- 需要在接入评审中确认构建产物不引入 `NEXT_PUBLIC_ASSISTANT_BASE_URL`。
+- 不实例化 `AssistantCloud`、不用 cloud runtimes；`createCloudThreadListAdapter` 仅在 `NEXT_PUBLIC_ASSISTANT_BASE_URL` 存在时创建匿名云实例（`@assistant-ui/core` `dist/react/runtimes/cloud/createCloudThreadListAdapter.js:12-17`）。
+- 探针在启动时把 `fetch`/`http`/`https`/`XMLHttpRequest` 全部替换为拒绝并计数；整个 19 项场景运行后 `real_egress` 全 0（仅 1 次故意 denial 自检），这同时覆盖任何隐藏的云/遥测路径，而不只是“没有主动 new Cloud”。
 
 ---
 
-## 4. AI Elements 对照（为什么不同时装）
+## 4. AI Elements 对照（不变）
 
-依据官方 Setup/Confirmation 文档（2026-10-05 查阅）：
-
-| 维度 | `@assistant-ui/react@0.15.23` | AI Elements |
-| --- | --- | --- |
-| 本质 | runtime + 无样式 primitives + shadcn registry 组件 | 仅 shadcn registry 组件（UI），无 runtime |
-| 前提依赖 | 本包（peer React 19 已满足） | 必须安装并配置 **AI SDK**（`ai`、`@ai-sdk/react`），或接 AI Gateway |
-| 自有后端 | `ChatModelAdapter` 一个 `run` 即可；流式自定 | 后端须产出 AI SDK UIMessage 流（`streamText`/`toUIMessageStreamResponse`）；审批绑定 AI SDK tools `requireApproval` |
-| 与 Coze SDK 现状 | 适配层完全自有，可直译现有 JSON schema 结果 | 需要从 Coze/StepFun 结果再桥接到 AI SDK 消息协议，且无原生 tools 时审批链也只能自造 |
-| 状态管理 | runtime 内建，无额外 store | `useChat` 状态（AI SDK） |
-| 结论 | **推荐** | 不做；避免同时安装两套聊天库与两套消息状态 |
+AI Elements 是 AI SDK 之上的 shadcn registry 组件，前置要求“AI SDK installed and configured”（官方 Setup），后端须输出 `toUIMessageStreamResponse()` 流，审批绑定 AI SDK tools `requireApproval`。与现 Coze/StepFun 链路叠加需要新增 `ai`/`@ai-sdk/react` 并再桥接消息协议，成本高于 assistant-ui；不同时装两套聊天库。
 
 ---
 
 ## 5. 模型能力矩阵（Coze SDK vs 当前 StepFun 路径）
 
-证据级别：**类型**=发布 .d.ts；**源码**=发布包运行时代码；**行为**=本轮可运行替身/真实安装包验证；**无**=该能力不存在；**NOT_RUN**=需真实请求/环境，本轮未测。
+证据级别：**类型**=发布 .d.ts；**源码**=发布包运行时代码；**行为**=可运行替身/原型检查；**无**=不存在；**NOT_RUN**=需真实请求/环境。**接口存在 ≠ 真实选定模型可用**。
 
 | 能力 | Coze（`coze-coding-dev-sdk@0.7.32`） | StepFun（`src/lib/llm.ts` 当前实现） |
 | --- | --- | --- |
-| 图片输入 | 支持：`Message.content` 用 `ContentPart[]`，`image_url.url` 接受 http(s) URL 或 **base64 data URI**（类型+源码 `checkBase64DataUri`）；本地文件路径被拒绝并要求先上传存储；过时图片格式被拒 | **不支持**：`LlmMessage.content` 为 `string`，整条链路只发文本（源码）；StepFun 服务本身为 OpenAI 风格，多模态能力 NOT_RUN |
-| 多图 | 支持：一个 `ContentPart[]` 可含多个 `image_url`（类型） | 不支持（同上） |
-| stream | SDK 有 `LLMClient.stream()` 返回 `AsyncGenerator<AIMessageChunk>`（类型+源码）；**当前 `src/lib/llm.ts` 只用 `invoke()`，不向前端流式** | 不支持：`invokeStepFun` 一次性 `fetch` + `response_format`，无流（源码） |
-| abort | 无用户级 AbortSignal 参数：`stream`/`invoke` 签名无 signal，只有 `Config.timeout`（类型）；上层无法中途取消（可用请求级超时兜底） | 仅 `AbortSignal.timeout`（超时，不是用户取消）；无流可断 |
-| 原生 tool_calls | **无**：发布 `LLMConfig` 只有 model/thinking/caching/temperature/streaming；`Message.role` 无 `tool`；`LLMResponse` 只有 `content`；运行时 `createLLM` 不传 tools，`convertMessages` 只映射 system/user/assistant（类型+源码）；整包无 `tool_calls` 字段（源码检索） | 无：请求体无 tools；响应只取 `choices[0].message.content` |
-| 工具结果回传 | **无**：消息角色无 `tool`/`tool_call_id`，无法按协议回传 | 无 |
-| 多轮工具循环 | 无原生循环；需应用侧「结构化规划 + 受控服务执行」（见 5.1） | 同左 |
-| schema 约束 | 发布 `LLMConfig` 无 `response_format`；当前应用未做 schema 约束（类型） | 支持：6 个 `json_schema`（strict）经 `response_format` 下发（源码，如 `observation_draft`） |
-| usage | `LLMResponse={content}`，**不暴露 usage**（类型）；当前 `invokeCoze` 也未记录 | 支持：从 `payload.usage` 归一化 input/output/total tokens（源码） |
-| 公开检索 | `SearchClient.search/webSearch/webSearchWithSummary/advancedSearch`（类型+源码），服务端经 Config 调用；结果含 `url/site_name/snippet/publish_time/summary`（类型）；无 usage 字段 | 无 |
+| 图片输入 | 接口存在：`Message.content: ContentPart[]`，`image_url.url` 接受 http(s) 或 base64 data URI（类型+源码 `checkBase64DataUri`），本地路径被拒并要求先上传；**部署所选模型是否具备视觉能力 NOT_RUN** | 不支持：`LlmMessage.content` 为 `string`；StepFun 服务侧多模态 NOT_RUN |
+| 多图 | 接口存在：一个 `ContentPart[]` 多张图（类型） | 不支持 |
+| stream | SDK `LLMClient.stream(): AsyncGenerator<AIMessageChunk>`（类型+源码）；当前 `llm.ts` 只用 `invoke()`，不向前端流式 | 不支持：一次性 fetch + `response_format` |
+| abort | 类型无 AbortSignal 参数；源码中 LLM 路径无 AbortController 接线（只在 URL 校验/S3 等使用）；关闭方式与上游物理效果见第 6 节 | 仅 `AbortSignal.timeout`（超时，非用户取消） |
+| 原生 tool_calls | **已安装 SDK 与当前应用路径未暴露**：`LLMConfig` 只有 model/thinking/caching/temperature/streaming，无 `tools` 参数；`Message.role` 无 `tool`；`LLMResponse` 仅 `content`；运行时 `createLLM` 不传 tools；整包无 `tool_calls` 字段（类型+源码）。**不能据此推断供应商所有模型/官方通道都不支持 tools** | 无：请求体无 tools |
+| 工具结果回传 | 无 tool 角色/`tool_call_id`，不支持协议级回传（见 5.1 替代） | 无 |
+| 多轮工具循环 | 无原生循环；采用 5.1 的服务端有界循环 | 同左 |
+| schema 约束 | 公开 `LLMConfig` 无 `response_format`（类型）；**但应用层已有守门**：`ai.ts` `invokeStructured` 用 Zod `safeParse` + 最多 2 次重试 + 领域词/引文/证据校验（`src/lib/ai.ts:433-481,535-628`） | 原生：6 个 strict `json_schema` 经 `response_format` 下发（源码） |
+| usage | `invoke()` 返回 `{content}`，**不暴露 usage**（类型）；`stream()` 的 chunk 类型来自 @langchain/core，类型上可选 `usage_metadata`，SDK 未声明填充，**实际 unknown/NOT_RUN**（不写 0） | 支持：从 `payload.usage` 归一化 input/output/total（源码） |
+| 公开检索 | `SearchClient.search/webSearch/webSearchWithSummary/advancedSearch` 接口存在（类型+源码，服务端经 Config 调用）；结果含 url/site_name/snippet/publish_time/summary；**服务是否已开通/真实可用 NOT_RUN** | 无 |
 
-结论：**不能声称 Coze 已有原生工具循环，也不能声称 StepFun 当前路径支持图片或流式**。两者都需要应用侧补齐；普通模型列表或 coding 模型能力不代表已部署应用接口支持。
+### 5.1 原生工具不可用时的替代（修订）
 
-### 5.1 原生工具不可用时的替代（供主评审选择）
+**方案 A（推荐）：结构化动作协议 + 服务端有界 Agent 工具反馈循环。**
 
-方案 A（推荐）：**结构化规划 + 受控服务执行**。服务端一次调用模型产出「受控计划 JSON」（沿用 StepFun strict schema / Coze 提示 + Zod 二次校验），前端渲染为确认卡；教师批准后，由服务端按已批准计划执行既有业务函数（`runBusinessWrite` + 现有 queries），再把执行回执作为 assistant 消息的 `data` part 渲染。**与完整 Agent 的差异**：没有模型自主连续调用工具；每步计划先落卡、执行由服务端白名单函数完成；无模型→工具→模型的自环（可做「执行后再汇总」的第二轮模型调用，但不是协议级 tool loop）。仍满足「不绕过权限/事务/确认」。
+- 动作协议（文本/严格 JSON，Zod 校验；Coze 用提示 + 应用 Zod，StepFun 可叠加 strict json_schema）：`answer` | `read`（工具名 + 参数） | `clarify` | `propose_write`。
+- 循环：模型输出 `read` → 服务端在**白名单**中解析、**先完整校验参数**、逐步重核授权后执行 → 结果作为**数据**（非指令）反馈 → 模型继续判断或回答；歧义输出 `clarify`；写入输出 `propose_write` → 出提案暂停，等待真实用户批准 → 服务端消费提案执行 → 回执反馈/渲染。
+- 这不是协议级 Function Calling：没有模型侧原生 tool message；每一步都在应用/服务端白名单与授权之内；但它是**有界的工具反馈循环**，不是“单次计划宏”。
+- 边界：工具全部来自白名单；网页/图片/工具结果只是数据；模型得不到批准入口、密码、CSRF/会话令牌，也没有任意 SQL/HTTP 能力；`max_tool_steps`、`max_model_calls`、`max_tool_retries`、`deadline` 显式上界（探针默认 steps=3 / model calls=8 / retries=1 / 2s），失败/未知不无限循环，执行失败或结果未知只按原回执核对。
+- 离线闭环证据（`scripts/yaya/check-runtime-tech0.cjs`，`unit` 层）：模型替身读取第一个工具结果后**依据数据选择第二个只读工具**再终答（modelCalls=3，tools=children>observations，target=c2，answer 引用 o2,o3）；注入文本保持数据；歧义只澄清；写入暂停且未批准时写 0；越界/非法参数/工具异常都在上界内停止。**这是替身/单元证据，不代表 provider 已支持或真实 Agent 质量已通过。**
 
-方案 B：官方适配替代（例如经平台支持的兼容 OpenAI tools 的网关注入工具循环）。本轮**没有找到已发布且文档化的路径**，且不得调用私有属性/未文档接口硬接；需另行核实平台网关是否暴露标准 tools 协议，NOT_RUN。
+**方案 B（待核实，不硬接）：官方通道原生 tools。** 只在平台文档/发布接口明确提供标准 tools 协议时启用；不得调用私有属性或未文档接口，本轮 NOT_RUN。
 
-禁止项：用正则指令分流、或在 Prompt 里写工具名就算「工具循环已验收」——本轮明确不采用。
-
----
-
-## 6. 图片与对象存储前置（复用已装 S3/lib-storage/sharp）
-
-现状：`@aws-sdk/client-s3@^3.958.0`、`@aws-sdk/lib-storage`、`sharp@0.35.3` 已在 dependencies，但 `src/` 中**零使用**（grep 证据），本轮未上传/开通任何桶。
-
-已核实的发布 SDK 能力（`coze-coding-dev-sdk` s3 模块，类型+源码）：
-
-- `S3Storage.uploadFile/readFile/deleteFile/listFiles/streamUploadFile/uploadFromUrl/chunkUploadFile/generatePresignedUrl`；上传返回对象 key。
-- 运行时配置：生产由平台项目运行时授权调用 `/api/v1/integration/storage/ensure` 获取 bucket/endpoint（`ensureStorageEnvironment`）；也支持环境变量 `COZE_BUCKET_ENDPOINT_URL` / `COZE_BUCKET_NAME` 显式配置。**部署面板需要提供/确认对应资源授权**，本轮无法验证是否已开通（NOT_RUN）。
-- `generatePresignedUrl` 默认有效期 **86400s（24h）**（`S3Config.DEFAULT_PRESIGNED_EXPIRE_TIME`）；**禁止默认使用长效公开 URL**，调用必须显式传短 TTL。
-- 对象 key 由 `generateObjectKey` 生成（`<dir>/<basename>_<8hex><ext>`），**不含项目/环境前缀**。开发（沙箱）与生产若共用同一 `COZE_PROJECT_ID`，很可能共用同一 bucket → 必须在应用层给 key 加显式环境前缀（如 `yaya/dev/`、`yaya/prod/`）或使用独立桶；**开发/生产隔离未验证，列为 MEDIA1 阻塞项**。
-
-LLM 读取私有图的可行方式：
-
-1. **服务端取字节 → base64 data URI 传入 Coze `image_url`**（首选）：SDK 明确接受 data URI，无需公开 URL，签名/权限不进入模型侧日志；代价是请求体膨胀，需用已装 `sharp` 先压缩/转码；大小上限 NOT_RUN。
-2. 短 TTL 签名 URL 传给模型网关：模型后端需能访问该 URL，签名本身是 bearer 类秘密，可能被网关/模型供应商记录；仅在 1 不可用时考虑，且 TTL 最小化、不复用。
-3. 匿名/长效公开 URL：**禁止**。
-4. 图片对象与聊天/观察引用只存对象标识与来源；对话删除不删正式观察或仍被引用的图片（对象回收规则由契约/存储 owner 定义，不允许按目录前缀清空）。
+**禁止**：用简单正则分流、或在 Prompt 里列工具名冒充完整工具循环；也不把普通模型列表/coding 模型能力当作已部署应用接口能力。
 
 ---
 
-## 7. 探针与验证结果
+## 6. 取消分层与迟到结果（修订）
 
-### 7.1 仓库内最小探针（已提交）
+| 层 | 手段/事实 | 证据 | 效果 |
+| --- | --- | --- | --- |
+| UI 停止 | LocalRuntime `cancelRun()` | 行为（runtime_unit_mock） | adapter `abortSignal` 触发；迟到 yield 被丢弃；消息 cancelled |
+| adapter 取消传播 | 我方 `fetch(..., {signal})` / 服务端调用携带 signal | 设计约束（本项目 fetch 支持） | 停止客户端等待；已批准写入不自动回滚 |
+| SDK 流/迭代器 | `LLMClient.stream()` 无 signal 参数；AsyncGenerator 协议支持 `iterator.return()` | 类型+源码 | 可停止消费；**上游物理请求是否终止 NOT_RUN**（源码 LLM 路径无 AbortController 接线） |
+| 上游物理请求 | provider 侧请求取消 | NOT_RUN | 需真实 provider/网关验证 |
+| 服务端运行/操作状态 | run_id + 提案状态机 + 回执 | unit RED/GREEN | 迟到结果被 run 标识挡住；重复恢复幂等；已执行写入不假称回滚，按回执核对 |
 
-`scripts/yaya/check-tech0.ts`：离线、零网络、零环境变量。断言：SDK 版本 `0.7.32`；`LLMClient.prototype` 无任何 tool 方法且含 `invoke/stream`；`SearchClient` 四个检索方法存在；`S3Config.DEFAULT_PRESIGNED_EXPIRE_TIME===86400`；类型级正向断言 `image_url` data URI 合法；`@ts-expect-error` 反向断言 `LLMConfig.tools`、`Message.role:"tool"` 不存在。
-
-本轮执行结果（此工作树无 node_modules，使用主仓依赖 + 路径映射验证；评审可 `pnpm install` 后按原命令运行）：
-
-- `tsx scripts/yaya/check-tech0.ts` → `check-tech0 OK: coze-coding-dev-sdk@0.7.32 surface matches tech0.md`（行为级，exit 0）
-- `tsc`（单文件 + SDK 路径映射，strict）→ exit 0（`@ts-expect-error` 全部命中）
-- `eslint`（项目 flat config）→ exit 0
-
-### 7.2 scratch 行为验证（真实发布包，未提交）
-
-`%TEMP%\opencode\yaya-tech0-poc`：`pnpm add @assistant-ui/react@0.15.23 react@19.2.3 react-dom@19.2.3`，jsdom 渲染 `useLocalRuntime`：
-
-1. 审批门：第一次 run 产出待批准 tool-call 并停住 → `respondToToolApproval({approved:true})` → adapter 第二次运行且读到 `approved===true`，后续文本落入同一消息。PASS
-2. 流中断：`cancelRun()` → adapter `abortSignal` 触发、消息 `incomplete/cancelled`。PASS
-3. 自有历史：`history.load()` 注入旧消息（不带 `unstable_resume`）→ 线程恢复且未自动运行；`append` 记录用户与 assistant 两条。PASS
-
-证据分级：assistant-ui 为 **行为（browser_mock）**；SDK 为 **类型+源码+行为（原型检查）**；provider 真实协议为 **NOT_RUN**。
+迟到结果反例（可运行，simulated/unit）：取消后模型仍 resolve → 弱处理派发下一步 1 次，带 run 标识/状态前提的实现派发 0 次（`unit/late-run-result-guard`）；取消后继续运行的 adapter 迟到 yield 被 runtime 丢弃但副作用仍发生（`runtime/late-yield-dropped`）；恢复后的本地批准会让 LocalRuntime 自动再跑 adapter，弱 adapter 发生写入、守门 adapter 写 0（`restored-approval-naive-RED` / `guarded-stale-GREEN`）；同一提案重复消费业务写仍 1 次（`unit/duplicate-execution-idempotent`）。这些是替身计数，不是真实数据库并发验收。运行标识/状态前提与 AUTH 的撤权防护是两件事，都需要。
 
 ---
 
-## 8. 阻塞项
+## 7. 图片与对象存储前置（修订）
 
-1. **无原生 tool_calls**（Coze/StepFun 当前路径均无，证据见第 5 节）→ 必须走 5.1-A 结构化规划+受控服务执行；若主评审要求协议级工具循环，先解决方案 B 的官方通道，否则不能宣称 Agent 工具循环。
-2. **zod 锁升级**：安装 assistant-ui 需要 `zod ^4.6.5`（当前锁 4.3.6），由 YAYA-UI1 显式更新并回归现有 Zod 校验。
-3. **对象存储部署配置与开发/生产隔离未验证**：`COZE_BUCKET_ENDPOINT_URL`/`COZE_BUCKET_NAME` 或平台授权是否就绪、key 环境前缀策略，均待 MEDIA1/部署核验；本轮未开通、未调用。
-4. **真实 provider 协议/视觉质量/usage/限流 NOT_RUN**：预算 40/40，未发请求；Coze 无用户级 abort 已确认，是否可在平台网关层取消待真实压测。
-5. **assistant-ui 版本漂移**：官网文档已含 0.16 弃用说明；必须精确锁 0.15.23，升级另立评审。
-6. **前端审批 ≠ 授权**：服务端必须复用 `runBusinessWrite`（`access.ts:196`）并在等待后重查身份/归属/草稿/证据快照；历史恢复不得自动执行业务写（`unstable_resume` 禁令）。
-7. **Coze 无 usage 暴露**：若产品需要 token 计量，Coze 通道需要平台侧补充或改用可返回 usage 的通道（StepFun 已有）。
+- 官方文档（`https://docs.coze.cn/guides_integrate_storage`，2026-10-05 查阅）明确：**开发环境与生产环境物理独立**，每项目各一个开发桶与一个生产桶，生产桶首次部署时创建；项目间隔离；仅项目所有者有操作权限；文件 URL 有效期 0–30 天，另有稳定 URI 可换取新 URL；单文件上限 200MB。
+- 因此：**不能由“同一 project_id”推导“很可能共桶”**；应核对本项目实际资源身份/覆盖环境配置，部署验证留给授权后的 MEDIA/QA。
+- 对象前缀（如 `yaya/dev/`、`yaya/prod/`）只作命名与资源管理，**不替代桶隔离或 IAM/应用账号权限**。
+- 已装 `@aws-sdk/client-s3` / `lib-storage` / `sharp`，`src/` 零使用；发布 SDK 提供 `S3Storage.uploadFile/readFile/deleteFile/listFiles/generatePresignedUrl/...`，运行时经平台授权或 `COZE_BUCKET_ENDPOINT_URL`/`COZE_BUCKET_NAME`（接口与源码证据）；`generatePresignedUrl` 默认 86400s，必须显式短 TTL。
+- LLM 读取私有图：首选服务端取字节 → `sharp` 压缩 → base64 data URI；短 TTL 签名 URL 仅在必要时且不落日志；禁止匿名/长效公开 URL；图片对象只存标识与来源，删除对话不删正式观察或仍被引用的图。
+- 上述均为**接口/文档证据**；真实上传、签名、部署桶隔离、模型读图质量 **NOT_RUN**。
 
 ---
 
-## 9. 下一轮最小真实 smoke 清单（需预算/资源授权后执行）
+## 8. 探针与验证结果
+
+### 8.1 `scripts/yaya/check-tech0.ts`（SDK 接口探针，复跑通过）
+
+断言 SDK 版本 0.7.32；`LLMClient.prototype` 无 tool 方法且含 `invoke/stream`；`SearchClient` 四方法存在；`S3Config.DEFAULT_PRESIGNED_EXPIRE_TIME===86400`；类型级 `image_url` data URI 合法；`@ts-expect-error` 覆盖 `LLMConfig.tools`、`Message.role:"tool"` 不存在。复跑：`tsx` exit 0；单文件 tsc strict exit 0；项目 eslint exit 0。
+
+### 8.2 `scripts/yaya/check-runtime-tech0.cjs`（R1 新增，离线替身）
+
+19 项 PASS，exit 0，`real_egress` 全 0（1 次故意 denial 自检）。覆盖：有界闭环（数据驱动第二步）、注入即数据、歧义澄清、写入暂停/批准/幂等、批量不阻塞、步数/重试/时间上界、非法参数、迟到结果守门、重复消费幂等；以及 LocalRuntime 的审批恢复、取消 abort、历史只读恢复、迟到 yield 丢弃、恢复后批准 RED/GREEN、无回执锁死。分层、逐项说明与运行方法见 `docs/yaya-v1/runtime-poc.md`；实际解析版本（core 0.3.22 / store 0.3.16 / tap 0.9.20 / assistant-stream 0.3.46 / zod 4.6.5+4.3.6 并存等）亦记录在该文件。
+
+### 8.3 证据分层口径
+
+- source_only/类型：SDK 与 assistant-ui 的发布 d.ts/源码；registry 声明（实取 JSON）。
+- runtime_unit_mock：jsdom + React 19 + 真实发布包；是 DOM 模拟，**不是真实浏览器验收**。
+- unit/simulated：模型、工具、服务端、写入计数全为进程内替身。
+- real_provider / 真实 HTTP/DB / 浏览器 / 部署：**NOT_RUN**（预算 40/40 未动，未读 `.env`）。
+
+---
+
+## 9. 阻塞项
+
+1. **无原生 tool_calls**（已安装 SDK 与当前路径）→ 必须走 5.1-A 有界循环；若主评审要求协议级 Function Calling，先核实方案 B 官方通道。不得再用“必须降级为单步宏”的表述。
+2. **提案/批准协议映射未冻结**（3.2 是草案，需 YAYA0 契约接收）：本地 part 状态与服务端状态机的映射、跨设备重新核对的 DTO、回执原子性。
+3. **zod**：根 4.3.6 可保持（Standard Schema 结构边界两种场景均编译通过）；若产品选择统一升级，属 YAYA-UI1 锁变更，TECH0 不改锁。
+4. **组件来源**：registry 内容可变，`@latest` 不可锁；需按 2.3 选定手工最小方案或锁定 CLI+逐文件评审。
+5. **对象存储部署配置/隔离**：官方文档定义了物理隔离，但本项目实际桶/授权/环境覆盖未验证（MEDIA/QA）。
+6. **真实 provider 协议/视觉/usage/限流、SDK 流关闭的上游效果**：NOT_RUN。
+7. **assistant-ui 版本漂移**：锁 0.15.23；官网已含 0.16 弃用说明。
+
+---
+
+## 10. 下一轮最小真实 smoke 清单（需预算/资源授权）
 
 | # | 项目 | 最小步骤 | 需要的授权 |
 | --- | --- | --- | --- |
-| 1 | Coze 视觉 | 1 张合成非幼儿图片（sharp 压缩）→ base64 data URI → `invoke`，确认可用与大小上限 | 真实模型预算 1 次 |
-| 2 | Coze 流式 | `LLMClient.stream()` 固定短提示，确认 chunk 行为与无 abort 的实际影响 | 真实模型预算 1 次 |
-| 3 | StepFun 视觉（若保留该 provider） | 直连 REST `image_url` 合成图，确认当前链路是否可扩展 | 真实模型预算 1 次 |
-| 4 | 公开检索 | 1 个无幼儿信息的教育关键词，核对 `url/site_name/publish_time` 与失败语义 | 搜索服务预算/授权 |
-| 5 | 对象存储 | 专用前缀上传→list→presign（显式短 TTL）→read→delete，确认部署环境 key 与桶隔离 | 桶开通/部署授权 |
-| 6 | assistant-ui 浏览器 smoke | 侧栏↔工作区同会话切换、选图/拍照上传与移除重试、审批暂停/拒绝/批准（服务端写受 `runBusinessWrite` 保护）、刷新后历史无自动执行、流中取消、390/768/1440 布局 | 测试环境 + 浏览器 |
-| 7 | 会话隔离 | 两个账号/过期会话读取对方会话与附件被拒；删除会话不影响正式观察与引用图片 | 测试库授权 |
+| 1 | Coze 视觉 | 合成非幼儿图片 → sharp 压缩 → base64 data URI → `invoke`，确认可用与大小上限 | 真实模型预算 1 次 |
+| 2 | Coze 流式与取消 | `LLMClient.stream()` 固定短提示；到达若干 chunk 后调用 `iterator.return()`，记录是否停止消费/是否仍有迟到 chunk；上游取消效果另记 NOT_RUN | 真实模型预算 1–2 次 |
+| 3 | StepFun 视觉（若保留） | 直连 REST `image_url` 合成图 | 真实模型预算 1 次 |
+| 4 | 公开检索 | 1 个无幼儿信息的教育关键词，核对 url/site_name/publish_time 与失败语义 | 搜索服务授权 |
+| 5 | 对象存储 | 专用前缀上传→list→presign（短 TTL）→read→delete；核对开发/生产桶身份与隔离 | 桶/部署授权 |
+| 6 | 服务端提案/回执 | 隔离库内：pending→approve→execute 原子、重复消费回执、改内容后旧批准拒绝、跨会话重新核对 | 隔离库授权 |
+| 7 | assistant-ui 浏览器 smoke | 侧栏↔工作区同会话、选图/拍照上传与重试、审批暂停/拒绝/批准（服务端守门）、刷新无自动执行、流中取消、草稿保留、390/768/1440 | 测试环境 + 浏览器 |
+| 8 | 取消/迟到 | 真实后端慢响应下 cancel + 迟到结果重放，核对无重复写入 | 测试环境 |
 
 ---
 
-## 10. 交付、边界与清理
+## 11. 交付、边界与清理
 
-- 本轮提交文件（仅此两个）：
-  - `docs/yaya-v1/tech0.md`（本文件）
-  - `scripts/yaya/check-tech0.ts`（最小离线探针）
-- 工作树：`codex/yaya-tech0`，基 `e8225f04918de2073e194cb199dc8cf1bcb7f38f`；`git status` 仅上述两处新增。
-- 未改：产品源码、共享类型、`package.json`、`pnpm-lock.yaml`、`.env`、`scripts/harness-safety.ts`；未建任何 mock 路由；未 push/部署/合并。
-- scratch：`%TEMP%\opencode\yaya-tech0-poc`（候选包安装与行为脚本）为本轮自建资源，证据命令与输出已记录在 7.1/7.2，**已删除清理**；工作树 `%TEMP%\opencode\child-growth-yaya-tech0` 为交付位置保留，未对其他 agent 的工作树做任何写操作。
-- 真实请求计数：模型 0、搜索 0、对象存储 0、托管库 0。
-- 停止点：等主评审确认「推荐组合 + 5.1 替代方案选择 + smoke 清单」后，才进入第二阶段的 DATA1/MEDIA1/TOOLS1/UI1 等 prompt 发布。
+- 本轮文件：`docs/yaya-v1/tech0.md`（本文件，修订）、`docs/yaya-v1/runtime-poc.md`（新增）、`scripts/yaya/check-runtime-tech0.cjs`（新增）；`scripts/yaya/check-tech0.ts` 未改。
+- 未改：产品源码、共享类型、`package.json`/`pnpm-lock.yaml`、AUTH/G0、schema、`.env`、`scripts/harness-safety.ts`；未建 mock 路由；未 push/部署/合并。
+- scratch：`%TEMP%\opencode\yaya-tech0-poc`（候选依赖 + 行为脚本 + registry 核对）为本轮自建；可复现步骤见 `runtime-poc.md`，本轮结束后清理；不依赖已删除的历史 Temp 文件。
+- 真实请求计数：模型 0、搜索 0、对象存储 0、托管库 0；`.env` 未读。
+- 停止点：等三线评审与主评审确认「推荐组合 + 5.1-A 协议 + 3.2 提案映射草案」后，再进入第二阶段 prompt 发布；接口变更建议交 YAYA0，本任务不改共享类型。
