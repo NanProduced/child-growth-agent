@@ -173,7 +173,7 @@ async function main(): Promise<void> {
     );
     check(enrollment.rowCount === 1, "new child has exactly one saved current enrollment");
     const enrollmentStart = enrollment.rows[0].start_date;
-    const successObservedAt = "2026-10-04";
+    const successObservedAt = enrollmentStart;
     check(successObservedAt >= enrollmentStart, "success-path observation date is covered by the child's saved enrollment");
     // 反例：早于入班起始日的观察没有归属，必须 409 且不得落库。
     const beforeEnrollment = await db.query<{ day: string }>("SELECT ($1::date - 1)::text AS day", [enrollmentStart]);
