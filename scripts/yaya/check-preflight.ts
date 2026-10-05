@@ -114,5 +114,10 @@ check("safety helper has approved git blob", () => {
   const blob = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
   assert.equal(blob, "6702f2ddf3b436e79f8c92ae8756c33f611a8503");
 });
+check("Next route GET request is non-optional", () => {
+  const route = read("src/app/api/classes/route.ts");
+  assert.ok(route.includes("GET(request: NextRequest)"));
+  assert.ok(!route.includes("GET(request?: NextRequest)"));
+});
 console.log(JSON.stringify({ passed, total: passed + failures.length, failures, reference_only: true }));
 assert.equal(failures.length, 0);

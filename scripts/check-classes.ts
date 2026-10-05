@@ -375,7 +375,7 @@ async function main(): Promise<void> {
     const postAsTeacher = (path: string, body: unknown) => post(path, body, true);
 
     // 8) GET 只读开放；未登录写操作 401
-    const listed = await listClassesHandler();
+    const listed = await listClassesHandler(apiRequest('/api/classes', { method: 'GET' }));
     assert.equal(listed.status, 200);
     const listedBody = (await listed.json()) as ApiBody;
     assert.ok(Array.isArray(listedBody.classes) && listedBody.classes.length >= 3);

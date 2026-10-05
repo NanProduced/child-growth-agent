@@ -9,7 +9,7 @@ import { createClassSchema } from "@/lib/validation";
  * - GET 默认当前任教班级；catalog=true 仅提供基础目录，仍须有业务范围；
  * - POST 仅管理员：新建班级，同学年内不允许重名。
  */
-export async function GET(request?: NextRequest) {
+export async function GET(request: NextRequest) {
   try {
     return NextResponse.json({ classes: await scopedListClasses({ catalog: request?.nextUrl.searchParams.get("catalog") === "true" }, request) });
   } catch (e) {
