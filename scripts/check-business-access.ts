@@ -165,7 +165,22 @@ async function main(): Promise<void> {
     const newChild = created.child as { id: string };
     check((await db.query("SELECT id FROM children WHERE id=$1", [newChild.id])).rowCount === 1, "handler saved in owned fixture DB");
     await status(childrenPost(req(a.token, { name: "不能建档", gender: "女", birth_date: "2022-01-01", class_id: ids.b })), 403, "out_of_scope");
-    await status(observationsPost(req(a.token, { child_id: newChild.id, observed_at: "2026-10-04", raw_text: "幼儿把积木放在一起。" })), 201);
+    // 建档接口按运行日写首次分班起始日：成功路径必须使用隔离库中已保存的归属事实，
+    // 固定日历日会随运行日漂移出归属窗口，把正确的 409 误判为失败。
+    const enrollment = await db.query<{ start_date: string }>(
+      "SELECT start_date::text AS start_date FROM child_class_enrollments WHERE child_id = $1 AND end_date IS NULL ORDER BY start_date DESC LIMIT 1",
+      [newChild.id],
+    );
+    check(enrollment.rowCount === 1, "new child has exactly one saved current enrollment");
+    const enrollmentStart = enrollment.rows[0].start_date;
+    const successObservedAt = "2026-10-04";
+    check(successObservedAt >= enrollmentStart, "success-path observation date is covered by the child's saved enrollment");
+    // 反例：早于入班起始日的观察没有归属，必须 409 且不得落库。
+    const beforeEnrollment = await db.query<{ day: string }>("SELECT ($1::date - 1)::text AS day", [enrollmentStart]);
+    const noAttribution = await status(observationsPost(req(a.token, { child_id: newChild.id, observed_at: beforeEnrollment.rows[0].day, raw_text: "早于入班不能自动归属。" })), 409, "class_context_confirmation_required");
+    check(noAttribution.reason === "no_attribution", "no-attribution rejection reports the attribution reason");
+    check((await db.query<{ n: number }>("SELECT count(*)::int AS n FROM observations WHERE child_id=$1", [newChild.id])).rows[0].n === 0, "no-attribution observation was not persisted");
+    await status(observationsPost(req(a.token, { child_id: newChild.id, observed_at: successObservedAt, raw_text: "幼儿把积木放在一起。" })), 201);
     await status(classesPost(req(admin.token, { name: `New ${RUN}`, stage: "small", school_year: "2026-2027" })), 201);
     await status(classPatch(req(admin.token, { stage: "middle" }), params(ids.a)), 409); // G2 history protection
     await status(transferPost(req(admin.token, { child_id: newChild.id }), params(ids.b)), 200);
