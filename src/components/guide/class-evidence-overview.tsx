@@ -58,6 +58,8 @@ export interface ClassEvidenceOverviewProps {
   onOpenChildItem?: (target: ClassEvidenceDrilldown) => void;
   /** 复用现有记录流程；不预填内容 */
   onRecordObservation?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
+  /** 按幼儿当前可操作性决定“记录观察”入口；缺省时回调存在即可用（G6-WRITE1 传入服务端解析结果） */
+  canRecordChild?: (child: EvidenceChildRef) => boolean;
   /** 现有活动支持入口（成长档案内） */
   onOpenActivitySupport?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
   className?: string;
@@ -292,6 +294,7 @@ function ChildRow({
   drilldown,
   onOpenChildItem,
   onRecordObservation,
+  canRecordChild,
   onOpenActivitySupport,
 }: {
   entry: ClassChildItemStatus;
@@ -301,6 +304,7 @@ function ChildRow({
   drilldown: ClassEvidenceDrilldown;
   onOpenChildItem?: (target: ClassEvidenceDrilldown) => void;
   onRecordObservation?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
+  canRecordChild?: (child: EvidenceChildRef) => boolean;
   onOpenActivitySupport?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
 }) {
   const caveat = childCaveat(entry);
@@ -401,7 +405,7 @@ function ChildRow({
         <button
           type="button"
           className={cx("child-action")}
-          disabled={!child || !onRecordObservation}
+          disabled={!child || !onRecordObservation || (child && canRecordChild ? !canRecordChild(child) : false)}
           onClick={() => {
             if (child && onRecordObservation) onRecordObservation(child, item);
           }}
@@ -436,6 +440,7 @@ function ItemRow({
   onToggle,
   onOpenChildItem,
   onRecordObservation,
+  canRecordChild,
   onOpenActivitySupport,
 }: {
   item: ClassGuideItemView;
@@ -446,6 +451,7 @@ function ItemRow({
   onToggle: () => void;
   onOpenChildItem?: (target: ClassEvidenceDrilldown) => void;
   onRecordObservation?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
+  canRecordChild?: (child: EvidenceChildRef) => boolean;
   onOpenActivitySupport?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
 }) {
   const panelId = `class-evidence-panel-${item.item.id}`;
@@ -480,6 +486,7 @@ function ItemRow({
         }}
         onOpenChildItem={onOpenChildItem}
         onRecordObservation={onRecordObservation}
+        canRecordChild={canRecordChild}
         onOpenActivitySupport={onOpenActivitySupport}
       />
     );
@@ -705,6 +712,7 @@ export function ClassEvidenceOverview({
   onFiltersChange,
   onOpenChildItem,
   onRecordObservation,
+  canRecordChild,
   onOpenActivitySupport,
   className,
 }: ClassEvidenceOverviewProps) {
@@ -1121,6 +1129,7 @@ export function ClassEvidenceOverview({
                       onToggle={() => toggleItem(item.item.id)}
                       onOpenChildItem={onOpenChildItem}
                       onRecordObservation={onRecordObservation}
+                      canRecordChild={canRecordChild}
                       onOpenActivitySupport={onOpenActivitySupport}
                     />
                   ))}

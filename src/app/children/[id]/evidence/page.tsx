@@ -7,6 +7,7 @@ import { EvidenceRouteClient } from "@/components/guide/evidence-route-client";
 import { EvidenceReadError } from "@/components/guide/evidence-read-error";
 import { loadChildEvidenceBook } from "@/lib/guide/read-model";
 import { evidencePageHref, evidencePageQuery, type EvidencePageSearch } from "@/lib/guide/navigation";
+import { resolveChildWriteAccess } from "@/lib/guide/write-access";
 import { listSemesters } from "@/lib/semester";
 
 export const dynamic = "force-dynamic";
@@ -30,10 +31,18 @@ export default async function ChildEvidencePage({ params, searchParams }: {
   }
   const itemValue = search.item_id;
   const itemId = Array.isArray(itemValue) ? itemValue[0] : itemValue;
+  // 写入口按当前会话与服务端读取的幼儿归属解析；隐藏 UI 不替代服务端授权
+  const writeAccess = await resolveChildWriteAccess(result.value.child);
   return (
     <div className="space-y-5">
       <Button asChild variant="ghost" className="-ml-2 min-h-11"><Link href={backHref}><ArrowLeft className="size-4" />返回成长档案</Link></Button>
-      <EvidenceRouteClient audience="child" data={result.value} semesters={listSemesters()} focusedItemId={itemId} />
+      <EvidenceRouteClient
+        audience="child"
+        data={result.value}
+        semesters={listSemesters()}
+        focusedItemId={itemId}
+        canRecordObservation={writeAccess.can_record}
+      />
     </div>
   );
 }

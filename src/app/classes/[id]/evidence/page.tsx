@@ -7,6 +7,7 @@ import { EvidenceRouteClient } from "@/components/guide/evidence-route-client";
 import { EvidenceReadError } from "@/components/guide/evidence-read-error";
 import { loadClassEvidenceOverview } from "@/lib/guide/read-model";
 import { evidencePageHref, evidencePageQuery, type EvidencePageSearch } from "@/lib/guide/navigation";
+import { resolveClassWriteAccess } from "@/lib/guide/write-access";
 import { listSemesters } from "@/lib/semester";
 
 export const dynamic = "force-dynamic";
@@ -28,10 +29,17 @@ export default async function ClassEvidencePage({ params, searchParams }: {
     if (result.failure.status === 404) notFound();
     return <EvidenceReadError backHref={backHref} retryHref={retryHref} resetHref={`${backHref}/evidence?scope=all_history`} message={result.failure.message} />;
   }
+  // 写入口按当前名单逐人判定（原班历史只读、无权限与管理员不出现记录控件）
+  const writeAccess = await resolveClassWriteAccess(result.value.roster.children);
   return (
     <div className="space-y-5">
       <Button asChild variant="ghost" className="-ml-2 min-h-11"><Link href={backHref}><ArrowLeft className="size-4" />返回班级详情</Link></Button>
-      <EvidenceRouteClient audience="class" data={result.value} semesters={listSemesters()} />
+      <EvidenceRouteClient
+        audience="class"
+        data={result.value}
+        semesters={listSemesters()}
+        canRecordByChild={writeAccess.record_by_child}
+      />
     </div>
   );
 }

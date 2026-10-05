@@ -1,7 +1,17 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 
-import { getChild, getObservation } from '@/lib/queries';
+import { GUIDE_CATALOG } from '@/data/guide';
+import type { BasisSourceOption, GuideItemOption } from '@/lib/guide/association-types';
+import { listGuideItems } from '@/lib/guide/catalog';
+import { observationFocusFromSearch, type EvidencePageSearch } from '@/lib/guide/navigation';
+import { parseGuideEvidence } from '@/lib/guide/runtime';
+import type { ObservationClassContextSnapshot } from '@/lib/guide/types';
+import type { EvidenceLinkView } from '@/lib/guide/view-types';
+import { resolveObservationWriteAccess } from '@/lib/guide/write-access';
+import { buildGuideResponseLinks, getChild, getObservation, listObservations } from '@/lib/queries';
+import { CLASS_STAGE_LABELS } from '@/lib/types';
+
 import { ReviewClient } from './review-client';
 
 export const dynamic = 'force-dynamic';
@@ -10,16 +20,135 @@ export const metadata: Metadata = {
   title: '整理与确认',
 };
 
+function goalLabels(): Record<string, string> {
+  const labels: Record<string, string> = {};
+  for (const domain of GUIDE_CATALOG.domains) {
+    for (const subDomain of domain.sub_domains) {
+      for (const goal of subDomain.goals) {
+        labels[goal.id] = `${domain.name} · ${subDomain.name} · 目标${goal.index} ${goal.title}`;
+      }
+    }
+  }
+  return labels;
+}
+
 export default async function ObservationReviewPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<EvidencePageSearch>;
 }) {
-  const { id } = await params;
+  const [{ id }, search] = await Promise.all([params, searchParams]);
   const observation = await getObservation(id);
   if (!observation) notFound();
   const child = await getChild(observation.child_id);
   if (!child) notFound();
 
-  return <ReviewClient observation={observation} child={child} />;
+  const focus = observationFocusFromSearch(search);
+  const observationId = observation.id;
+  const [writeAccess, items, confirmedObservations] = await Promise.all([
+    resolveObservationWriteAccess(observation, child),
+    listGuideItems(),
+    listObservations({ childId: observation.child_id, status: 'confirmed' }),
+  ]);
+
+  const itemOptions: GuideItemOption[] = items.map((item) => ({
+    id: item.id,
+    text: item.text,
+    age_band: item.age_band,
+    evidence_type: item.product_rules.evidence_type,
+    adult_help: item.product_rules.adult_help,
+    counts_in_behavior_stats: item.product_rules.counts_in_behavior_stats,
+    goal_id: item.goal_id,
+  }));
+
+  function sourceOption(source: {
+    id: string;
+    observed_at: string;
+    context: string | null;
+    class_context_snapshot: ObservationClassContextSnapshot | null | undefined;
+    raw_text: string;
+    confirmed_content: { highlight_quote: string; highlights: string[] } | null;
+    status: 'confirmed' | 'pending';
+  }): BasisSourceOption {
+    const snapshot = source.class_context_snapshot ?? null;
+    return {
+      id: source.id,
+      observed_at: source.observed_at,
+      context: source.context,
+      class_label: snapshot ? `${snapshot.class_name} · ${CLASS_STAGE_LABELS[snapshot.stage]}` : null,
+      is_host: source.id === observationId,
+      raw_text: source.raw_text,
+      confirmed: source.confirmed_content
+        ? {
+            highlight_quote: source.confirmed_content.highlight_quote,
+            highlights: source.confirmed_content.highlights,
+          }
+        : null,
+      status: source.status,
+    };
+  }
+
+  const basisSources: BasisSourceOption[] = [];
+  if (observation.status !== 'confirmed') {
+    basisSources.push(
+      sourceOption({
+        id: observation.id,
+        observed_at: observation.observed_at,
+        context: observation.context,
+        class_context_snapshot: observation.class_context_snapshot,
+        raw_text: observation.raw_text,
+        confirmed_content: null,
+        status: 'pending',
+      }),
+    );
+  }
+  for (const source of confirmedObservations) {
+    basisSources.push(
+      sourceOption({
+        id: source.id,
+        observed_at: source.observed_at,
+        context: source.context,
+        class_context_snapshot: source.class_context_snapshot,
+        raw_text: source.raw_text,
+        confirmed_content: source.confirmed_content,
+        status: 'confirmed',
+      }),
+    );
+  }
+
+  const parsed = parseGuideEvidence(observation.guide_evidence);
+  let revision = parsed.kind === 'ok' ? parsed.revision : 0;
+  let links: EvidenceLinkView[] = [];
+  let detailUnavailable = parsed.kind === 'unreadable';
+  try {
+    const built = await buildGuideResponseLinks(observation);
+    revision = built.revision;
+    links = built.links;
+  } catch {
+    // 已保存的关联详情补查失败：如实提示，不回退成“没有关联”，也不影响手动关联
+    detailUnavailable = true;
+  }
+
+  return (
+    <ReviewClient
+      key={observation.updated_at ?? observation.id}
+      observation={observation}
+      child={child}
+      writeAccess={writeAccess}
+      guide={{
+        mode: observation.status === 'confirmed' ? 'archived' : 'pre_archive',
+        revision,
+        links,
+        detailUnavailable,
+        itemOptions,
+        goalLabels: goalLabels(),
+        basisSources,
+        focusItemId: focus.itemId,
+        focusItemUnknown: Boolean(focus.itemId && !itemOptions.some((item) => item.id === focus.itemId)),
+        returnHref: focus.returnTo,
+      }}
+    />
+  );
 }

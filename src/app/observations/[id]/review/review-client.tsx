@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -19,6 +19,10 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AiBadge, StatusBadge } from '@/components/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { DraftView } from '@/components/draft-view';
+import { GuideAssociationSection } from '@/components/guide/guide-association-section';
+import type { BasisSourceOption, GuideItemOption, GuideWriteAccessView } from '@/lib/guide/association-types';
+import { withEvidenceItemFocus } from '@/lib/guide/navigation';
+import type { GuideEvidenceDecisionInput, EvidenceLinkView } from '@/lib/guide/view-types';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -94,12 +98,37 @@ function formToContent(form: DraftForm): TeacherEditContent {
   };
 }
 
+export interface ReviewGuideContext {
+  mode: 'pre_archive' | 'archived';
+  revision: number;
+  links: EvidenceLinkView[];
+  detailUnavailable: boolean;
+  itemOptions: GuideItemOption[];
+  goalLabels: Record<string, string>;
+  basisSources: BasisSourceOption[];
+  focusItemId: string | null;
+  focusItemUnknown: boolean;
+  returnHref: string | null;
+}
+
+interface ConfirmGuideExtension {
+  status: 'applied' | 'deferred';
+  revision?: number;
+  links?: EvidenceLinkView[];
+  detail_unavailable?: boolean;
+  message?: string;
+}
+
 export function ReviewClient({
   observation,
   child,
+  writeAccess,
+  guide,
 }: {
   observation: Observation;
   child: Child;
+  writeAccess: GuideWriteAccessView;
+  guide: ReviewGuideContext;
 }) {
   const router = useRouter();
   const { loading: authLoading, configured, isTeacher } = useTeacher();
@@ -123,8 +152,37 @@ export function ReviewClient({
   const [followUpContent, setFollowUpContent] = useState('');
   const [clarifyContent, setClarifyContent] = useState('');
   const [busy, setBusy] = useState<null | 'organize' | 'follow-up' | 'confirm'>(null);
+  const [guideRevision, setGuideRevision] = useState(guide.revision);
+  const [guideLinks, setGuideLinks] = useState<EvidenceLinkView[]>(guide.links);
+  const [guideDetailUnavailable, setGuideDetailUnavailable] = useState(guide.detailUnavailable);
+  const [pendingGuide, setPendingGuide] = useState<{
+    expectedRevision: number;
+    decisions: GuideEvidenceDecisionInput[];
+  } | null>(null);
 
-  const teacherReady = configured && isTeacher;
+  // 服务端已按当前会话解析写权限；旧口令教师身份也由服务端确认，不信任客户端声明
+  const teacherReady = writeAccess.can_organize || (configured && isTeacher);
+  const liveConfirmed = useMemo(
+    () =>
+      form
+        ? { highlight_quote: form.highlight_quote.trim(), highlights: toLines(form.highlightText) }
+        : null,
+    [form],
+  );
+  const handlePendingGuideChange = useCallback(
+    (pending: { expectedRevision: number; decisions: GuideEvidenceDecisionInput[] } | null) => {
+      setPendingGuide(pending);
+    },
+    [],
+  );
+  const handleGuideRevisionChange = useCallback(
+    (update: { revision: number; links: EvidenceLinkView[] }) => {
+      setGuideRevision(update.revision);
+      setGuideLinks(update.links);
+      setGuideDetailUnavailable(false);
+    },
+    [],
+  );
 
   function applyObservation(updated: Observation) {
     setAgentContext(updated.agent_context);
@@ -199,7 +257,18 @@ export function ReviewClient({
 
   async function handleConfirm() {
     if (!form) return;
-    const payload = { content: formToContent(form), teacher_note: teacherNote.trim() || undefined };
+    const payload = {
+      content: formToContent(form),
+      teacher_note: teacherNote.trim() || undefined,
+      ...(pendingGuide
+        ? {
+            guide_decisions: {
+              expected_guide_revision: pendingGuide.expectedRevision,
+              decisions: pendingGuide.decisions,
+            },
+          }
+        : {}),
+    };
     if (!payload.content.sub_domain || !payload.content.objective_description) {
       toast.error('请补全子领域与发展表现说明');
       return;
@@ -209,40 +278,83 @@ export function ReviewClient({
       return;
     }
     setBusy('confirm');
+    let res: Response;
     try {
-      const res = await fetch(`/api/observations/${observation.id}/confirm`, {
+      res = await fetch(`/api/observations/${observation.id}/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
+    } catch {
+      // 结果不确定：先读回宿主与关联状态，不自动重复提交归档
+      toast.warning('网络中断，确认结果不确定。已重新读取记录，请核对状态后再决定是否重试；系统不会自动重复提交。');
+      router.refresh();
+      setBusy(null);
+      return;
+    }
+    try {
       const data = (await res.json().catch(() => ({}))) as {
         observation?: Observation;
         message?: string;
+        error?: string;
         requiresAgentConfirmation?: boolean;
         agentReview?: TeacherEditReviewOutput;
         profileUpdateStatus?: 'updated' | 'failed';
         profileUpdateMessage?: string;
+        guideEvidence?: ConfirmGuideExtension;
       };
       if (!res.ok || !data.observation) {
+        if (
+          data.error === 'basis_expired' ||
+          data.error === 'catalog_version_mismatch' ||
+          data.error === 'state_conflict'
+        ) {
+          toast.warning(`${data.message ?? '关联决定未写入。'} 请重新读取后核对；旧决定不会自动重放。`);
+          router.refresh();
+          return;
+        }
         throw new Error(data.message ?? '确认归档失败，请稍后重试');
+      }
+      if (data.guideEvidence?.status === 'applied' && data.guideEvidence.links) {
+        setGuideRevision(data.guideEvidence.revision ?? guideRevision);
+        setGuideLinks(data.guideEvidence.links);
+        setPendingGuide(null);
       }
       if (data.requiresAgentConfirmation) {
         setAgentContext(data.observation.agent_context);
         setTeacherEditReview(data.observation.agent_context?.teacher_edit_review ?? null);
         setStatus(data.observation.status);
         toast.info(
-          data.agentReview?.decision === 'clarify'
-            ? 'Agent 需要你进一步澄清这处修改。'
-            : 'Agent 已完成修改审核，请进行最终归档。',
+          data.guideEvidence?.status === 'deferred'
+            ? '关联选择已保留，将在最终归档时与观察一起写入。'
+            : data.agentReview?.decision === 'clarify'
+              ? 'Agent 需要你进一步澄清这处修改。'
+              : 'Agent 已完成修改审核，请进行最终归档。',
         );
+        return;
+      }
+      if (data.guideEvidence?.status === 'applied' && data.guideEvidence.detail_unavailable) {
+        toast.info(
+          data.guideEvidence.message ??
+            '观察与关联决定已保存；证据详情暂时无法读取，正在重新读取，请勿重复提交。',
+        );
+        router.refresh();
         return;
       }
       if (data.profileUpdateStatus === 'failed') {
         toast.info(data.profileUpdateMessage ?? '观察已确认，成长档案暂未更新，请稍后重试。');
       } else if (data.profileUpdateStatus === 'updated') {
-        toast.success('已确认归档，成长档案已更新');
+        toast.success(
+          data.guideEvidence?.status === 'applied' ? '已确认归档，成长档案与指南关联已更新' : '已确认归档，成长档案已更新',
+        );
       } else {
-        toast.success('已确认归档，内容进入幼儿正册');
+        toast.success(
+          data.guideEvidence?.status === 'applied' ? '已确认归档，指南关联已写入' : '已确认归档，内容进入幼儿正册',
+        );
+      }
+      if (guide.returnHref) {
+        router.push(withEvidenceItemFocus(guide.returnHref, guide.focusItemId));
+        return;
       }
       router.push(`/children/${child.id}`);
     } catch (e) {
@@ -255,20 +367,37 @@ export function ReviewClient({
   async function handleClarify() {
     if (!form || !clarifyContent.trim()) return;
     setBusy('confirm');
+    let res: Response;
     try {
-      const res = await fetch(`/api/observations/${observation.id}/confirm`, {
+      res = await fetch(`/api/observations/${observation.id}/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           content: formToContent(form),
           teacher_note: teacherNote.trim() || undefined,
           clarification: clarifyContent.trim(),
+          ...(pendingGuide
+            ? {
+                guide_decisions: {
+                  expected_guide_revision: pendingGuide.expectedRevision,
+                  decisions: pendingGuide.decisions,
+                },
+              }
+            : {}),
         }),
       });
+    } catch {
+      toast.warning('网络中断，提交结果不确定。已重新读取记录，请核对后再决定是否重试；系统不会自动重复提交。');
+      router.refresh();
+      setBusy(null);
+      return;
+    }
+    try {
       const data = (await res.json().catch(() => ({}))) as {
         observation?: Observation;
         message?: string;
         agentReview?: TeacherEditReviewOutput;
+        guideEvidence?: ConfirmGuideExtension;
       };
       if (!res.ok || !data.observation) {
         throw new Error(data.message ?? '提交澄清失败，请稍后重试');
@@ -278,9 +407,11 @@ export function ReviewClient({
       setStatus(data.observation.status);
       setClarifyContent('');
       toast.success(
-        data.agentReview?.decision === 'accept'
-          ? '已结合补充依据完成审核，请进行最终归档。'
-          : 'Agent 还需要进一步澄清，请继续补充。',
+        data.guideEvidence?.status === 'deferred'
+          ? '关联选择已保留，将在最终归档时写入。'
+          : data.agentReview?.decision === 'accept'
+            ? '已结合补充依据完成审核，请进行最终归档。'
+            : 'Agent 还需要进一步澄清，请继续补充。',
       );
     } catch (e) {
       // 提交失败保留输入，教师可以直接重试
@@ -381,14 +512,34 @@ export function ReviewClient({
       ) : !teacherReady ? (
         <Alert>
           <Lock className="size-4" />
-          <AlertTitle>访客只读模式</AlertTitle>
+          <AlertTitle>只读模式</AlertTitle>
           <AlertDescription>
-            {configured
-              ? '生成 AI 整理与确认归档需要教师身份：请点击右上角「教师登录」输入通行口令。'
-              : '服务端尚未配置教师口令（TEACHER_PASSCODE），写入与 AI 调用已默认禁用；配置环境变量并重启后可用。'}
+            {writeAccess.read_only_reason ??
+              (configured
+                ? '生成 AI 整理与确认归档需要教师身份：请点击右上角「教师登录」输入通行口令。'
+                : '服务端尚未配置教师口令（TEACHER_PASSCODE），写入与 AI 调用已默认禁用；配置环境变量并重启后可用。')}
           </AlertDescription>
         </Alert>
       ) : null}
+
+      <GuideAssociationSection
+        observationId={observation.id}
+        childId={child.id}
+        hostStatus={status}
+        access={writeAccess}
+        mode={guide.mode}
+        revision={guideRevision}
+        links={guideLinks}
+        detailUnavailable={guideDetailUnavailable}
+        itemOptions={guide.itemOptions}
+        goalLabels={guide.goalLabels}
+        basisSources={guide.basisSources}
+        focusItemId={guide.focusItemId}
+        focusItemUnknown={guide.focusItemUnknown}
+        liveConfirmed={liveConfirmed}
+        onRevisionChange={handleGuideRevisionChange}
+        onPendingChange={handlePendingGuideChange}
+      />
 
       {status === 'needs_input' && followUp ? (
         <Card className="border-sky-200 bg-sky-50/50">
