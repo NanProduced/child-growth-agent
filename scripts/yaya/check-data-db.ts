@@ -477,7 +477,7 @@ async function main(): Promise<void> {
         object_key: `${RUN}/att-d`,
         media_type: "image/png",
         byte_size: 12,
-        checksum: "a".repeat(64),
+        checksum_sha256: "a".repeat(64),
         source_kind: "raw_input",
         derived_from: null,
       });
@@ -488,7 +488,7 @@ async function main(): Promise<void> {
         object_key: `${RUN}/att-e`,
         media_type: "image/png",
         byte_size: 12,
-        checksum: "b".repeat(64),
+        checksum_sha256: "b".repeat(64),
         source_kind: "raw_input",
         derived_from: null,
       });
@@ -499,7 +499,7 @@ async function main(): Promise<void> {
         object_key: `${RUN}/att-f`,
         media_type: "image/png",
         byte_size: 12,
-        checksum: "e".repeat(64),
+        checksum_sha256: "e".repeat(64),
         source_kind: "teacher_supplement",
         derived_from: null,
       });
@@ -1148,7 +1148,7 @@ async function main(): Promise<void> {
         object_key: `${RUN}/att-d2`,
         media_type: "image/png",
         byte_size: 12,
-        checksum: "c".repeat(64),
+        checksum_sha256: "c".repeat(64),
         source_kind: "raw_input",
         derived_from: null,
       });
@@ -1159,7 +1159,7 @@ async function main(): Promise<void> {
         object_key: `${RUN}/att-e2`,
         media_type: "image/png",
         byte_size: 12,
-        checksum: "d".repeat(64),
+        checksum_sha256: "d".repeat(64),
         source_kind: "raw_input",
         derived_from: null,
       });

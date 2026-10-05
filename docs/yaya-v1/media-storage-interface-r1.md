@@ -133,6 +133,6 @@ await withTransaction(async (client) => {
 
 ## 7. 实现与验证状态
 
-- 本文件提交（声明）：SQL 增量、storage-types DTO 与 DATA1 repository 原语随 R1 实现提交；`YAYA_MEDIA_INTERFACE_REVISION` 常量标明口径版本。
+- 本文件为接口声明提交（`7182677a37eea3a96785827d815343dc38d400e6`）；实现（迁移增量、storage-types DTO、`src/lib/yaya/data/media-port.ts` 工厂与 repository 原语）随 R1 实现提交落地，见 `docs/yaya-v1/data1-r1-delivery.md`。`YAYA_MEDIA_INTERFACE_REVISION = "yaya-media-storage-r1"` 标明口径版本。
 - 验证：R1 隔离库检查覆盖 `client_upload_id` 幂等、pending→ready CAS、三派生对象持久化、租约令牌/unknown 无损与重取、四类引用写入的受控双连接互斥、仅解除自己会话引用、观察 revision CAS 与独立聚合审计、现有 7 表列签名不变。
 - NOT_RUN（本声明范围）：真实 S3/桶、MEDIA 正式装配、浏览器、端到端业务闭环。

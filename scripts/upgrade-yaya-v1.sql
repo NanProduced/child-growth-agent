@@ -224,3 +224,56 @@ CREATE TABLE IF NOT EXISTS yaya_attachment_appends (
 );
 CREATE INDEX IF NOT EXISTS yaya_attachment_appends_observation_idx
   ON yaya_attachment_appends (observation_id, appended_at);
+
+-- ============================ R1：媒体附件存储接口增量 ============================
+-- 与 docs/yaya-v1/media-storage-interface-r1.md 对应；幂等可重复执行。
+-- 1) 三个派生对象、尺寸、原始类型、client_upload_id 幂等、删除租约令牌。
+ALTER TABLE yaya_attachments ADD COLUMN IF NOT EXISTS client_upload_id varchar(128);
+ALTER TABLE yaya_attachments ADD COLUMN IF NOT EXISTS thumbnail_key text;
+ALTER TABLE yaya_attachments ADD COLUMN IF NOT EXISTS model_key text;
+ALTER TABLE yaya_attachments ADD COLUMN IF NOT EXISTS thumbnail_checksum varchar(128);
+ALTER TABLE yaya_attachments ADD COLUMN IF NOT EXISTS model_checksum varchar(128);
+ALTER TABLE yaya_attachments ADD COLUMN IF NOT EXISTS width integer;
+ALTER TABLE yaya_attachments ADD COLUMN IF NOT EXISTS height integer;
+ALTER TABLE yaya_attachments ADD COLUMN IF NOT EXISTS deletion_lease_id varchar(64);
+
+DO $$
+BEGIN
+  IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'yaya_attachments' AND column_name = 'checksum')
+     AND NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'yaya_attachments' AND column_name = 'checksum_sha256')
+  THEN
+    ALTER TABLE yaya_attachments RENAME COLUMN checksum TO checksum_sha256;
+  END IF;
+END $$;
+
+ALTER TABLE yaya_attachments DROP CONSTRAINT IF EXISTS yaya_attachments_status_check;
+ALTER TABLE yaya_attachments ADD CONSTRAINT yaya_attachments_status_check
+  CHECK (status IN ('pending', 'ready', 'deleting', 'deleted'));
+ALTER TABLE yaya_attachments DROP CONSTRAINT IF EXISTS yaya_attachments_dimensions_check;
+ALTER TABLE yaya_attachments ADD CONSTRAINT yaya_attachments_dimensions_check
+  CHECK ((width IS NULL OR width >= 0) AND (height IS NULL OR height >= 0));
+DROP INDEX IF EXISTS yaya_attachments_client_upload_unique;
+CREATE UNIQUE INDEX yaya_attachments_client_upload_unique
+  ON yaya_attachments (uploader_account_id, client_upload_id)
+  WHERE client_upload_id IS NOT NULL;
+
+-- 2) 聚合追加审计（MEDIA AttachmentAuditEntry）；原逐附件 revision 审计行保留。
+ALTER TABLE yaya_attachment_appends ADD COLUMN IF NOT EXISTS audit_id varchar(36);
+ALTER TABLE yaya_attachment_appends ADD COLUMN IF NOT EXISTS action varchar(40);
+ALTER TABLE yaya_attachment_appends ADD COLUMN IF NOT EXISTS source_confirmed_at timestamptz;
+ALTER TABLE yaya_attachment_appends ADD COLUMN IF NOT EXISTS request_id varchar(128);
+ALTER TABLE yaya_attachment_appends ADD COLUMN IF NOT EXISTS attachment_ids jsonb;
+ALTER TABLE yaya_attachment_appends ALTER COLUMN attachment_id DROP NOT NULL;
+ALTER TABLE yaya_attachment_appends ALTER COLUMN attachment_revision DROP NOT NULL;
+ALTER TABLE yaya_attachment_appends DROP CONSTRAINT IF EXISTS yaya_attachment_appends_revision_check;
+ALTER TABLE yaya_attachment_appends ADD CONSTRAINT yaya_attachment_appends_revision_check
+  CHECK (attachment_revision IS NULL OR attachment_revision >= 1);
+ALTER TABLE yaya_attachment_appends DROP CONSTRAINT IF EXISTS yaya_attachment_appends_action_check;
+ALTER TABLE yaya_attachment_appends ADD CONSTRAINT yaya_attachment_appends_action_check
+  CHECK (action IS NULL OR action IN ('attach_observation_images', 'create_observation_attachments'));
+CREATE INDEX IF NOT EXISTS yaya_attachment_appends_audit_idx
+  ON yaya_attachment_appends (audit_id) WHERE audit_id IS NOT NULL;

@@ -20,6 +20,7 @@ export * from "./messages";
 export * from "./proposals";
 export * from "./operations";
 export * from "./attachments";
+export * from "./media-port";
 
 export const yayaDataRepository = {
   createConversation: conversations.createConversation,
@@ -32,6 +33,7 @@ export const yayaDataRepository = {
   listMessages: messages.listMessages,
   prepareProposal: proposals.prepareProposal,
   getProposal: proposals.getProposal,
+  getProjectedProposal: proposals.getProjectedProposal,
   recordApproval: proposals.recordApproval,
   rejectProposalItems: proposals.rejectProposalItems,
   cancelPendingApproval: proposals.cancelPendingApproval,
@@ -50,4 +52,16 @@ export const yayaDataRepository = {
   listAttachmentRefs: attachments.listAttachmentRefs,
   appendObservationAttachments: attachments.appendObservationAttachments,
   getObservationAttachmentRevision: attachments.getObservationAttachmentRevision,
+  findAttachmentByClientUploadId: attachments.findAttachmentByClientUploadId,
+  insertPendingAttachment: attachments.insertPendingAttachment,
+  markAttachmentReady: attachments.markAttachmentReady,
+  removePendingAttachment: attachments.removePendingAttachment,
+  getMediaAttachment: attachments.getMediaAttachment,
+  addObservationAttachmentRefs: attachments.addObservationAttachmentRefs,
+  getObservationAttachmentRevisionNumber: attachments.getObservationAttachmentRevisionNumber,
+  getMediaAttachmentReferenceFacts: attachments.getMediaAttachmentReferenceFacts,
+  releaseConversationAttachmentRefs: attachments.releaseConversationAttachmentRefs,
+  acquireAttachmentDeletionLease: attachments.acquireAttachmentDeletionLease,
+  completeAttachmentDeletionByLease: attachments.completeAttachmentDeletionByLease,
+  appendMediaAttachmentAudit: attachments.appendMediaAttachmentAudit,
 } satisfies YayaDataRepository;

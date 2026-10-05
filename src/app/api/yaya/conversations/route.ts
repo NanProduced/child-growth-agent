@@ -29,12 +29,13 @@ export async function POST(request: NextRequest) {
     if (title !== null && (title.length === 0 || title.length > 200)) {
       throw new YayaDataError("invalid_request", "会话标题长度不合法。");
     }
-    const conversation = await withPrivateWrite(request, ({ client, principal }) =>
-      yayaDataRepository.createConversation(client, {
+    const conversation = await withPrivateWrite(request, async ({ client, principal, schoolId }) => {
+      const created = await yayaDataRepository.createConversation(client, {
         owner_account_id: principal.account_id,
         title,
-      }),
-    );
+      });
+      return yayaDataRepository.getConversationSummary(client, principal, schoolId, created.conversation_id);
+    });
     return NextResponse.json({ conversation }, { status: 201 });
   } catch (error) {
     return yayaRouteError(error);

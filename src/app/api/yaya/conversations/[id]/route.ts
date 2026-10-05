@@ -41,9 +41,10 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       }
       titleSourceFragments = rawSources as string[];
     }
-    const conversation = await withPrivateWrite(request, ({ client, principal }) =>
+    const conversation = await withPrivateWrite(request, ({ client, principal, schoolId }) =>
       yayaDataRepository.renameConversation(client, {
-        owner_account_id: principal.account_id,
+        principal,
+        school_id: schoolId,
         conversation_id: id,
         title,
         ...(titleSourceFragments === undefined ? {} : { title_source_fragments: titleSourceFragments }),
@@ -64,9 +65,10 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
       throw new YayaDataError("invalid_request", "缺少版本前提。");
     }
-    const result = await withPrivateWrite(request, ({ client, principal }) =>
+    const result = await withPrivateWrite(request, ({ client, principal, schoolId }) =>
       yayaDataRepository.deleteConversation(client, {
-        owner_account_id: principal.account_id,
+        principal,
+        school_id: schoolId,
         conversation_id: id,
         expected_revision: expectedRevision,
       }),

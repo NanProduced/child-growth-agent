@@ -26,10 +26,12 @@ import type {
   AccessResourceKind,
   Principal,
 } from "../accounts/types";
+import type { ObservationStatus } from "../types";
 import type {
   YayaApprovalItemRef,
   YayaApprovalSubmitter,
   YayaAttachmentAssociation,
+  YayaAttachmentProjection,
   YayaChatMessageProjection,
   YayaDomainPayload,
   YayaFragmentProjection,
@@ -244,21 +246,36 @@ export type YayaItemResourceRef =
 
 /* ------------------------------- 会话与消息 ------------------------------- */
 
+/**
+ * 内部存储视图：**绝不可直接序列化给客户端**（含原始 title / title_source_fragments）。
+ * 对外响应一律使用 `YayaConversationSummaryView`（投影视图，不含原始受限字段）。
+ */
 export interface YayaConversationView {
   conversation_id: string;
   owner_account_id: string;
   title: string | null;
-  title_source_fragments: readonly string[];
+  /** 合法来源片段 id 数组；`null` 表示损坏/无法核验（受限），`[]` 表示无派生来源（手工标题） */
+  title_source_fragments: readonly string[] | null;
   revision: number;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
 }
 
-export interface YayaConversationSummaryView extends YayaConversationView {
-  /** 服务端按当前来源投影后的标题；受限时使用通用标题，不泄漏正文片段 */
+/**
+ * 对外投影视图：只含投影后的标题与白名单字段；
+ * 原始 `title` 与 `title_source_fragments` 不在本 DTO 中，服务端不把它们发给客户端。
+ */
+export interface YayaConversationSummaryView {
+  conversation_id: string;
+  owner_account_id: string;
+  /** 服务端按当前来源投影后的标题；受限/损坏/无法核验时使用通用标题 */
   projected_title: string;
   title_restricted: boolean;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
 }
 
 export type YayaMessageRole = "user" | "assistant" | "tool";
@@ -280,7 +297,8 @@ export interface YayaProjectedFragmentView {
   reason: YayaFragmentProjection["reason"];
   /** 只有 full 片段返回正文；historical_read_only/hidden 一律 null */
   text: string | null;
-  provenance: YayaSourceRef;
+  /** 只有 full 片段返回来源标签/ref；受限片段一律 null，防止经 provenance 旁路泄漏 */
+  provenance: YayaSourceRef | null;
   independently_readable: boolean;
 }
 
@@ -314,13 +332,13 @@ export interface YayaSaveMessageInput {
 
 export interface YayaSaveMessageResult {
   message: YayaProjectedMessageView;
-  conversation: YayaConversationView;
+  conversation: YayaConversationSummaryView;
   /** true 表示 client_message_id 幂等命中，未重复落库 */
   replayed: boolean;
 }
 
 export interface YayaConversationMessagesView {
-  conversation: YayaConversationView;
+  conversation: YayaConversationSummaryView;
   messages: readonly YayaProjectedMessageView[];
 }
 
@@ -330,7 +348,8 @@ export interface YayaCreateConversationInput {
 }
 
 export interface YayaRenameConversationInput {
-  owner_account_id: string;
+  principal: Principal;
+  school_id: string;
   conversation_id: string;
   title: string | null;
   /** 标题派生自哪些消息片段；手工改名传空数组 */
@@ -339,13 +358,15 @@ export interface YayaRenameConversationInput {
 }
 
 export interface YayaDeleteConversationInput {
-  owner_account_id: string;
+  principal: Principal;
+  school_id: string;
   conversation_id: string;
   expected_revision: number;
 }
 
 export interface YayaDeleteConversationResult {
-  conversation: YayaConversationView;
+  /** 对外投影视图（不含原始 title） */
+  conversation: YayaConversationSummaryView;
   /** 本会话消息引用被解除的附件 id（去重） */
   detached_attachment_ids: readonly string[];
   /** 解除后全局已无任何引用的附件 id（仅候选；对象回收归 MEDIA1） */
@@ -401,6 +422,48 @@ export interface YayaPreparedProposalView {
   status: "open" | "cancelled" | "closed";
   prepared_at: string;
   items: readonly YayaPreparedItemView[];
+}
+
+/** 提案条目的当前业务来源访问结论 */
+export type YayaProposalItemAccess =
+  | "full"
+  | "historical_read_only"
+  | "denied"
+  | "unavailable"
+  | "broken";
+
+/**
+ * 提案条目对外投影：owner 边界之外再按**当前**业务来源授权投影；
+ * 非 full 时 `payload` 一律 null，防撤权/转班后重开旧内容。
+ */
+export interface YayaProjectedProposalItemView {
+  item_key: string;
+  operation_id: string;
+  target_id: string;
+  action: AccessAction;
+  resource: AccessResourceKind;
+  resource_ref: YayaItemResourceRef;
+  content_digest: string;
+  attachment_associations: readonly YayaAttachmentAssociation[];
+  business_revision: string | null;
+  status: "pending" | "approved" | "rejected" | "superseded";
+  access: YayaProposalItemAccess;
+  payload: YayaDomainPayload | null;
+}
+
+/** 提案对外投影：执行内部读取仍用完整存储记录，本 DTO 只用于响应。 */
+export interface YayaProjectedProposalView {
+  proposal_id: string;
+  batch_id: string;
+  conversation_id: string;
+  owner_account_id: string;
+  proposal_origin: "teacher_card" | "model_suggestion";
+  auth: YayaToolAuth;
+  status: "open" | "cancelled" | "closed";
+  prepared_at: string;
+  items: readonly YayaProjectedProposalItemView[];
+  /** 提案图片引用的读取投影（业务记录 + 上传者口径，与消息附件同一冻结口径） */
+  attachments: readonly YayaAttachmentProjection[];
 }
 
 /* ------------------------------- 批准 ------------------------------- */
@@ -514,12 +577,14 @@ export interface YayaSupersedeResult {
 
 /* ------------------------------- 附件 ------------------------------- */
 
-export const YAYA_ATTACHMENT_STATUSES = ["ready", "deleting", "deleted"] as const;
+/** 内部存储状态；媒体端口状态映射见 mapMediaAttachmentStatus（含 deletion_unknown） */
+export const YAYA_ATTACHMENT_STATUSES = ["pending", "ready", "deleting", "deleted"] as const;
 export type YayaAttachmentStatus = (typeof YAYA_ATTACHMENT_STATUSES)[number];
 
 export const YAYA_ATTACHMENT_RECORD_KINDS = ["message", "proposal", "observation"] as const;
 export type YayaAttachmentRecordKind = (typeof YAYA_ATTACHMENT_RECORD_KINDS)[number];
 
+/** DATA1 通用附件登记（单对象）；媒体管线用 insertPendingAttachment/markAttachmentReady。 */
 export interface YayaAttachmentMetadataInput {
   attachment_id?: string;
   uploader_account_id: string;
@@ -527,7 +592,7 @@ export interface YayaAttachmentMetadataInput {
   object_key: string;
   media_type: string;
   byte_size: number;
-  checksum: string;
+  checksum_sha256: string;
   source_kind: YayaProvenanceKind;
   derived_from: string | null;
   metadata?: Record<string, unknown> | null;
@@ -540,13 +605,21 @@ export interface YayaAttachmentView {
   object_key: string;
   media_type: string;
   byte_size: number;
-  checksum: string;
+  checksum_sha256: string;
   source_kind: YayaProvenanceKind;
   derived_from: string | null;
   metadata: Record<string, unknown> | null;
   status: YayaAttachmentStatus;
   revision: number;
   delete_result: "deleted" | "unknown" | null;
+  deletion_lease_id: string | null;
+  thumbnail_key: string | null;
+  model_key: string | null;
+  thumbnail_checksum: string | null;
+  model_checksum: string | null;
+  width: number | null;
+  height: number | null;
+  client_upload_id: string | null;
   deleting_started_at: string | null;
   deleted_at: string | null;
   created_at: string;
@@ -600,6 +673,107 @@ export interface YayaObservationAttachmentView {
   updated_at: string | null;
 }
 
+/* --------------------------- 媒体附件存储接口（MEDIA 消费） --------------------------- */
+
+/**
+ * 与 MEDIA1 `AttachmentMetadataPort` 结构化一致的 DATA1 端口。
+ * 字段/方法映射与错误码转换见 docs/yaya-v1/media-storage-interface-r1.md。
+ */
+export const YAYA_MEDIA_ATTACHMENT_STATUSES = [
+  "pending",
+  "ready",
+  "deleting",
+  "deleted",
+  "deletion_unknown",
+] as const;
+export type YayaMediaAttachmentStatus = (typeof YAYA_MEDIA_ATTACHMENT_STATUSES)[number];
+
+export const YAYA_MEDIA_INTERFACE_REVISION = "yaya-media-storage-r1" as const;
+
+/** 媒体端口记录：只存对象标识/checksum/尺寸/状态，不含 URL */
+export interface YayaMediaAttachmentRecord {
+  attachment_id: string;
+  owner_account_id: string;
+  status: YayaMediaAttachmentStatus;
+  object_key: string;
+  thumbnail_key: string;
+  model_key: string;
+  content_type: string;
+  byte_size: number;
+  checksum_sha256: string;
+  thumbnail_checksum: string;
+  model_checksum: string;
+  width: number;
+  height: number;
+  client_upload_id: string | null;
+  created_at: string;
+  /** 回收租约令牌；仅端口 status=deleting 时非空 */
+  deletion_lease_id: string | null;
+}
+
+export type YayaMediaDeletionLeaseResult =
+  | { outcome: "acquired"; lease_token: string }
+  | { outcome: "already_deleting" }
+  | { outcome: "already_deleted" }
+  | { outcome: "not_ready" }
+  | { outcome: "not_found" };
+
+export interface YayaMediaObservationReferenceFact {
+  observation_id: string;
+  status: ObservationStatus;
+}
+export interface YayaMediaMessageReferenceFact {
+  conversation_id: string;
+  message_id: string;
+}
+export interface YayaMediaReferenceFacts {
+  attachment_id: string;
+  observation_refs: readonly YayaMediaObservationReferenceFact[];
+  message_refs: readonly YayaMediaMessageReferenceFact[];
+  proposal_refs: readonly string[];
+}
+export interface YayaMediaObservationReferencesResult {
+  added: number;
+  attachment_revision: number;
+}
+export interface YayaMediaAttachmentAuditEntry {
+  audit_id: string;
+  action: "attach_observation_images" | "create_observation_attachments";
+  observation_id: string;
+  attachment_ids: readonly string[];
+  actor_account_id: string;
+  source_confirmed_at: string | null;
+  request_id: string | null;
+  recorded_at: string;
+}
+
+export interface YayaAttachmentMetadataPort {
+  findByClientUploadId(ownerAccountId: string, clientUploadId: string): Promise<YayaMediaAttachmentRecord | null>;
+  insertPending(record: YayaMediaAttachmentRecord): Promise<void>;
+  markReady(attachmentId: string): Promise<YayaMediaAttachmentRecord>;
+  removePending(attachmentId: string): Promise<boolean>;
+  get(attachmentId: string): Promise<YayaMediaAttachmentRecord | null>;
+  addObservationReferences(input: {
+    observation_id: string;
+    attachment_ids: readonly string[];
+    actor_account_id: string;
+  }): Promise<YayaMediaObservationReferencesResult>;
+  getObservationAttachmentRevision(observationId: string): Promise<number>;
+  getReferenceFacts(attachmentId: string): Promise<YayaMediaReferenceFacts>;
+  releaseConversationReferences(input: {
+    conversation_id: string;
+    message_ids: readonly string[];
+    owner_account_id: string;
+  }): Promise<number>;
+  beginDeletionLease(attachmentId: string): Promise<YayaMediaDeletionLeaseResult>;
+  completeDeletion(
+    attachmentId: string,
+    leaseToken: string,
+    outcome: "deleted" | "unknown" | "failed",
+  ): Promise<YayaMediaAttachmentRecord>;
+  appendAttachmentAudit(entry: YayaMediaAttachmentAuditEntry): Promise<void>;
+}
+
 /* ------------------------------- 仓库接口 ------------------------------- */
 
 /**
@@ -617,7 +791,7 @@ export interface YayaDataRepository {
     schoolId: string,
     conversationId: string,
   ): Promise<YayaConversationSummaryView | null>;
-  renameConversation(client: TransactionClient, input: YayaRenameConversationInput): Promise<YayaConversationView>;
+  renameConversation(client: TransactionClient, input: YayaRenameConversationInput): Promise<YayaConversationSummaryView>;
   deleteConversation(client: TransactionClient, input: YayaDeleteConversationInput): Promise<YayaDeleteConversationResult>;
   saveMessage(
     client: TransactionClient,
@@ -636,6 +810,13 @@ export interface YayaDataRepository {
   /* 提案与批准 */
   prepareProposal(client: TransactionClient, input: YayaPrepareProposalInput & { owner_account_id: string }): Promise<YayaPreparedProposalView>;
   getProposal(client: TransactionClient, ownerAccountId: string, proposalId: string): Promise<YayaPreparedProposalView | null>;
+  /** 对外投影：owner + 当前业务来源双重投影；内部执行读取仍用 getProposal */
+  getProjectedProposal(
+    client: TransactionClient,
+    principal: Principal,
+    schoolId: string,
+    proposalId: string,
+  ): Promise<YayaProjectedProposalView | null>;
   recordApproval(client: TransactionClient, input: YayaRecordApprovalInput): Promise<YayaRecordApprovalResult>;
   rejectProposalItems(client: TransactionClient, input: YayaRejectItemsInput): Promise<YayaPreparedProposalView>;
   cancelPendingApproval(client: TransactionClient, input: YayaCancelApprovalInput): Promise<{ cancelled_approval_id: string | null }>;
@@ -661,4 +842,32 @@ export interface YayaDataRepository {
   ): Promise<readonly YayaAttachmentRefView[]>;
   appendObservationAttachments(client: TransactionClient, input: YayaAttachmentAppendInput): Promise<YayaAttachmentAppendResult>;
   getObservationAttachmentRevision(client: TransactionClient, observationId: string): Promise<YayaObservationAttachmentView>;
+
+  /* 媒体附件存储接口（DATA1-R1，供 MEDIA1 端口消费） */
+  findAttachmentByClientUploadId(
+    client: TransactionClient,
+    ownerAccountId: string,
+    clientUploadId: string,
+  ): Promise<YayaMediaAttachmentRecord | null>;
+  insertPendingAttachment(client: TransactionClient, input: YayaMediaAttachmentRecord): Promise<YayaMediaAttachmentRecord>;
+  markAttachmentReady(client: TransactionClient, attachmentId: string): Promise<YayaMediaAttachmentRecord>;
+  removePendingAttachment(client: TransactionClient, attachmentId: string): Promise<boolean>;
+  getMediaAttachment(client: TransactionClient, attachmentId: string): Promise<YayaMediaAttachmentRecord | null>;
+  addObservationAttachmentRefs(
+    client: TransactionClient,
+    input: { observation_id: string; attachment_ids: readonly string[]; actor_account_id: string },
+  ): Promise<YayaMediaObservationReferencesResult>;
+  getObservationAttachmentRevisionNumber(client: TransactionClient, observationId: string): Promise<number>;
+  /** 三种引用完整返回；悬空引用/损坏按 reference_incomplete 抛错，调用方保守禁止回收 */
+  getMediaAttachmentReferenceFacts(client: TransactionClient, attachmentId: string): Promise<YayaMediaReferenceFacts>;
+  releaseConversationAttachmentRefs(
+    client: TransactionClient,
+    input: { conversation_id: string; message_ids: readonly string[]; owner_account_id: string },
+  ): Promise<number>;
+  acquireAttachmentDeletionLease(client: TransactionClient, attachmentId: string): Promise<YayaMediaDeletionLeaseResult>;
+  completeAttachmentDeletionByLease(
+    client: TransactionClient,
+    input: { attachment_id: string; lease_token: string; outcome: "deleted" | "unknown" | "failed" },
+  ): Promise<YayaMediaAttachmentRecord>;
+  appendMediaAttachmentAudit(client: TransactionClient, entry: YayaMediaAttachmentAuditEntry): Promise<void>;
 }

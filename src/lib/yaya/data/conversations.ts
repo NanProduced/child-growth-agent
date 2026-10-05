@@ -16,7 +16,8 @@ import type {
   YayaRenameConversationInput,
 } from "../storage-types";
 import type { Principal } from "../../accounts/types";
-import { projectConversationSummary } from "./projection";
+import { releaseConversationAttachmentRefs } from "./attachments";
+import { projectConversationSummary, projectConversationView } from "./projection";
 import { toConversationView, type YayaConversationRow } from "./rows";
 
 const CONVERSATION_COLUMNS =
@@ -105,8 +106,8 @@ export async function getConversationSummary(
 export async function renameConversation(
   client: TransactionClient,
   input: YayaRenameConversationInput,
-): Promise<YayaConversationView> {
-  const row = await lockOwnedConversation(client, input.owner_account_id, input.conversation_id);
+): Promise<YayaConversationSummaryView> {
+  const row = await lockOwnedConversation(client, input.principal.account_id, input.conversation_id);
   if (row.revision !== input.expected_revision) {
     throw new YayaDataError("revision_conflict", "会话已在其他位置更新，请刷新后重试。");
   }
@@ -120,22 +121,24 @@ export async function renameConversation(
             revision = revision + 1, updated_at = now()
       WHERE id = $1 AND account_id = $2
       RETURNING ${CONVERSATION_COLUMNS}`,
-    [input.conversation_id, input.owner_account_id, input.title, JSON.stringify(sourceFragments)],
+    [input.conversation_id, input.principal.account_id, input.title, JSON.stringify(sourceFragments)],
   );
   const next = updated.rows[0];
   if (!next) throw new YayaDataError("not_found", "会话不存在。");
-  return toConversationView(next);
+  return projectConversationView(client, input.principal, input.school_id, toConversationView(next));
 }
 
 /**
- * 删除会话：软删除会话与其消息，解除本会话消息的附件引用；
+ * 删除会话：软删除会话与其消息，只解除本会话消息的附件引用；
  * 观察/提案引用与其他会话消息引用保留；不物理删除任何附件对象。
+ * 返回的会话是**对外投影视图**（不含原始 title）。
  */
 export async function deleteConversation(
   client: TransactionClient,
   input: YayaDeleteConversationInput,
 ): Promise<YayaDeleteConversationResult> {
-  const row = await lockOwnedConversation(client, input.owner_account_id, input.conversation_id);
+  const ownerAccountId = input.principal.account_id;
+  const row = await lockOwnedConversation(client, ownerAccountId, input.conversation_id);
   if (row.revision !== input.expected_revision) {
     throw new YayaDataError("revision_conflict", "会话已在其他位置更新，请刷新后重试。");
   }
@@ -146,12 +149,16 @@ export async function deleteConversation(
     [input.conversation_id],
   );
   const detachedIds = detached.rows.map((entry) => entry.attachment_id);
+  const messageIds = await client.query<{ id: string }>(
+    "SELECT id FROM yaya_messages WHERE conversation_id = $1",
+    [input.conversation_id],
+  );
   const deleted = await client.query<YayaConversationRow>(
     `UPDATE yaya_conversations
         SET deleted_at = now(), revision = revision + 1, updated_at = now()
       WHERE id = $1 AND account_id = $2
       RETURNING ${CONVERSATION_COLUMNS}`,
-    [input.conversation_id, input.owner_account_id],
+    [input.conversation_id, ownerAccountId],
   );
   const next = deleted.rows[0];
   if (!next) throw new YayaDataError("not_found", "会话不存在。");
@@ -159,13 +166,11 @@ export async function deleteConversation(
     "UPDATE yaya_messages SET deleted_at = now() WHERE conversation_id = $1 AND deleted_at IS NULL",
     [input.conversation_id],
   );
-  await client.query(
-    `DELETE FROM yaya_attachment_refs r
-      USING yaya_messages m
-      WHERE r.record_kind = 'message' AND r.record_id = m.id AND m.conversation_id = $1
-        AND m.deleted_at IS NOT NULL`,
-    [input.conversation_id],
-  );
+  await releaseConversationAttachmentRefs(client, {
+    conversation_id: input.conversation_id,
+    message_ids: messageIds.rows.map((entry) => entry.id),
+    owner_account_id: ownerAccountId,
+  });
   let unreferenced: string[] = [];
   if (detachedIds.length > 0) {
     const remaining = await client.query<{ id: string }>(
@@ -177,7 +182,12 @@ export async function deleteConversation(
     unreferenced = remaining.rows.map((entry) => entry.id);
   }
   return {
-    conversation: toConversationView(next),
+    conversation: await projectConversationView(
+      client,
+      input.principal,
+      input.school_id,
+      toConversationView(next),
+    ),
     detached_attachment_ids: detachedIds,
     unreferenced_attachment_ids: unreferenced,
   };

@@ -19,11 +19,13 @@ import type {
   YayaOperationReceipt,
   YayaReceiptEffect,
   YayaReceiptStatus,
+  YayaSourceRef,
 } from "../types";
 import {
   YayaDataError,
   type YayaAttachmentStatus,
   type YayaItemResourceRef,
+  type YayaMediaAttachmentStatus,
   type YayaStoredFragment,
 } from "../storage-types";
 
@@ -358,6 +360,99 @@ export function validateMessageAttachments(
     }
   }
   return errors;
+}
+
+/* ------------------------------ 会话标题来源与脱敏 ------------------------------ */
+
+export type YayaConversationTitleSourceState = "valid" | "none" | "corrupt" | "missing";
+
+/**
+ * 标题来源状态：
+ * - valid：合法字符串数组（可能为空 → 由调用方按 none 区分）；
+ * - none：明确的无派生来源（手工标题）；
+ * - corrupt：非数组或含非字符串（损坏，必须按受限处理）；
+ * - missing：列缺失/无法核验（必须按受限处理，不得当作手工标题）。
+ */
+export function conversationTitleSourceState(value: unknown): YayaConversationTitleSourceState {
+  if (value === null || value === undefined) return "missing";
+  if (!Array.isArray(value)) return "corrupt";
+  if (value.length === 0) return "none";
+  if (value.some((entry) => typeof entry !== "string")) return "corrupt";
+  return "valid";
+}
+
+/** 非 full 片段一律不携带 provenance（label/ref/derived_from 可能是受限旁路） */
+export function redactProvenanceForVisibility(
+  visibility: "full" | "historical_read_only" | "hidden",
+  provenance: YayaSourceRef | null,
+): YayaSourceRef | null {
+  return visibility === "full" ? provenance : null;
+}
+
+/** 附件引用写入的稳定锁序：去重后按 attachment_id 排序（同一事务内统一顺序防死锁） */
+export function sortAttachmentLockIds(attachmentIds: readonly string[]): string[] {
+  return [...new Set(attachmentIds)].sort();
+}
+
+/* ------------------------------ 媒体端口状态与租约 ------------------------------ */
+
+export function mapMediaAttachmentStatus(
+  status: YayaAttachmentStatus,
+  deleteResult: "deleted" | "unknown" | null,
+): YayaMediaAttachmentStatus {
+  if (status === "deleting") return deleteResult === "unknown" ? "deletion_unknown" : "deleting";
+  return status;
+}
+
+export interface YayaMediaLeaseState {
+  status: YayaAttachmentStatus;
+  delete_result: "deleted" | "unknown" | null;
+  deletion_lease_id: string | null;
+}
+
+export type YayaMediaLeaseAction =
+  | { action: "begin"; lease_token: string }
+  | { action: "complete"; lease_token: string; outcome: "deleted" | "unknown" | "failed" };
+
+export type YayaMediaLeaseTransition =
+  | { ok: true; next: YayaMediaLeaseState }
+  | { ok: false; reason: "already_deleting" | "already_deleted" | "not_ready" | "lease_mismatch" };
+
+/**
+ * 媒体端口租约状态机（内部 deleting+unknown 映射 deletion_unknown）：
+ * - begin：ready 或 deletion_unknown 可取得租约；pending → not_ready；
+ *   deleting（租约持有中）→ already_deleting；deleted → already_deleted；
+ * - complete：必须持有匹配令牌；unknown 保留 deletion_unknown，绝不变回 ready；
+ *   failed（调用方确认未产生删除效果）才回 ready；deleted 落终态。
+ */
+export function mediaAttachmentLeaseTransition(
+  current: YayaMediaLeaseState,
+  action: YayaMediaLeaseAction,
+): YayaMediaLeaseTransition {
+  if (action.action === "begin") {
+    if (current.status === "deleted") return { ok: false, reason: "already_deleted" };
+    if (current.status === "deleting" && current.delete_result !== "unknown") {
+      return { ok: false, reason: "already_deleting" };
+    }
+    if (current.status === "pending") return { ok: false, reason: "not_ready" };
+    return {
+      ok: true,
+      next: { status: "deleting", delete_result: null, deletion_lease_id: action.lease_token },
+    };
+  }
+  if (current.status !== "deleting" || current.deletion_lease_id !== action.lease_token) {
+    return { ok: false, reason: "lease_mismatch" };
+  }
+  if (action.outcome === "deleted") {
+    return { ok: true, next: { status: "deleted", delete_result: "deleted", deletion_lease_id: null } };
+  }
+  if (action.outcome === "unknown") {
+    return {
+      ok: true,
+      next: { status: "deleting", delete_result: "unknown", deletion_lease_id: null },
+    };
+  }
+  return { ok: true, next: { status: "ready", delete_result: null, deletion_lease_id: null } };
 }
 
 /* ------------------------------ 回执行映射 ------------------------------ */

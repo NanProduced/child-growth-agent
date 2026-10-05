@@ -599,7 +599,9 @@ check("引用查询不完整时不得产生删除/回收候选", () => {
 });
 
 check("deleting 租约 CAS：先锁后删，未知结果不恢复 ready", () => {
-  assert.deepEqual(YAYA_ATTACHMENT_STATUSES, ["ready", "deleting", "deleted"]);
+  // R1：状态词表按媒体端口需要扩展 pending（deletion_unknown 由 deleting+unknown 映射，
+  // 不在内部状态数组中）；旧 CAS 断言全部保留，新语义由 check-data-r1.ts 覆盖。
+  assert.deepEqual(YAYA_ATTACHMENT_STATUSES, ["pending", "ready", "deleting", "deleted"]);
   const begin = attachmentLeaseTransition(
     { status: "ready", revision: 3, delete_result: null },
     { action: "begin", expected_revision: 3 }

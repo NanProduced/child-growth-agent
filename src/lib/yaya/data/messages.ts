@@ -9,12 +9,12 @@
  */
 import type { TransactionClient } from "@/storage/database/pg-client";
 import type { Principal } from "../../accounts/types";
-import { assertAttachmentsReadyForOwner } from "./attachment-guards";
+import { lockAttachmentsForReference } from "./attachments";
 import {
   checkConversationRevision,
   resolveClientMessageReplay,
 } from "./invariants";
-import { projectMessageRow } from "./projection";
+import { projectConversationView, projectMessageRow } from "./projection";
 import {
   parseStoredFragments,
   toConversationView,
@@ -25,6 +25,7 @@ import {
   YayaDataError,
   computeYayaMessageDigest,
   type YayaConversationMessagesView,
+  type YayaConversationSummaryView,
   type YayaListMessagesOptions,
   type YayaSaveMessageInput,
   type YayaSaveMessageResult,
@@ -103,14 +104,19 @@ export async function saveMessage(
         );
       }
       const message = await projectMessageRow(client, principal, schoolId, row);
-      return { message, conversation: toConversationView(conversation), replayed: true };
+      return {
+        message,
+        conversation: await projectConversationView(client, principal, schoolId, toConversationView(conversation)),
+        replayed: true,
+      };
     }
   }
 
   if (checkConversationRevision(conversation.revision, input.expected_conversation_revision) !== "ok") {
     throw new YayaDataError("revision_conflict", "会话已在其他位置更新，请刷新后重试。");
   }
-  await assertAttachmentsReadyForOwner(client, ownerAccountId, attachmentIds);
+  // 与所有引用写入共享附件行锁：锁后核 ready+owner，防止与删除租约交错
+  await lockAttachmentsForReference(client, ownerAccountId, attachmentIds);
 
   const inserted = await client.query<YayaMessageRow>(
     `INSERT INTO yaya_messages
@@ -149,7 +155,11 @@ export async function saveMessage(
   );
   const message = await projectMessageRow(client, principal, schoolId, row);
   const conversationRow = updated.rows[0] ?? conversation;
-  return { message, conversation: toConversationView(conversationRow), replayed: false };
+  return {
+    message,
+    conversation: await projectConversationView(client, principal, schoolId, toConversationView(conversationRow)),
+    replayed: false,
+  };
 }
 
 export async function listMessages(
@@ -179,5 +189,11 @@ export async function listMessages(
   for (const messageRow of ordered) {
     projected.push(await projectMessageRow(client, principal, schoolId, messageRow));
   }
-  return { conversation: toConversationView(row), messages: projected };
+  const conversationView: YayaConversationSummaryView = await projectConversationView(
+    client,
+    principal,
+    schoolId,
+    toConversationView(row),
+  );
+  return { conversation: conversationView, messages: projected };
 }

@@ -100,8 +100,8 @@ export async function GET(request: NextRequest) {
     if (proposalId === null || proposalId.trim() === "") {
       throw new YayaDataError("invalid_request", "缺少 proposal_id。");
     }
-    const proposal = await withPrivateRead(request, ({ client, principal }) =>
-      yayaDataRepository.getProposal(client, principal.account_id, proposalId),
+    const proposal = await withPrivateRead(request, ({ client, principal, schoolId }) =>
+      yayaDataRepository.getProjectedProposal(client, principal, schoolId, proposalId),
     );
     if (!proposal) throw new YayaDataError("not_found", "提案不存在。");
     return NextResponse.json({ proposal });

@@ -8,10 +8,12 @@
  *   未关联素材仅上传者；已关联按 record_kind + record_id 匹配，多引用取最佳投影。
  */
 import type { TransactionClient } from "@/storage/database/pg-client";
-import { authorizeAction } from "../../accounts/authorize";
+import { authorizeAction, isLegalAccessCombination } from "../../accounts/authorize";
 import type {
+  AccessAction,
   AccessDecision,
   AccessResource,
+  AccessResourceKind,
   Principal,
 } from "../../accounts/types";
 import {
@@ -22,7 +24,8 @@ import {
   type YayaMessageSourceRef,
   type YayaSourceAccess,
 } from "../types";
-import type { YayaItemResourceRef } from "../storage-types";
+import type { YayaItemResourceRef, YayaProposalItemAccess } from "../storage-types";
+import { parseResourceRef } from "./rows";
 
 /** 与 AUTH `resourceFacts` 相同的读取语义；缺失资源返回 null，不伪造事实 */
 export async function readAccessResourceFacts(
@@ -169,6 +172,62 @@ interface AttachmentRefRow {
   record_id: string;
 }
 
+interface ProposalItemAccessRow {
+  action: string;
+  resource: string;
+  resource_ref: unknown;
+  attachment_associations: unknown;
+}
+
+function associationIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const ids: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    if (typeof record.attachment_id === "string") ids.push(record.attachment_id);
+  }
+  return ids;
+}
+
+/**
+ * 提案条目的当前业务来源访问：
+ * - 资源引用/动作/资源组合缺失或损坏 → broken；
+ * - 当前事实读取失败/身份服务异常 → unavailable；
+ * - 撤销任教、转班等导致越权 → denied；
+ * - 历史只读投影 → historical_read_only（不得返回完整 payload）。
+ */
+export async function evaluateProposalItemAccess(
+  client: TransactionClient,
+  principal: Principal,
+  schoolId: string,
+  item: { action: string; resource: string; resource_ref: unknown },
+): Promise<YayaProposalItemAccess> {
+  const ref = parseResourceRef(item.resource_ref);
+  if (ref === null) return "broken";
+  const action = item.action as AccessAction;
+  const resource = item.resource as AccessResourceKind;
+  if (!isLegalAccessCombination(action, resource)) return "broken";
+  try {
+    const facts = await readAccessResourceFacts(client, ref, schoolId);
+    if (facts === null || facts.kind !== resource) return "broken";
+    const decision = authorizeAction(principal, action, facts);
+    if (decision.allowed) {
+      return decision.projection === "full" ? "full" : "historical_read_only";
+    }
+    if ("invalid_request" in decision) return "broken";
+    switch (decision.deny) {
+      case "identity_unavailable":
+      case "account_disabled":
+        return "unavailable";
+      default:
+        return "denied";
+    }
+  } catch {
+    return "unavailable";
+  }
+}
+
 /**
  * 聊天附件投影：未知/缺失授权一律拒绝；历史只读只返回元数据。
  * 查询失败（权限/存储服务不可用）返回 unavailable，不默认 full。
@@ -221,12 +280,25 @@ export async function evaluateAttachmentAccess(
           const decision = authorizeAction(principal, "observation.read", facts);
           if (decision.allowed) recordAccess.push({ record_kind: "observation", record_id: record.record_id, projection: decision.projection });
         } else if (record.record_kind === "proposal") {
-          const owner = await client.query<{ owner_account_id: string }>(
-            "SELECT owner_account_id FROM yaya_proposals WHERE id = $1",
+          // 提案引用必须按**当前业务来源**投影：仅凭“提案属于本人”不足以 full。
+          const proposalItems = await client.query<ProposalItemAccessRow>(
+            `SELECT action, resource, resource_ref, attachment_associations
+               FROM yaya_proposal_items WHERE proposal_id = $1`,
             [record.record_id],
           );
-          if (owner.rows[0]?.owner_account_id === principal.account_id) {
-            recordAccess.push({ record_kind: "proposal", record_id: record.record_id, projection: "full" });
+          for (const item of proposalItems.rows) {
+            if (!associationIds(item.attachment_associations).includes(attachmentId)) continue;
+            const access = await evaluateProposalItemAccess(client, principal, schoolId, item);
+            if (access === "full") {
+              recordAccess.push({ record_kind: "proposal", record_id: record.record_id, projection: "full" });
+            } else if (access === "historical_read_only") {
+              recordAccess.push({
+                record_kind: "proposal",
+                record_id: record.record_id,
+                projection: "historical_read_only",
+              });
+            }
+            break;
           }
         }
       }

@@ -9,12 +9,19 @@
  */
 import { randomUUID } from "node:crypto";
 import type { TransactionClient } from "@/storage/database/pg-client";
-import type { AccessDecision, AccessAction, AccessResourceKind } from "../../accounts/types";
+import type { AccessDecision, AccessAction, AccessResourceKind, Principal } from "../../accounts/types";
 import {
   authorizeAction,
   isLegalAccessCombination,
 } from "../../accounts/authorize";
-import { resourceTargetId, type YayaApprovalItemRef, type YayaAttachmentAssociation, type YayaToolAuth } from "../types";
+import {
+  resourceTargetId,
+  type YayaApprovalItemRef,
+  type YayaAttachmentAssociation,
+  type YayaAttachmentProjection,
+  type YayaDomainPayload,
+  type YayaToolAuth,
+} from "../types";
 import {
   YAYA_APPROVAL_TTL_SECONDS,
   YAYA_MAX_BATCH_ITEMS,
@@ -26,14 +33,21 @@ import {
   type YayaPreparedItemView,
   type YayaPreparedProposalView,
   type YayaPrepareProposalInput,
+  type YayaProjectedProposalItemView,
+  type YayaProjectedProposalView,
   type YayaRecordApprovalInput,
   type YayaRecordApprovalResult,
   type YayaRejectItemsInput,
 } from "../storage-types";
-import { readAccessResourceFacts } from "./access-facts";
-import { assertAttachmentsReadyForOwner } from "./attachment-guards";
-import { validatePrepareItems, verifyItemDigest } from "./invariants";
+import {
+  evaluateAttachmentAccess,
+  evaluateProposalItemAccess,
+  readAccessResourceFacts,
+} from "./access-facts";
+import { lockAttachmentsForReference } from "./attachments";
+import { validatePrepareItems } from "./invariants";
 import { isoRequired, parseResourceRef } from "./rows";
+import { toAttachmentProjection } from "./projection";
 
 const PROPOSAL_COLUMNS =
   "id, batch_id, conversation_id, owner_account_id, proposal_origin, auth, status, prepared_at, closed_at";
@@ -186,7 +200,7 @@ export async function prepareProposal(
   if (shapeErrors.length > 0) {
     throw new YayaDataError("invalid_request", "提案条目形状不合法。", { reasons: shapeErrors });
   }
-  await assertAttachmentsReadyForOwner(
+  await lockAttachmentsForReference(
     client,
     input.owner_account_id,
     input.items.flatMap((item) => item.attachment_associations.map((entry) => entry.attachment_id)),
@@ -269,6 +283,67 @@ export async function getProposal(
   const row = result.rows[0];
   if (!row) return null;
   return toProposalView(row, await loadProposalItems(client, proposalId));
+}
+
+/**
+ * 提案对外投影：owner 边界之后，逐项按**当前**业务来源授权投影。
+ * 非 full 的项 `payload=null`；图片引用按业务记录/上传者口径投影（含历史只读元数据）。
+ * 内部执行读取仍走 getProposal，不用本函数。
+ */
+export async function getProjectedProposal(
+  client: TransactionClient,
+  principal: Principal,
+  schoolId: string,
+  proposalId: string,
+): Promise<YayaProjectedProposalView | null> {
+  const result = await client.query<ProposalRow>(
+    `SELECT ${PROPOSAL_COLUMNS} FROM yaya_proposals WHERE id = $1 AND owner_account_id = $2`,
+    [proposalId, principal.account_id],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  const items = await loadProposalItems(client, proposalId);
+  const projectedItems: YayaProjectedProposalItemView[] = [];
+  const attachmentIds = new Set<string>();
+  for (const item of items) {
+    const ref = parseResourceRef(item.resource_ref);
+    if (ref === null) throw new YayaDataError("server_error", "提案资源引用损坏。");
+    const associations = parseAssociations(item.attachment_associations);
+    for (const association of associations) attachmentIds.add(association.attachment_id);
+    const access = await evaluateProposalItemAccess(client, principal, schoolId, {
+      action: item.action,
+      resource: item.resource,
+      resource_ref: item.resource_ref,
+    });
+    projectedItems.push({
+      item_key: item.item_key,
+      operation_id: item.operation_id,
+      target_id: item.target_id,
+      action: item.action as AccessAction,
+      resource: item.resource as AccessResourceKind,
+      resource_ref: ref,
+      content_digest: item.content_digest,
+      attachment_associations: associations,
+      business_revision: item.business_revision,
+      status: item.status,
+      access,
+      payload: access === "full" ? (item.payload as YayaDomainPayload) : null,
+    });
+  }
+  const evaluated = await evaluateAttachmentAccess(client, principal, schoolId, [...attachmentIds]);
+  const attachments: YayaAttachmentProjection[] = evaluated.map(toAttachmentProjection);
+  return {
+    proposal_id: row.id,
+    batch_id: row.batch_id,
+    conversation_id: row.conversation_id,
+    owner_account_id: row.owner_account_id,
+    proposal_origin: row.proposal_origin,
+    auth: parseToolAuth(row.auth),
+    status: row.status,
+    prepared_at: isoRequired(row.prepared_at),
+    items: projectedItems,
+    attachments,
+  };
 }
 
 function approvalDenyReason(decision: AccessDecision): string | null {
@@ -380,7 +455,7 @@ export async function recordApproval(
       continue;
     }
     try {
-      await assertAttachmentsReadyForOwner(
+      await lockAttachmentsForReference(
         client,
         input.principal.account_id,
         associations.map((entry) => entry.attachment_id),

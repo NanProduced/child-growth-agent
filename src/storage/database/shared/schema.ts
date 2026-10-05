@@ -464,15 +464,23 @@ export const yayaAttachments = pgTable(
       { onDelete: "set null" },
     ),
     object_key: text("object_key").notNull(),
+    thumbnail_key: text("thumbnail_key"),
+    model_key: text("model_key"),
     media_type: varchar("media_type", { length: 64 }).notNull(),
     byte_size: bigint("byte_size", { mode: "number" }).notNull(),
-    checksum: varchar("checksum", { length: 128 }).notNull(),
+    checksum_sha256: varchar("checksum_sha256", { length: 128 }).notNull(),
+    thumbnail_checksum: varchar("thumbnail_checksum", { length: 128 }),
+    model_checksum: varchar("model_checksum", { length: 128 }),
+    width: integer("width"),
+    height: integer("height"),
+    client_upload_id: varchar("client_upload_id", { length: 128 }),
     source_kind: varchar("source_kind", { length: 24 }).notNull(),
     derived_from: varchar("derived_from", { length: 64 }),
     metadata: jsonb("metadata"),
     status: varchar("status", { length: 16 }).notNull().default("ready"),
     revision: integer("revision").notNull().default(1),
     delete_result: varchar("delete_result", { length: 16 }),
+    deletion_lease_id: varchar("deletion_lease_id", { length: 64 }),
     deleting_started_at: timestamp("deleting_started_at", { withTimezone: true }),
     deleted_at: timestamp("deleted_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -480,16 +488,23 @@ export const yayaAttachments = pgTable(
   },
   (t) => [
     uniqueIndex("yaya_attachments_object_key_unique").on(t.object_key),
+    uniqueIndex("yaya_attachments_client_upload_unique")
+      .on(t.uploader_account_id, t.client_upload_id)
+      .where(sql`client_upload_id IS NOT NULL`),
     index("yaya_attachments_uploader_idx").on(t.uploader_account_id, t.created_at.desc()),
     check(
       "yaya_attachments_status_check",
-      sql`${t.status} IN ('ready', 'deleting', 'deleted')`,
+      sql`${t.status} IN ('pending', 'ready', 'deleting', 'deleted')`,
     ),
     check(
       "yaya_attachments_delete_result_check",
       sql`${t.delete_result} IS NULL OR ${t.delete_result} IN ('deleted', 'unknown')`,
     ),
     check("yaya_attachments_size_check", sql`${t.byte_size} >= 0`),
+    check(
+      "yaya_attachments_dimensions_check",
+      sql`(${t.width} IS NULL OR ${t.width} >= 0) AND (${t.height} IS NULL OR ${t.height} >= 0)`,
+    ),
   ],
 );
 
@@ -541,13 +556,16 @@ export const yayaAttachmentAppends = pgTable(
     id: varchar("id", { length: 36 })
       .primaryKey()
       .default(sql`gen_random_uuid()`),
-    attachment_id: varchar("attachment_id", { length: 36 })
-      .notNull()
-      .references(() => yayaAttachments.id, { onDelete: "restrict" }),
+    audit_id: varchar("audit_id", { length: 36 }),
+    action: varchar("action", { length: 40 }),
+    attachment_id: varchar("attachment_id", { length: 36 }).references(() => yayaAttachments.id, {
+      onDelete: "restrict",
+    }),
+    attachment_ids: jsonb("attachment_ids"),
     observation_id: varchar("observation_id", { length: 36 })
       .notNull()
       .references(() => observations.id, { onDelete: "restrict" }),
-    attachment_revision: integer("attachment_revision").notNull(),
+    attachment_revision: integer("attachment_revision"),
     appended_by_account_id: varchar("appended_by_account_id", { length: 36 }).references(
       () => appAccounts.id,
       { onDelete: "set null" },
@@ -555,6 +573,8 @@ export const yayaAttachmentAppends = pgTable(
     approval_id: varchar("approval_id", { length: 36 }).references(() => yayaApprovals.id, {
       onDelete: "set null",
     }),
+    source_confirmed_at: timestamp("source_confirmed_at", { withTimezone: true }),
+    request_id: varchar("request_id", { length: 128 }),
     note: text("note"),
     appended_at: timestamp("appended_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -565,6 +585,16 @@ export const yayaAttachmentAppends = pgTable(
       t.attachment_revision,
     ),
     index("yaya_attachment_appends_observation_idx").on(t.observation_id, t.appended_at),
-    check("yaya_attachment_appends_revision_check", sql`${t.attachment_revision} >= 1`),
+    index("yaya_attachment_appends_audit_idx")
+      .on(t.audit_id)
+      .where(sql`audit_id IS NOT NULL`),
+    check(
+      "yaya_attachment_appends_revision_check",
+      sql`${t.attachment_revision} IS NULL OR ${t.attachment_revision} >= 1`,
+    ),
+    check(
+      "yaya_attachment_appends_action_check",
+      sql`${t.action} IS NULL OR ${t.action} IN ('attach_observation_images', 'create_observation_attachments')`,
+    ),
   ],
 );

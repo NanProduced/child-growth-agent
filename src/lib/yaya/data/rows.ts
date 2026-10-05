@@ -11,6 +11,7 @@ import type {
 } from "../storage-types";
 import { YayaDataError } from "../storage-types";
 import type { YayaMessageExecutionState, YayaMessageKind, YayaMessageRole } from "../storage-types";
+import { conversationTitleSourceState } from "./invariants";
 
 export function iso(value: Date | string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
@@ -48,12 +49,18 @@ export function parseStringArray(value: unknown): string[] | null {
 }
 
 export function toConversationView(row: YayaConversationRow): YayaConversationView {
-  const refs = parseStringArray(row.title_source_fragments);
+  const state = conversationTitleSourceState(row.title_source_fragments);
+  const refs =
+    state === "valid"
+      ? [...(row.title_source_fragments as readonly string[])]
+      : state === "none"
+        ? []
+        : null;
   return {
     conversation_id: row.id,
     owner_account_id: row.account_id,
     title: row.title,
-    title_source_fragments: refs ?? [],
+    title_source_fragments: refs,
     revision: row.revision,
     created_at: isoRequired(row.created_at),
     updated_at: isoRequired(row.updated_at),

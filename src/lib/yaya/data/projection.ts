@@ -10,18 +10,21 @@ import type { Principal } from "../../accounts/types";
 import {
   projectChatMessage,
   projectConversationTitle,
+  type YayaAttachmentProjection,
   type YayaChatMessageProjection,
   type YayaChatMessageRef,
+  type YayaEvaluatedAttachment,
   type YayaFragmentProjection,
 } from "../types";
 import type {
   YayaConversationSummaryView,
+  YayaConversationView,
   YayaProjectedFragmentView,
   YayaProjectedMessageView,
   YayaStoredFragment,
 } from "../storage-types";
 import { evaluateAttachmentAccess, evaluateFragmentSources } from "./access-facts";
-import { projectStoredMessageText } from "./invariants";
+import { projectStoredMessageText, redactProvenanceForVisibility } from "./invariants";
 import {
   isoRequired,
   parseStoredFragments,
@@ -30,6 +33,42 @@ import {
   type YayaConversationRow,
   type YayaMessageRow,
 } from "./rows";
+
+/** 附件评估结论 → 冻结附件投影 DTO（与聊天附件投影同一口径） */
+export function toAttachmentProjection(evaluation: YayaEvaluatedAttachment): YayaAttachmentProjection {
+  switch (evaluation.access) {
+    case "full":
+      return { attachment_id: evaluation.attachment_id, readable: true, metadata_only: false, reason: "ok" };
+    case "historical_read_only":
+      return {
+        attachment_id: evaluation.attachment_id,
+        readable: false,
+        metadata_only: true,
+        reason: "metadata_only_historical",
+      };
+    case "denied":
+      return {
+        attachment_id: evaluation.attachment_id,
+        readable: false,
+        metadata_only: false,
+        reason: "source_denied",
+      };
+    case "unavailable":
+      return {
+        attachment_id: evaluation.attachment_id,
+        readable: false,
+        metadata_only: false,
+        reason: "source_unavailable",
+      };
+    case "broken":
+      return {
+        attachment_id: evaluation.attachment_id,
+        readable: false,
+        metadata_only: false,
+        reason: "source_broken",
+      };
+  }
+}
 
 async function projectFragments(
   client: TransactionClient,
@@ -70,12 +109,13 @@ async function projectFragments(
       reason: "evaluation_missing",
     };
     const entry = visible[index];
+    const visibility = entry?.visibility ?? "hidden";
     return {
       fragment_id: fragment.fragment_id,
-      visibility: entry?.visibility ?? "hidden",
+      visibility,
       reason: fragmentProjection.reason,
       text: entry?.text ?? null,
-      provenance: fragment.provenance,
+      provenance: redactProvenanceForVisibility(visibility, fragment.provenance),
       independently_readable: fragment.independently_readable,
     };
   });
@@ -154,21 +194,35 @@ export async function projectMessageRow(
 }
 
 /**
- * 会话标题投影：标题引用的来源片段任何非 full（或缺失）都回退通用标题，
+ * 会话标题投影：标题引用的来源片段任何非 full（或缺失/损坏/无法核验）都回退通用标题，
  * 不把受限正文事实经标题旁路泄漏。
+ *
+ * 返回的是**对外投影视图**：不含原始 `title` / `title_source_fragments`，
+ * 调用方不得再把内部存储视图拼接进响应。
  */
-export async function projectConversationSummary(
+export async function projectConversationView(
   client: TransactionClient,
   principal: Principal,
   schoolId: string,
-  row: YayaConversationRow,
+  view: YayaConversationView,
 ): Promise<YayaConversationSummaryView> {
-  const view = toConversationView(row);
+  const base = {
+    conversation_id: view.conversation_id,
+    owner_account_id: view.owner_account_id,
+    revision: view.revision,
+    created_at: view.created_at,
+    updated_at: view.updated_at,
+    deleted_at: view.deleted_at,
+  };
   if (view.title === null) {
-    return { ...view, projected_title: "未命名会话", title_restricted: false };
+    return { ...base, projected_title: "未命名会话", title_restricted: false };
+  }
+  if (view.title_source_fragments === null) {
+    // 损坏/无法核验的来源：不得当作手工标题放行
+    return { ...base, projected_title: "受限会话", title_restricted: true };
   }
   if (view.title_source_fragments.length === 0) {
-    return { ...view, projected_title: view.title, title_restricted: false };
+    return { ...base, projected_title: view.title, title_restricted: false };
   }
   const messages = await client.query<Pick<YayaMessageRow, "id" | "fragments" | "owner_account_id" | "conversation_id">>(
     `SELECT id, fragments, owner_account_id, conversation_id FROM yaya_messages
@@ -212,5 +266,14 @@ export async function projectConversationSummary(
     projections,
     "受限会话",
   );
-  return { ...view, projected_title: title.title, title_restricted: title.restricted };
+  return { ...base, projected_title: title.title, title_restricted: title.restricted };
+}
+
+export async function projectConversationSummary(
+  client: TransactionClient,
+  principal: Principal,
+  schoolId: string,
+  row: YayaConversationRow,
+): Promise<YayaConversationSummaryView> {
+  return projectConversationView(client, principal, schoolId, toConversationView(row));
 }
