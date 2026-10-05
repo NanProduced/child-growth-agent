@@ -75,6 +75,9 @@ async function buildFacts(
     }
     throw error;
   }
+  if (!referenceFacts.reference_query_complete) {
+    throw new MediaError("reference_query_incomplete", "附件引用关系不完整，已保守拒绝读取。");
+  }
   const attachedRecords: YayaImageBusinessRef[] = [
     ...referenceFacts.observation_refs.map((ref) => ({
       record_kind: "observation" as const,

@@ -24,6 +24,8 @@ export const MEDIA_ERROR_CODES = [
   "attachment_gone",
   "attachment_deleting",
   "attachment_referenced",
+  "attachment_conflict",
+  "idempotency_conflict",
   "deletion_in_progress",
   "reference_query_incomplete",
   "revision_conflict",
@@ -33,6 +35,8 @@ export const MEDIA_ERROR_CODES = [
   "forbidden",
   "metadata_only",
   "upload_incomplete",
+  "upload_unknown",
+  "compensation_unknown",
   "bucket_identity_not_isolated",
 ] as const;
 
@@ -57,6 +61,8 @@ const MEDIA_ERROR_HTTP_STATUS: Record<MediaErrorCode, number> = {
   attachment_gone: 410,
   attachment_deleting: 409,
   attachment_referenced: 409,
+  attachment_conflict: 409,
+  idempotency_conflict: 409,
   deletion_in_progress: 409,
   reference_query_incomplete: 503,
   revision_conflict: 409,
@@ -66,6 +72,8 @@ const MEDIA_ERROR_HTTP_STATUS: Record<MediaErrorCode, number> = {
   forbidden: 403,
   metadata_only: 403,
   upload_incomplete: 409,
+  upload_unknown: 503,
+  compensation_unknown: 503,
   bucket_identity_not_isolated: 500,
 };
 
@@ -73,6 +81,8 @@ export class MediaError extends Error {
   constructor(
     public readonly code: MediaErrorCode,
     message: string,
+    /** 内部可核验细节（如未知上传的 attachment_id）；不保证对外暴露 */
+    public readonly details: Readonly<Record<string, unknown>> | null = null,
   ) {
     super(message);
     this.name = "MediaError";

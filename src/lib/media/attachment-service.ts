@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import { authorizeAction } from "../accounts/authorize";
 import { AccountsError } from "../accounts/errors";
 import type { Principal } from "../accounts/types";
@@ -10,13 +8,15 @@ import type { AttachmentRecord } from "./metadata-port";
 import type { MediaServiceDeps } from "./runtime";
 
 /**
- * MEDIA1 附件与业务记录的关联。
+ * MEDIA1 附件与业务记录的关联（R1：expected_revision 与来源前提进入共同原子边界）。
  *
  * 冻结口径：
  * - 创建观察的附图必须由业务保存在**同一事务**内调用 associateObservationImagesOnCreate
- *   （元数据端口由调用方绑定到该事务；本服务不另开连接、不独立提交）；
- * - 归档后追加资料走 appendObservationImages：核宿主幼儿 observation.write/child、
- *   观察已确认、source_confirmed_at、附件 revision 与图片所有权；单独审计；
+ *   （元数据端口绑定到该事务；不另开连接、不独立提交）；创建关联不递增附件 revision、
+ *   不写追加审计（DATA1 创建路径同样只有引用写入）；
+ * - 归档后追加走 appendObservationImages：授权/确认来源/所有权在服务层守门后，
+ *   `expected_attachment_revision`、宿主确认来源与审计信息一并交给端口的
+ *   **单一原子边界**（引用 + 观察修订 + 审计全有或全无），服务层不先读后写；
  * - 两者都不改 raw_text/confirmed_content，也不点亮指南证据（本模块无这些参数）；
  * - 管理员只读：authorizeAction 对 observation.write 一律 forbidden_role。
  */
@@ -66,6 +66,7 @@ function assertImageIds(imageIds: readonly string[]): void {
   }
 }
 
+/** 服务层所有权/可用性预检（权威判定在端口原子边界内再次执行） */
 async function assertReadyAndOwned(
   deps: MediaServiceDeps,
   actorAccountId: string,
@@ -99,26 +100,16 @@ export interface CreateObservationAttachmentInput {
 export async function associateObservationImagesOnCreate(
   deps: MediaServiceDeps,
   input: CreateObservationAttachmentInput,
-): Promise<{ attachment_revision: number; attached: readonly string[] }> {
+): Promise<{ attached: readonly string[] }> {
   assertImageIds(input.image_ids);
   assertHostChildWrite(input.principal, input.host);
   await assertReadyAndOwned(deps, input.principal.account_id, input.image_ids);
-  const result = await deps.metadata.addObservationReferences({
+  await deps.metadata.linkObservationReferences({
     observation_id: input.host.observation_id,
     attachment_ids: input.image_ids,
     actor_account_id: input.principal.account_id,
   });
-  await deps.metadata.appendAttachmentAudit({
-    audit_id: randomUUID(),
-    action: "create_observation_attachments",
-    observation_id: input.host.observation_id,
-    attachment_ids: [...input.image_ids],
-    actor_account_id: input.principal.account_id,
-    source_confirmed_at: null,
-    request_id: input.request_id,
-    recorded_at: new Date().toISOString(),
-  });
-  return { attachment_revision: result.attachment_revision, attached: [...input.image_ids] };
+  return { attached: [...input.image_ids] };
 }
 
 export interface AppendObservationImagesInput {
@@ -128,10 +119,13 @@ export interface AppendObservationImagesInput {
   expected_attachment_revision: number;
   source_confirmed_at: string | null;
   request_id: string | null;
+  /** 批准来源（本轮教师直接追加为 null；TOOLS1 批准执行时传入） */
+  approval_id?: string | null;
 }
 
 /**
  * 归档后追加资料附件（attach_observation_images）：不改原文/确认稿，不自动成为指南证据。
+ * expected_revision 与来源前提进入端口共同原子边界，不在服务层先读后比较。
  */
 export async function appendObservationImages(
   deps: MediaServiceDeps,
@@ -151,25 +145,15 @@ export async function appendObservationImages(
       "观察确认时间与提交的来源时间不一致，请刷新后重新核对。",
     );
   }
-  const currentRevision = await deps.metadata.getObservationAttachmentRevision(input.host.observation_id);
-  if (currentRevision !== input.expected_attachment_revision) {
-    throw new MediaError("revision_conflict", "附件已在别处更新，请刷新后重新核对。");
-  }
   await assertReadyAndOwned(deps, input.principal.account_id, input.image_ids);
-  const result = await deps.metadata.addObservationReferences({
+  const result = await deps.metadata.appendObservationAttachments({
     observation_id: input.host.observation_id,
     attachment_ids: input.image_ids,
-    actor_account_id: input.principal.account_id,
-  });
-  await deps.metadata.appendAttachmentAudit({
-    audit_id: randomUUID(),
-    action: "attach_observation_images",
-    observation_id: input.host.observation_id,
-    attachment_ids: [...input.image_ids],
+    expected_attachment_revision: input.expected_attachment_revision,
     actor_account_id: input.principal.account_id,
     source_confirmed_at: input.source_confirmed_at,
     request_id: input.request_id,
-    recorded_at: new Date().toISOString(),
+    approval_id: input.approval_id ?? null,
   });
-  return { attachment_revision: result.attachment_revision, attached: [...input.image_ids] };
+  return { attachment_revision: result.attachment_revision, attached: [...result.appended] };
 }

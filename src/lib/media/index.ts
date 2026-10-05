@@ -2,7 +2,8 @@
  * MEDIA1 模块出口。
  *
  * 装配要点（DATA1/整合者）：
- * - 实现 AttachmentMetadataPort（真实 repository，DDL 由 DATA1 拥有）；
+ * - 实现 AttachmentMetadataPort v2（真实 repository，DDL 由 DATA1 拥有；
+ *   逐方法映射与缺口见 docs/yaya-v1/media1-r1-delivery.md）；
  * - 用 createObjectStore(loadMediaStorageConfig()) 取环境对应的对象存储；
  * - bindMediaRuntime({ metadata, store, environment }) 后路由即生效；
  * - 创建观察事务内调用 associateObservationImagesOnCreate（端口绑定同一事务）。
@@ -47,17 +48,22 @@ export {
 } from "./image-processing";
 export {
   ATTACHMENT_STATUSES,
+  type AppendObservationAttachmentsInput,
+  type AppendObservationAttachmentsResult,
   type AttachmentAuditEntry,
+  type AttachmentDeleteResult,
   type AttachmentMetadataPort,
   type AttachmentRecord,
-  type AttachmentReference,
   type AttachmentReferenceFacts,
   type AttachmentStatus,
   type DeletionLeaseResult,
+  type RegisterAttachmentInput,
 } from "./metadata-port";
-export { MemoryAttachmentMetadata } from "./metadata-memory";
+export { MemoryAttachmentMetadata, type MemoryMetadataFailpoint } from "./metadata-memory";
 export { bindMediaRuntime, createLocalMediaRuntime, mediaRuntimeOrThrow, type MediaServiceDeps } from "./runtime";
 export {
+  attachmentRecordIsComplete,
+  deterministicAttachmentId,
   toAttachmentView,
   uploadImages,
   type UploadAttachmentView,
@@ -85,7 +91,6 @@ export {
 } from "./attachment-service";
 export {
   recycleAttachment,
-  releaseConversationReferences,
   type RecycleObjectOutcome,
   type RecycleResult,
 } from "./retention-service";

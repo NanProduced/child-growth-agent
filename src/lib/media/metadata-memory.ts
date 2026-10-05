@@ -1,262 +1,426 @@
+import { randomUUID } from "node:crypto";
+
 import type { ObservationStatus } from "../types";
 import { MediaError } from "./errors";
 import {
+  type AppendObservationAttachmentsInput,
+  type AppendObservationAttachmentsResult,
   type AttachmentAuditEntry,
   type AttachmentMetadataPort,
   type AttachmentRecord,
-  type AttachmentReference,
   type AttachmentReferenceFacts,
+  type AttachmentStatus,
   type DeletionLeaseResult,
   type ObservationReferencesResult,
+  type RegisterAttachmentInput,
 } from "./metadata-port";
-import { newLeaseToken } from "./object-store";
 
 /**
  * 附件元数据的进程内替身（仅用于可运行验收/开发替身，不是生产 repository）。
  *
- * 与真实 DATA1 repository 保持同一冻结语义：状态机、CAS 租约、引用完整性、
- * 业务事务内递增 revision、失败点注入（验证上传/处理/元数据失败补偿路径）。
- * 生产接入点见 MediaRuntime：DATA1 交付后由整合者替换，本类不得作为正式闭环。
+ * 与 DATA1 已发布 repository 保持同一冻结语义：
+ * - ready/deleting/deleted + revision CAS + delete_result（未知删除 = deleting+unknown）；
+ * - beginDeletionLease 在**同一原子边界**重查完整引用集合再 CAS（引用新增与租约互斥）；
+ * - appendObservationAttachments 先整体校验再整体写入（不产生半成功），
+ *   引用、观察修订与审计同一原子边界；
+ * - registerAttachment 单次原子登记，字段缺失/空白一律拒绝（不默认 ready、不伪造 checksum）；
+ * - 失败点注入覆盖“提交前失败 / 提交后响应丢失 / 迟到提交 / 读回失败”等路径。
+ * 生产接入点见 MediaRuntime：DATA1 repository 由整合者替换本类。
  */
 
-type Failpoint =
-  | "insertPending"
-  | "markReady"
-  | "removePending"
-  | "addObservationReferences"
+export type MemoryMetadataFailpoint =
+  | "get"
+  | "register_before"
+  | "register_after_commit"
+  | "register_late_commit"
   | "getReferenceFacts"
   | "beginDeletionLease"
-  | "completeDeletion";
+  | "commitDeletion"
+  | "failDeletion"
+  | "linkObservationReferences"
+  | "appendObservationAttachments";
 
-function refKey(ref: AttachmentReference): string {
+interface StoredReference {
+  attachment_id: string;
+  ref_kind: "observation" | "proposal" | "message";
+  ref_id: string;
+  conversation_id: string | null;
+}
+
+function refKey(ref: StoredReference): string {
   return `${ref.ref_kind}\u0000${ref.ref_id}\u0000${ref.attachment_id}`;
 }
 
+function assertRegisterInput(input: RegisterAttachmentInput): void {
+  const blank = (value: string) => typeof value !== "string" || value.trim() === "";
+  if (
+    blank(input.attachment_id) ||
+    blank(input.owner_account_id) ||
+    blank(input.object_key) ||
+    blank(input.thumbnail_key) ||
+    blank(input.model_key) ||
+    blank(input.checksum_sha256) ||
+    blank(input.thumbnail_checksum) ||
+    blank(input.model_checksum) ||
+    blank(input.source_checksum) ||
+    !Number.isFinite(input.byte_size) ||
+    input.byte_size < 0 ||
+    !Number.isInteger(input.width) ||
+    !Number.isInteger(input.height) ||
+    input.width <= 0 ||
+    input.height <= 0
+  ) {
+    throw new MediaError("invalid_request", "附件登记信息不完整，拒绝登记。");
+  }
+}
+
 export class MemoryAttachmentMetadata implements AttachmentMetadataPort {
-  private readonly attachments = new Map<string, AttachmentRecord>();
-  private readonly clientIndex = new Map<string, string>();
-  private readonly references = new Map<string, AttachmentReference>();
+  private readonly records = new Map<string, AttachmentRecord>();
+  private readonly objectKeys = new Set<string>();
+  private readonly references = new Map<string, StoredReference>();
   private readonly observationRevisions = new Map<string, number>();
   private readonly observationStatuses = new Map<string, ObservationStatus>();
   private readonly conversationOwners = new Map<string, string>();
   private readonly auditEntries: AttachmentAuditEntry[] = [];
-  private readonly failpoints = new Set<Failpoint>();
+  private readonly failpoints = new Set<MemoryMetadataFailpoint>();
+  private lateCommit: Promise<void> | null = null;
 
-  /** 测试辅助：让下一个指定操作抛“元数据不可用”，验证补偿/保守路径 */
-  failNext(operation: Failpoint): void {
+  /** 测试辅助：让下一个指定操作按语义失败 */
+  failNext(operation: MemoryMetadataFailpoint): void {
     this.failpoints.add(operation);
   }
 
-  /** 测试辅助：登记会话归属，验证“只解除自己的引用” */
-  seedConversation(conversation_id: string, owner_account_id: string): void {
-    this.conversationOwners.set(conversation_id, owner_account_id);
+  /** 测试辅助：清空未消费的失败点，避免跨场景污染 */
+  clearFailpoints(): void {
+    this.failpoints.clear();
   }
 
-  /** 测试辅助：登记观察当前状态（引用事实投影用；未登记的按 draft 保守处理） */
+  /** 测试辅助：在引用事实返回后触发（模拟“查询与租约之间”的并发写入） */
+  onNextReferenceFacts: (() => void) | null = null;
+
+  /** 测试辅助：等待迟到提交落库（register_late_commit） */
+  async settleLateCommit(): Promise<void> {
+    if (this.lateCommit) await this.lateCommit;
+  }
+
   seedObservation(observation_id: string, status: ObservationStatus): void {
     this.observationStatuses.set(observation_id, status);
   }
 
-  /** 测试辅助：直接登记引用（消息/提案引用由 DATA1 的会话/提案流程写入） */
-  seedReference(ref: AttachmentReference): void {
+  seedConversation(conversation_id: string, owner_account_id: string): void {
+    this.conversationOwners.set(conversation_id, owner_account_id);
+  }
+
+  /** 测试辅助：直接登记引用（消息/提案引用由 DATA1 会话/提案流程写入） */
+  seedReference(ref: StoredReference): void {
     this.references.set(refKey(ref), { ...ref });
   }
 
+  /** 测试辅助：模拟 DATA deleteConversation 的“解除本会话消息引用”步骤（owner 校验） */
+  detachConversationReferences(conversation_id: string, owner_account_id: string): number {
+    const owner = this.conversationOwners.get(conversation_id);
+    if (owner === undefined || owner !== owner_account_id) {
+      throw new MediaError("not_owner", "只能解除自己会话中的附件引用。");
+    }
+    let detached = 0;
+    for (const [key, ref] of [...this.references.entries()]) {
+      if (ref.ref_kind === "message" && ref.conversation_id === conversation_id) {
+        this.references.delete(key);
+        detached += 1;
+      }
+    }
+    return detached;
+  }
+
   audits(): readonly AttachmentAuditEntry[] {
-    return this.auditEntries.map((entry) => ({ ...entry, attachment_ids: [...entry.attachment_ids] }));
+    return this.auditEntries.map((entry) => ({ ...entry }));
   }
 
   countAttachments(): number {
-    return this.attachments.size;
+    return this.records.size;
   }
 
   countReferences(): number {
     return this.references.size;
   }
 
-  private consumeFailpoint(operation: Failpoint): void {
+  private consumeFailpoint(operation: MemoryMetadataFailpoint): void {
     if (this.failpoints.delete(operation)) {
       throw new MediaError("metadata_unavailable", "附件元数据服务暂时不可用，请稍后重试。");
     }
   }
 
-  private clientKey(owner: string, clientUploadId: string): string {
-    return `${owner}\u0000${clientUploadId}`;
-  }
-
-  async findByClientUploadId(
-    owner_account_id: string,
-    client_upload_id: string,
-  ): Promise<AttachmentRecord | null> {
-    const id = this.clientIndex.get(this.clientKey(owner_account_id, client_upload_id));
-    if (id === undefined) return null;
-    const record = this.attachments.get(id);
-    return record ? { ...record } : null;
-  }
-
-  async insertPending(record: AttachmentRecord): Promise<void> {
-    this.consumeFailpoint("insertPending");
-    if (record.status !== "pending") {
-      throw new MediaError("invalid_request", "新增附件记录必须是 pending 状态。");
+  private requireReady(attachment_id: string, actor_account_id: string): AttachmentRecord {
+    const record = this.records.get(attachment_id);
+    if (!record) throw new MediaError("attachment_not_found", `附件不存在：${attachment_id}`);
+    if (record.owner_account_id !== actor_account_id) {
+      throw new MediaError("not_owner", "只能关联自己上传的图片。");
     }
-    if (this.attachments.has(record.attachment_id)) {
-      throw new MediaError("object_conflict", "附件标识已存在，拒绝覆盖。");
+    if (record.status === "deleting") {
+      throw new MediaError("attachment_deleting", "附件正在回收，不能新增引用。");
     }
-    if (record.client_upload_id !== null) {
-      const key = this.clientKey(record.owner_account_id, record.client_upload_id);
-      if (this.clientIndex.has(key)) {
-        throw new MediaError("object_conflict", "重复的客户端上传标识，拒绝覆盖。");
-      }
-      this.clientIndex.set(key, record.attachment_id);
+    if (record.status !== "ready") {
+      throw new MediaError("attachment_gone", "附件不可用，不能新增引用。");
     }
-    this.attachments.set(record.attachment_id, { ...record });
-  }
-
-  async markReady(attachment_id: string): Promise<AttachmentRecord> {
-    this.consumeFailpoint("markReady");
-    const record = this.attachments.get(attachment_id);
-    if (!record) throw new MediaError("attachment_not_found", "附件不存在。");
-    if (record.status !== "pending") {
-      throw new MediaError("metadata_conflict", "附件状态不允许标记为可用。");
-    }
-    record.status = "ready";
-    return { ...record };
-  }
-
-  async removePending(attachment_id: string): Promise<boolean> {
-    this.consumeFailpoint("removePending");
-    const record = this.attachments.get(attachment_id);
-    if (!record || record.status !== "pending") return false;
-    this.attachments.delete(attachment_id);
-    if (record.client_upload_id !== null) {
-      this.clientIndex.delete(this.clientKey(record.owner_account_id, record.client_upload_id));
-    }
-    return true;
+    return record;
   }
 
   async get(attachment_id: string): Promise<AttachmentRecord | null> {
-    const record = this.attachments.get(attachment_id);
+    this.consumeFailpoint("get");
+    const record = this.records.get(attachment_id);
     return record ? { ...record } : null;
   }
 
-  async addObservationReferences(input: {
-    observation_id: string;
-    attachment_ids: readonly string[];
-    actor_account_id: string;
-  }): Promise<ObservationReferencesResult> {
-    this.consumeFailpoint("addObservationReferences");
-    let added = 0;
-    for (const attachmentId of input.attachment_ids) {
-      const record = this.attachments.get(attachmentId);
-      if (!record) throw new MediaError("attachment_not_found", `附件不存在：${attachmentId}`);
-      if (record.status === "deleting") {
-        throw new MediaError("attachment_deleting", "附件正在回收，不能新增引用。");
+  async registerAttachment(input: RegisterAttachmentInput): Promise<AttachmentRecord> {
+    assertRegisterInput(input);
+    this.consumeFailpoint("register_before");
+    const commit = (): AttachmentRecord => {
+      if (this.records.has(input.attachment_id)) {
+        throw new MediaError("idempotency_conflict", "附件标识已登记，拒绝覆盖。");
       }
-      if (record.status !== "ready") {
-        throw new MediaError("attachment_gone", "附件不可用，不能新增引用。");
+      if (this.objectKeys.has(input.object_key)) {
+        throw new MediaError("attachment_conflict", "对象键已登记，拒绝重复。");
       }
-      const key = refKey({
-        attachment_id: attachmentId,
-        ref_kind: "observation",
-        ref_id: input.observation_id,
-        conversation_id: null,
-      });
-      if (this.references.has(key)) continue;
-      this.references.set(key, {
-        attachment_id: attachmentId,
-        ref_kind: "observation",
-        ref_id: input.observation_id,
-        conversation_id: null,
-      });
-      added += 1;
+      const now = new Date().toISOString();
+      const record: AttachmentRecord = {
+        ...input,
+        status: "ready",
+        revision: 0,
+        delete_result: null,
+        created_at: now,
+        updated_at: now,
+        deletion_started_at: null,
+        deleted_at: null,
+      };
+      this.records.set(record.attachment_id, record);
+      this.objectKeys.add(record.object_key);
+      return { ...record };
+    };
+    if (this.failpoints.delete("register_after_commit")) {
+      commit();
+      throw new MediaError("metadata_unavailable", "登记已提交，但响应丢失。");
     }
-    const revision = (this.observationRevisions.get(input.observation_id) ?? 0) + added;
-    this.observationRevisions.set(input.observation_id, revision);
-    return { added, attachment_revision: revision };
-  }
-
-  async getObservationAttachmentRevision(observation_id: string): Promise<number> {
-    return this.observationRevisions.get(observation_id) ?? 0;
+    if (this.failpoints.delete("register_late_commit")) {
+      this.lateCommit = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          try {
+            commit();
+          } catch {
+            // 迟到提交与已有记录冲突时按幂等冲突处理，不影响迟到窗口语义
+          }
+          resolve();
+        }, 0);
+      });
+      throw new MediaError("metadata_unavailable", "登记结果未知。");
+    }
+    return commit();
   }
 
   async getReferenceFacts(attachment_id: string): Promise<AttachmentReferenceFacts> {
-    // 查询不可用必须抛错：调用方按“引用查询不完整”保守处理，不能当空集。
     this.consumeFailpoint("getReferenceFacts");
+    let complete = true;
     const observation_refs: { observation_id: string; status: ObservationStatus }[] = [];
     const message_refs: { conversation_id: string; message_id: string }[] = [];
     const proposal_refs: string[] = [];
     for (const ref of this.references.values()) {
       if (ref.attachment_id !== attachment_id) continue;
       if (ref.ref_kind === "observation") {
-        observation_refs.push({
-          observation_id: ref.ref_id,
-          status: this.observationStatuses.get(ref.ref_id) ?? "draft",
-        });
+        const status = this.observationStatuses.get(ref.ref_id);
+        if (status === undefined) {
+          // 悬空引用：与 DATA LEFT JOIN 缺失一致，查询不完整
+          complete = false;
+          continue;
+        }
+        observation_refs.push({ observation_id: ref.ref_id, status });
       } else if (ref.ref_kind === "message" && ref.conversation_id !== null) {
         message_refs.push({ conversation_id: ref.conversation_id, message_id: ref.ref_id });
       } else if (ref.ref_kind === "proposal") {
         proposal_refs.push(ref.ref_id);
+      } else {
+        complete = false;
       }
     }
-    return { attachment_id, observation_refs, message_refs, proposal_refs };
+    const facts: AttachmentReferenceFacts = {
+      attachment_id,
+      reference_query_complete: complete,
+      observation_refs,
+      message_refs,
+      proposal_refs,
+    };
+    const hook = this.onNextReferenceFacts;
+    this.onNextReferenceFacts = null;
+    hook?.();
+    return facts;
   }
 
-  async releaseConversationReferences(input: {
-    conversation_id: string;
-    message_ids: readonly string[];
-    owner_account_id: string;
-  }): Promise<number> {
-    const owner = this.conversationOwners.get(input.conversation_id);
-    if (owner === undefined || owner !== input.owner_account_id) {
-      // 删除聊天只能解除自己的引用；不是自己的会话一律拒绝。
-      throw new MediaError("not_owner", "只能删除自己会话中的附件引用。");
-    }
-    const messageIds = new Set(input.message_ids);
-    let released = 0;
-    for (const [key, ref] of [...this.references.entries()]) {
-      if (ref.ref_kind !== "message") continue;
-      if (ref.conversation_id !== input.conversation_id) continue;
-      if (!messageIds.has(ref.ref_id)) continue;
-      this.references.delete(key);
-      released += 1;
-    }
-    return released;
-  }
-
-  async beginDeletionLease(attachment_id: string): Promise<DeletionLeaseResult> {
+  async beginDeletionLease(input: {
+    attachment_id: string;
+    expected_revision: number;
+  }): Promise<DeletionLeaseResult> {
     this.consumeFailpoint("beginDeletionLease");
-    const record = this.attachments.get(attachment_id);
+    const record = this.records.get(input.attachment_id);
     if (!record) return { outcome: "not_found" };
-    if (record.status === "deleting") return { outcome: "already_deleting" };
-    if (record.status === "deleted") return { outcome: "already_deleted" };
-    if (record.status !== "ready" && record.status !== "deletion_unknown") {
-      return { outcome: "not_ready" };
+    // 共同原子边界：引用集合重查与租约 CAS 之间不得插入引用写入。
+    for (const ref of this.references.values()) {
+      if (ref.attachment_id === input.attachment_id) return { outcome: "referenced" };
     }
-    const leaseToken = newLeaseToken();
+    if (record.status !== "ready") return { outcome: "not_ready", status: record.status };
+    if (record.revision !== input.expected_revision) return { outcome: "revision_conflict" };
     record.status = "deleting";
-    record.deletion_lease_id = leaseToken;
-    return { outcome: "acquired", lease_token: leaseToken };
+    record.revision += 1;
+    record.deletion_started_at = new Date().toISOString();
+    record.updated_at = record.deletion_started_at;
+    record.delete_result = null;
+    return { outcome: "acquired", record: { ...record } };
   }
 
-  async completeDeletion(
-    attachment_id: string,
-    lease_token: string,
-    outcome: "deleted" | "unknown" | "failed",
-  ): Promise<AttachmentRecord> {
-    this.consumeFailpoint("completeDeletion");
-    const record = this.attachments.get(attachment_id);
+  async commitDeletion(input: {
+    attachment_id: string;
+    expected_revision: number;
+  }): Promise<AttachmentRecord> {
+    this.consumeFailpoint("commitDeletion");
+    const record = this.records.get(input.attachment_id);
     if (!record) throw new MediaError("attachment_not_found", "附件不存在。");
-    if (record.status !== "deleting" || record.deletion_lease_id !== lease_token) {
-      throw new MediaError("metadata_conflict", "回收租约不匹配，拒绝落状态。");
+    if (record.status !== "deleting") {
+      throw new MediaError("attachment_conflict", "附件不在删除租约中。");
     }
-    record.deletion_lease_id = null;
-    if (outcome === "deleted") record.status = "deleted";
-    else if (outcome === "unknown") record.status = "deletion_unknown";
-    else record.status = "ready";
+    if (record.revision !== input.expected_revision) {
+      throw new MediaError("revision_conflict", "删除租约修订不匹配，拒绝落账。");
+    }
+    record.status = "deleted";
+    record.delete_result = "deleted";
+    record.revision += 1;
+    record.deleted_at = new Date().toISOString();
+    record.updated_at = record.deleted_at;
     return { ...record };
   }
 
-  async appendAttachmentAudit(entry: AttachmentAuditEntry): Promise<void> {
-    this.auditEntries.push({ ...entry, attachment_ids: [...entry.attachment_ids] });
+  async failDeletion(input: {
+    attachment_id: string;
+    expected_revision: number;
+  }): Promise<AttachmentRecord> {
+    this.consumeFailpoint("failDeletion");
+    const record = this.records.get(input.attachment_id);
+    if (!record) throw new MediaError("attachment_not_found", "附件不存在。");
+    if (record.status !== "deleting") {
+      throw new MediaError("attachment_conflict", "附件不在删除租约中。");
+    }
+    if (record.revision !== input.expected_revision) {
+      throw new MediaError("revision_conflict", "删除租约修订不匹配，拒绝落账。");
+    }
+    // 未知删除：保持 deleting + unknown；绝不恢复 ready、绝不伪装 deleted。
+    record.delete_result = "unknown";
+    record.revision += 1;
+    record.updated_at = new Date().toISOString();
+    return { ...record };
+  }
+
+  async linkObservationReferences(input: {
+    observation_id: string;
+    attachment_ids: readonly string[];
+    actor_account_id: string;
+  }): Promise<ObservationReferencesResult> {
+    this.consumeFailpoint("linkObservationReferences");
+    if (input.attachment_ids.length === 0 || new Set(input.attachment_ids).size !== input.attachment_ids.length) {
+      throw new MediaError("invalid_request", "关联附件集合不合法。");
+    }
+    // 先整体校验，再整体写入：后一附件失败不得留下半成功。
+    for (const attachmentId of input.attachment_ids) {
+      this.requireReady(attachmentId, input.actor_account_id);
+    }
+    let linked = 0;
+    for (const attachmentId of input.attachment_ids) {
+      const ref: StoredReference = {
+        attachment_id: attachmentId,
+        ref_kind: "observation",
+        ref_id: input.observation_id,
+        conversation_id: null,
+      };
+      if (!this.references.has(refKey(ref))) {
+        this.references.set(refKey(ref), ref);
+        linked += 1;
+      }
+    }
+    return { linked };
+  }
+
+  async appendObservationAttachments(
+    input: AppendObservationAttachmentsInput,
+  ): Promise<AppendObservationAttachmentsResult> {
+    this.consumeFailpoint("appendObservationAttachments");
+    if (input.attachment_ids.length === 0 || new Set(input.attachment_ids).size !== input.attachment_ids.length) {
+      throw new MediaError("invalid_request", "追加附件集合不合法。");
+    }
+    if (!Number.isInteger(input.expected_attachment_revision) || input.expected_attachment_revision < 0) {
+      throw new MediaError("invalid_request", "附件修订前提不合法。");
+    }
+    // 共同原子边界：整体校验 → CAS → 引用+审计+修订一次性写入（无 await 插入）。
+    for (const attachmentId of input.attachment_ids) {
+      this.requireReady(attachmentId, input.actor_account_id);
+    }
+    const current = this.observationRevisions.get(input.observation_id) ?? 0;
+    if (current !== input.expected_attachment_revision) {
+      throw new MediaError("revision_conflict", "观察附件修订已变化，请刷新后重试。");
+    }
+    for (const attachmentId of input.attachment_ids) {
+      const ref: StoredReference = {
+        attachment_id: attachmentId,
+        ref_kind: "observation",
+        ref_id: input.observation_id,
+        conversation_id: null,
+      };
+      if (this.references.has(refKey(ref))) {
+        throw new MediaError("attachment_referenced", "附件已关联到该观察。");
+      }
+    }
+    const nextRevision = current + 1;
+    const recordedAt = new Date().toISOString();
+    for (const attachmentId of input.attachment_ids) {
+      this.references.set(
+        refKey({
+          attachment_id: attachmentId,
+          ref_kind: "observation",
+          ref_id: input.observation_id,
+          conversation_id: null,
+        }),
+        {
+          attachment_id: attachmentId,
+          ref_kind: "observation",
+          ref_id: input.observation_id,
+          conversation_id: null,
+        },
+      );
+      this.auditEntries.push({
+        audit_id: randomUUID(),
+        action: "attach_observation_images",
+        observation_id: input.observation_id,
+        attachment_id: attachmentId,
+        attachment_revision: nextRevision,
+        actor_account_id: input.actor_account_id,
+        source_confirmed_at: input.source_confirmed_at,
+        request_id: input.request_id,
+        approval_id: input.approval_id,
+        recorded_at: recordedAt,
+      });
+    }
+    this.observationRevisions.set(input.observation_id, nextRevision);
+    return { attachment_revision: nextRevision, appended: [...input.attachment_ids] };
+  }
+
+  async getObservationAttachmentRevision(observation_id: string): Promise<number> {
+    return this.observationRevisions.get(observation_id) ?? 0;
+  }
+
+  /** 测试辅助：读取记录当前状态名（不修改状态） */
+  statusOf(attachment_id: string): AttachmentStatus | null {
+    return this.records.get(attachment_id)?.status ?? null;
+  }
+
+  /** 测试辅助：模拟记录在服务读取后、租约前被其他写者更新（revision 变化） */
+  bumpAttachmentRevision(attachment_id: string): boolean {
+    const record = this.records.get(attachment_id);
+    if (!record) return false;
+    record.revision += 1;
+    return true;
   }
 }

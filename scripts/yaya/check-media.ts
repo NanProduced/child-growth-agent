@@ -53,9 +53,9 @@ import {
 import { MemoryAttachmentMetadata } from "../../src/lib/media/metadata-memory";
 import { assertSafeObjectKey, sha256Hex } from "../../src/lib/media/object-store";
 import { LocalMediaObjectStore } from "../../src/lib/media/object-store-local";
-import { recycleAttachment, releaseConversationReferences } from "../../src/lib/media/retention-service";
+import { recycleAttachment } from "../../src/lib/media/retention-service";
 import { createLocalMediaRuntime, type MediaServiceDeps } from "../../src/lib/media/runtime";
-import { uploadImages } from "../../src/lib/media/upload-service";
+import { deterministicAttachmentId, uploadImages } from "../../src/lib/media/upload-service";
 import type { YayaImageViewerRecordAccess } from "../../src/lib/yaya/types";
 
 const CHECK_ROOT = path.join(os.tmpdir(), "opencode", `yaya-media1-check-${process.pid}-${Date.now()}`);
@@ -404,30 +404,48 @@ async function main(): Promise<void> {
     await store.delete(key);
   });
 
-  await check("半上传补偿：markReady 失败删本轮对象并清 pending", async () => {
+  await check("注册已提交但响应丢失：对象保留并恢复原结果", async () => {
     const beforeFiles = (await listFiles(CHECK_ROOT)).length;
-    const beforeRecords = metadata.countAttachments();
-    metadata.failNext("markReady");
+    metadata.failNext("register_after_commit");
     const batch = await uploadImages(deps, {
       owner_account_id: OWNER_A,
-      files: [{ filename: "x.png", declared_content_type: null, body: await pngBuffer(), client_upload_id: null }],
+      files: [{ filename: "x.png", declared_content_type: null, body: await pngBuffer(), client_upload_id: "client-lost" }],
     });
     const result = batch.uploads[0];
-    assert.ok(result && !result.ok && result.code === "metadata_unavailable");
-    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles, "补偿必须删掉本轮三个对象");
-    assert.equal(metadata.countAttachments(), beforeRecords, "pending 记录已清理");
+    assert.ok(result && result.ok, "已提交结果必须读回恢复，不能报失败");
+    assert.equal(
+      result.attachment.attachment_id,
+      deterministicAttachmentId(OWNER_A, "client-lost"),
+      "重试身份必须稳定",
+    );
+    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles + 3, "已提交对象不得被破坏");
+    const retry = await uploadOne(deps, OWNER_A, await pngBuffer(), { client: "client-lost" });
+    assert.equal(retry.attachment_id, result.attachment.attachment_id);
+    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles + 3, "重试不得重复写对象");
   });
 
-  await check("半上传补偿：insertPending 失败同样精确清理", async () => {
+  await check("对象阶段失败（注册前）：精确补偿本轮对象", async () => {
     const beforeFiles = (await listFiles(CHECK_ROOT)).length;
-    metadata.failNext("insertPending");
-    const batch = await uploadImages(deps, {
+    const beforeRecords = metadata.countAttachments();
+    const failingStore = {
+      putOnce: async (input: { key: string; content_type: string; body: Buffer }) => {
+        if (input.key.endsWith("/thumbnail")) {
+          throw new MediaError("object_store_unavailable", "store down");
+        }
+        return store.putOnce(input);
+      },
+      get: store.get.bind(store),
+      delete: store.delete.bind(store),
+    };
+    const failingDeps: MediaServiceDeps = { metadata, store: failingStore, environment: "development" };
+    const batch = await uploadImages(failingDeps, {
       owner_account_id: OWNER_A,
       files: [{ filename: "y.png", declared_content_type: null, body: await pngBuffer(), client_upload_id: null }],
     });
     const result = batch.uploads[0];
-    assert.ok(result && !result.ok && result.code === "metadata_unavailable");
-    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles);
+    assert.ok(result && !result.ok && result.code === "object_store_unavailable");
+    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles, "确定失败必须精确补偿已写对象");
+    assert.equal(metadata.countAttachments(), beforeRecords, "注册未发生不得留下记录");
   });
 
   await check("补偿不按前缀清空：同前缀的他轮对象保留", async () => {
@@ -438,8 +456,18 @@ async function main(): Promise<void> {
       variant: "original",
     });
     await store.putOnce({ key: foreignKey, content_type: "image/png", body: Buffer.from("foreign") });
-    metadata.failNext("markReady");
-    const batch = await uploadImages(deps, {
+    const failingStore = {
+      putOnce: async (input: { key: string; content_type: string; body: Buffer }) => {
+        if (input.key.endsWith("/thumbnail")) {
+          throw new MediaError("object_store_unavailable", "store down");
+        }
+        return store.putOnce(input);
+      },
+      get: store.get.bind(store),
+      delete: store.delete.bind(store),
+    };
+    const failingDeps: MediaServiceDeps = { metadata, store: failingStore, environment: "development" };
+    const batch = await uploadImages(failingDeps, {
       owner_account_id: OWNER_A,
       files: [{ filename: "z.png", declared_content_type: null, body: await pngBuffer(), client_upload_id: null }],
     });
@@ -494,12 +522,12 @@ async function main(): Promise<void> {
   });
 
   await check("已关联：按 record_kind+record_id 授权，历史只读仅元数据", async () => {
-    await metadata.addObservationReferences({
+    metadata.seedObservation("observation-1", "draft");
+    await metadata.linkObservationReferences({
       observation_id: "observation-1",
       attachment_ids: [attached.attachment_id],
       actor_account_id: OWNER_A,
     });
-    metadata.seedObservation("observation-1", "draft");
     const withFull = await evaluateAttachmentRead(deps, {
       attachment_id: attached.attachment_id,
       viewer: viewerB,
@@ -584,26 +612,28 @@ async function main(): Promise<void> {
   const appendImage = await uploadOne(deps, OWNER_A, await webpBuffer());
   const teacherA = principalOf("teacher", ["class-a"]);
 
-  await check("创建观察事务内关联：draft 可关联并写独立审计", async () => {
+  await check("创建观察事务内关联：draft 可关联、不改宿主、不递增追加修订", async () => {
     const createHost = hostFacts({
       observation_id: "observation-create",
       status: "draft",
       confirmed_at: null,
     });
     const frozen = JSON.stringify(createHost);
+    const auditsBefore = metadata.audits().length;
     const result = await associateObservationImagesOnCreate(deps, {
       host: createHost,
       principal: teacherA,
       image_ids: [appendImage.attachment_id],
       request_id: "req-create",
     });
-    assert.equal(result.attachment_revision, 1);
+    assert.deepEqual([...result.attached], [appendImage.attachment_id]);
     assert.equal(JSON.stringify(createHost), frozen, "关联不得改动宿主观察事实");
-    const audit = metadata.audits().at(-1);
-    assert.ok(audit);
-    assert.equal(audit.action, "create_observation_attachments");
-    assert.deepEqual([...audit.attachment_ids], [appendImage.attachment_id]);
-    assert.ok(!("raw_text" in audit) && !("confirmed_content" in audit));
+    assert.equal(
+      await metadata.getObservationAttachmentRevision("observation-create"),
+      0,
+      "创建关联随创建事务，不递增归档追加修订",
+    );
+    assert.equal(metadata.audits().length, auditsBefore, "创建路径不写归档追加审计");
   });
 
   await check("归档后追加：核 source_confirmed_at/revision/所有权并写审计", async () => {
@@ -622,7 +652,10 @@ async function main(): Promise<void> {
     const audit = metadata.audits().at(-1);
     assert.ok(audit);
     assert.equal(audit.action, "attach_observation_images");
+    assert.equal(audit.attachment_id, appendImage.attachment_id);
+    assert.equal(audit.attachment_revision, 1);
     assert.equal(audit.source_confirmed_at, host.confirmed_at);
+    assert.ok(!("raw_text" in audit) && !("confirmed_content" in audit));
     await assert.rejects(
       appendObservationImages(deps, {
         host,
@@ -731,15 +764,21 @@ async function main(): Promise<void> {
     assert.equal((await listFiles(CHECK_ROOT)).length, before);
   });
 
-  await check("删除租约阻止新引用；失败结果恢复 ready", async () => {
-    const lease = await metadata.beginDeletionLease(appendImage.attachment_id);
+  await check("删除租约阻止新引用；失败保持 deleting+unknown 不恢复 ready", async () => {
+    const leaseImage = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const record = await metadata.get(leaseImage.attachment_id);
+    assert.ok(record);
+    const lease = await metadata.beginDeletionLease({
+      attachment_id: leaseImage.attachment_id,
+      expected_revision: record.revision,
+    });
     assert.equal(lease.outcome, "acquired");
     if (lease.outcome !== "acquired") return;
     await assert.rejects(
       appendObservationImages(deps, {
         host: hostFacts({ observation_id: "observation-2" }),
         principal: teacherA,
-        image_ids: [appendImage.attachment_id],
+        image_ids: [leaseImage.attachment_id],
         expected_attachment_revision: 1,
         source_confirmed_at: "2026-10-05T08:00:00.000Z",
         request_id: null,
@@ -749,16 +788,39 @@ async function main(): Promise<void> {
         return true;
       },
     );
-    const busy = await metadata.beginDeletionLease(appendImage.attachment_id);
-    assert.equal(busy.outcome, "already_deleting");
-    await metadata.completeDeletion(appendImage.attachment_id, lease.lease_token, "failed");
-    const record = await metadata.get(appendImage.attachment_id);
-    assert.equal(record?.status, "ready");
+    const busy = await metadata.beginDeletionLease({
+      attachment_id: leaseImage.attachment_id,
+      expected_revision: lease.record.revision,
+    });
+    assert.deepEqual(busy, { outcome: "not_ready", status: "deleting" });
+    await metadata.failDeletion({
+      attachment_id: leaseImage.attachment_id,
+      expected_revision: lease.record.revision,
+    });
+    const failed = await metadata.get(leaseImage.attachment_id);
+    assert.equal(failed?.status, "deleting", "未知删除不得恢复 ready");
+    assert.equal(failed?.delete_result, "unknown");
+    await assert.rejects(
+      appendObservationImages(deps, {
+        host: hostFacts({ observation_id: "observation-2" }),
+        principal: teacherA,
+        image_ids: [leaseImage.attachment_id],
+        expected_attachment_revision: 1,
+        source_confirmed_at: "2026-10-05T08:00:00.000Z",
+        request_id: null,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof MediaError && error.code === "attachment_deleting");
+        return true;
+      },
+    );
+    const done = await recycleAttachment(deps, { attachment_id: leaseImage.attachment_id });
+    assert.equal(done.status, "deleted", "未知删除可凭可核验状态完成回收");
   });
 
   /* ------------------------------ 引用与回收 ------------------------------ */
 
-  await check("观察全状态引用保护；删除会话只解除自己引用", async () => {
+  await check("观察全状态引用保护；解除本会话引用后其余引用仍保护", async () => {
     const shared = await uploadOne(deps, OWNER_A, await pngBuffer());
     metadata.seedConversation("conversation-1", OWNER_A);
     metadata.seedConversation("conversation-2", OWNER_A);
@@ -769,7 +831,7 @@ async function main(): Promise<void> {
       ["observation-confirmed", "confirmed"],
     ] as const) {
       metadata.seedObservation(observationId, status);
-      await metadata.addObservationReferences({
+      await metadata.linkObservationReferences({
         observation_id: observationId,
         attachment_ids: [shared.attachment_id],
         actor_account_id: OWNER_A,
@@ -795,23 +857,17 @@ async function main(): Promise<void> {
     });
     const protectedResult = await recycleAttachment(deps, { attachment_id: shared.attachment_id });
     assert.equal(protectedResult.status, "referenced");
-    await assert.rejects(
-      releaseConversationReferences(deps, {
-        conversation_id: "conversation-1",
-        message_ids: ["message-1"],
-        owner_account_id: OWNER_B,
-      }),
+    // DATA deleteConversation 的“只解除自己会话消息引用”语义（owner 校验）由 DATA 拥有；
+    // 此处用替身镜像该步骤，验证解除后其余引用继续保护图片。
+    assert.throws(
+      () => metadata.detachConversationReferences("conversation-1", OWNER_B),
       (error: unknown) => {
         assert.ok(error instanceof MediaError && error.code === "not_owner");
         return true;
       },
     );
-    const released = await releaseConversationReferences(deps, {
-      conversation_id: "conversation-1",
-      message_ids: ["message-1"],
-      owner_account_id: OWNER_A,
-    });
-    assert.equal(released.released, 1);
+    const detached = metadata.detachConversationReferences("conversation-1", OWNER_A);
+    assert.equal(detached, 1);
     const facts = await metadata.getReferenceFacts(shared.attachment_id);
     assert.equal(facts.observation_refs.length, 4, "draft/needs_input/ai_organized/confirmed 全保护");
     assert.equal(facts.message_refs.length, 1, "其他会话引用仍保护");
@@ -857,7 +913,7 @@ async function main(): Promise<void> {
     assert.equal(record?.status, "ready");
   });
 
-  await check("外部删除结果未知：保留 deletion_unknown，可核验后重试", async () => {
+  await check("外部删除结果未知：保留 deleting+unknown，可核验后重试", async () => {
     const disposable = await uploadOne(deps, OWNER_A, await pngBuffer());
     const flakyStore = {
       putOnce: store.putOnce.bind(store),
@@ -869,7 +925,22 @@ async function main(): Promise<void> {
     const result = await recycleAttachment(flakyDeps, { attachment_id: disposable.attachment_id });
     assert.equal(result.status, "deletion_unknown");
     const record = await metadata.get(disposable.attachment_id);
-    assert.equal(record?.status, "deletion_unknown", "未知结果不得伪装成功或恢复 ready");
+    assert.equal(record?.status, "deleting", "未知结果不得伪装成功或恢复 ready");
+    assert.equal(record?.delete_result, "unknown");
+    await assert.rejects(
+      appendObservationImages(deps, {
+        host: hostFacts({ observation_id: "observation-unknown" }),
+        principal: teacherA,
+        image_ids: [disposable.attachment_id],
+        expected_attachment_revision: 0,
+        source_confirmed_at: "2026-10-05T08:00:00.000Z",
+        request_id: null,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof MediaError && error.code === "attachment_deleting");
+        return true;
+      },
+    );
     const retry = await recycleAttachment(deps, { attachment_id: disposable.attachment_id });
     assert.equal(retry.status, "deleted");
     const finalRecord = await metadata.get(disposable.attachment_id);
@@ -878,12 +949,22 @@ async function main(): Promise<void> {
 
   await check("回收租约互斥：进行中的回收不可重入", async () => {
     const disposable = await uploadOne(deps, OWNER_A, await pngBuffer());
-    const lease = await metadata.beginDeletionLease(disposable.attachment_id);
+    const record = await metadata.get(disposable.attachment_id);
+    assert.ok(record);
+    const lease = await metadata.beginDeletionLease({
+      attachment_id: disposable.attachment_id,
+      expected_revision: record.revision,
+    });
     assert.equal(lease.outcome, "acquired");
     const second = await recycleAttachment(deps, { attachment_id: disposable.attachment_id });
     assert.equal(second.status, "lease_busy");
     if (lease.outcome === "acquired") {
-      await metadata.completeDeletion(disposable.attachment_id, lease.lease_token, "deleted");
+      await metadata.failDeletion({
+        attachment_id: disposable.attachment_id,
+        expected_revision: lease.record.revision,
+      });
+      const resumed = await recycleAttachment(deps, { attachment_id: disposable.attachment_id });
+      assert.equal(resumed.status, "deleted", "未知租约可按可核验状态恢复并完成回收");
     }
   });
 
