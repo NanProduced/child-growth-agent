@@ -152,15 +152,20 @@ type ModuleMock = {
   module: (specifier: string, options: { exports: Record<string, unknown> }) => void;
 };
 
-async function mockQueries(exports: Record<string, unknown>): Promise<void> {
+async function mockQueries(exports: Record<string, unknown>, role: "teacher" | "admin" = "teacher"): Promise<void> {
   const { mock } = await import('node:test');
   const modules = mock as unknown as ModuleMock;
   const { AccountsError } = await import('../src/lib/accounts/errors');
   const { mapAccountsError } = await import('../src/lib/accounts/guards');
-  const principal: Principal = {
-    account_id: 'offline-teacher', username: 'offline-teacher', display_name: '离线教师',
-    role: 'teacher', account_status: 'active', scope: { kind: 'classes', class_ids: [CLASS.id, OTHER_CLASS.id] },
-  };
+  const principal: Principal = role === "admin"
+    ? {
+        account_id: 'offline-admin', username: 'offline-admin', display_name: '离线管理员',
+        role: 'admin', account_status: 'active', scope: { kind: 'school', school_id: 'offline-school' },
+      }
+    : {
+        account_id: 'offline-teacher', username: 'offline-teacher', display_name: '离线教师',
+        role: 'teacher', account_status: 'active', scope: { kind: 'classes', class_ids: [CLASS.id, OTHER_CLASS.id] },
+      };
   const authorizedRead = async <T>(_request: unknown, ...args: [unknown, unknown, (viewer: Principal) => Promise<T>]) => {
     void _request;
     return args[2](principal);
@@ -168,6 +173,12 @@ async function mockQueries(exports: Record<string, unknown>): Promise<void> {
   const authorizedAccess = {
     requireServerAccess: async () => principal,
     withBusinessRead: authorizedRead,
+    resolveServerAuth: async () => ({
+      state: { kind: "authenticated", principal },
+      session: null,
+      csrf: null,
+      token: null,
+    }),
   };
   modules.module('@/lib/auth', { exports: { ...authorizedAccess, AccountsError, mapAccountsError } });
   modules.module('@/lib/accounts/access', { exports: authorizedAccess });
@@ -187,14 +198,14 @@ async function mockQueries(exports: Record<string, unknown>): Promise<void> {
   });
 }
 
-async function renderClassPage(queries: Record<string, unknown>): Promise<unknown> {
+async function renderClassPage(queries: Record<string, unknown>, role: "teacher" | "admin" = "teacher"): Promise<unknown> {
   await mockQueries({
     getClass: async () => CLASS,
     getClassChildren: async () => [],
     listChildren: async () => [],
     listObservations: async () => [],
     ...queries,
-  });
+  }, role);
   const page = (await import('@/app/classes/[id]/page')).default as (props: {
     params: Promise<{ id: string }>;
   }) => Promise<unknown>;
@@ -237,10 +248,10 @@ const SCENARIOS: Record<string, () => Promise<void>> = {
       getClassChildren: async () => {
         throw new Error('班级成员查询失败');
       },
-    });
+    }, "admin");
     const text = treeText(tree);
     assert.ok(text.includes('班级数据暂不可用'), '应显示数据不可用提示');
-    assert.ok(text.includes('班级成员查询失败'), '应带出查询错误信息');
+    assert.ok(text.includes('读取暂未完成'), '读取失败应为可重试提示而非原始错误');
     assert.equal(findClassFormDialogs(tree).length, 1, '班级管理入口必须保留');
     assert.equal(findSectionTitles(tree, '成长档案').length, 0, '成员区块不应渲染');
   },
@@ -299,7 +310,7 @@ const SCENARIOS: Record<string, () => Promise<void>> = {
       listObservations: async () => [
         makeObservation({ id: 'obs-2', child_id: 'member-a', status: 'draft' }),
       ],
-    });
+    }, "admin");
     assert.equal(findClassFormDialogs(tree).length, 1, '正常状态下管理区只出现一次');
     assert.equal(findSectionTitles(tree, '成长档案').length, 1);
   },
