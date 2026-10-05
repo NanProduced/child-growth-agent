@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { z } from 'zod';
 import {
   ArrowLeft,
   ArrowRight,
@@ -78,6 +79,30 @@ const STEP_FIELDS: readonly FieldKey[][] = [
 const GENDERS = ['男', '女', '其他'] as const;
 const EMOJI_PRESETS = ['🧒', '👦', '👧', '🐣', '🌻', '⭐'];
 
+const classDirectorySchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  stage: z.enum(['small', 'middle', 'large']),
+  school_year: z.string(),
+  is_active: z.boolean(),
+});
+
+type ClassOption = Pick<SchoolClass, 'id' | 'name' | 'stage' | 'school_year' | 'is_active'>;
+
+/** Loading failure, denied/lost session, unreadable response and a real empty directory stay distinct. */
+type ClassDirectoryState =
+  | { status: 'loading' }
+  | { status: 'ready'; classes: ClassOption[] }
+  | { status: 'login' }
+  | { status: 'denied' }
+  | { status: 'error'; message: string };
+
+function readClassDirectory(body: unknown): ClassOption[] | null {
+  if (!body || typeof body !== 'object' || !('classes' in body) || !Array.isArray(body.classes)) return null;
+  const parsed = z.array(classDirectorySchema).safeParse(body.classes);
+  return parsed.success ? parsed.data : null;
+}
+
 /** 统一清洗输入：去首尾空格；班级必须来自选择，不留默认值 */
 function normalize(form: FormState): FormState {
   return {
@@ -118,7 +143,7 @@ function ErrorText({ message }: { message?: string }) {
 
 export default function NewChildPage() {
   const router = useRouter();
-  const { loading: authLoading, configured, canCreateProfiles } = useTeacher();
+  const { loading: authLoading, configured, canCreateProfiles, principal, revalidate } = useTeacher();
 
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormState>({
@@ -130,28 +155,47 @@ export default function NewChildPage() {
     avatar_emoji: '',
     note: '',
   });
-  const [classes, setClasses] = useState<SchoolClass[]>([]);
-  const [loadingClasses, setLoadingClasses] = useState(true);
+  const [directory, setDirectory] = useState<ClassDirectoryState>({ status: 'loading' });
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submitting, setSubmitting] = useState(false);
 
+  const loadDirectory = useCallback(async () => {
+    setDirectory({ status: 'loading' });
+    let response: Response;
+    try {
+      response = await fetchWithAccountAuth('/api/classes');
+    } catch {
+      setDirectory({ status: 'error', message: '班级资料暂不可读，请稍后重试。读取失败不代表没有班级。' });
+      return;
+    }
+    if (response.status === 401 || response.status === 403) {
+      // A lost session clears the private class projection and asks the provider to re-verify identity.
+      setDirectory({ status: response.status === 401 ? 'login' : 'denied' });
+      if (response.status === 401) void revalidate();
+      return;
+    }
+    if (!response.ok) {
+      setDirectory({ status: 'error', message: '班级资料暂不可读，请稍后重试。读取失败不代表没有班级。' });
+      return;
+    }
+    const body: unknown = await response.json().catch(() => null);
+    const classes = readClassDirectory(body);
+    if (!classes) {
+      setDirectory({ status: 'error', message: '班级资料无法核对，请稍后重新读取。' });
+      return;
+    }
+    setDirectory({ status: 'ready', classes });
+  }, [revalidate]);
+
   useEffect(() => {
-    let alive = true;
-    fetch('/api/classes')
-      .then((r) => r.json())
-      .then((data: { classes?: SchoolClass[] }) => {
-        if (alive) setClasses(data.classes ?? []);
-      })
-      .catch(() => {
-        if (alive) toast.error('班级加载失败，请刷新重试');
-      })
-      .finally(() => {
-        if (alive) setLoadingClasses(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
+    void loadDirectory();
+  }, [loadDirectory]);
+
+  const classes = directory.status === 'ready' ? directory.classes : [];
+  const isAdmin = principal?.role === 'admin';
+  const unassignedTeacher = principal?.role === 'teacher' &&
+    (principal.scope.kind === 'none' ||
+      (principal.scope.kind === 'classes' && principal.scope.class_ids.length === 0));
 
   function setField<K extends FieldKey>(key: K, value: string) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -239,14 +283,16 @@ export default function NewChildPage() {
   }
 
   if (!configured || !canCreateProfiles) {
+    const title = unassignedTeacher ? '尚未分配任教班级' : '需要园所账号登录';
+    const description = unassignedTeacher
+      ? '建立成长档案需要先有任教班级。请联系管理员分配任教班级后再建档；本页不提供自行建立班级的入口。'
+      : '建立成长档案属于写操作，需教师身份验证。请点击右上角「园所账号登录」输入账号密码后再来。';
     return (
       <div className="mx-auto max-w-lg py-10">
         <Alert>
           <LogIn className="size-4" />
-          <AlertTitle>需要园所账号登录</AlertTitle>
-          <AlertDescription>
-            建立成长档案属于写操作，需教师身份验证。请点击右上角「园所账号登录」输入账号密码后再来。
-          </AlertDescription>
+          <AlertTitle>{title}</AlertTitle>
+          <AlertDescription>{description}</AlertDescription>
         </Alert>
       </div>
     );
@@ -363,17 +409,37 @@ export default function NewChildPage() {
 
               <div className="space-y-1.5">
                 <Label>班级 *</Label>
-                {loadingClasses ? (
+                {directory.status === 'loading' ? (
                   <div className="flex items-center gap-2 text-sm text-slate-400">
                     <Loader2 className="size-4 animate-spin" />
                     班级加载中…
                   </div>
+                ) : directory.status === 'login' ? (
+                  <div className="rounded-lg border border-dashed p-3 text-sm leading-6 text-slate-500">
+                    当前登录已失效，请重新登录后再选择班级。
+                    <Button asChild variant="link" size="sm" className="px-1">
+                      <Link href="/login?returnTo=%2Fchildren%2Fnew">园所账号登录</Link>
+                    </Button>
+                  </div>
+                ) : directory.status === 'denied' ? (
+                  <div className="rounded-lg border border-dashed p-3 text-sm leading-6 text-slate-500">
+                    当前账号没有班级访问权限，不能据此判断班级为空。请联系管理员核对任教范围。
+                  </div>
+                ) : directory.status === 'error' ? (
+                  <div className="rounded-lg border border-dashed p-3 text-sm leading-6 text-slate-500">
+                    {directory.message}
+                    <Button type="button" variant="link" size="sm" className="px-1" onClick={() => void loadDirectory()}>
+                      重新读取班级
+                    </Button>
+                  </div>
                 ) : activeClasses.length === 0 ? (
                   <div className="rounded-lg border border-dashed p-3 text-sm leading-6 text-slate-500">
-                    还没有可用班级，请先到「班级」页面创建或启用班级。
-                    <Button asChild variant="link" size="sm" className="px-1">
-                      <Link href="/classes">去创建班级</Link>
-                    </Button>
+                    {isAdmin ? '还没有可用班级，请先创建或启用班级。' : '当前没有可用班级，请联系管理员建立或启用班级并分配任教。'}
+                    {isAdmin ? (
+                      <Button asChild variant="link" size="sm" className="px-1">
+                        <Link href="/classes">去创建班级</Link>
+                      </Button>
+                    ) : null}
                   </div>
                 ) : (
                   <div className="grid gap-3 sm:grid-cols-2">

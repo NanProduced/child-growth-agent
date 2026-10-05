@@ -4,10 +4,12 @@ import Link from 'next/link';
 import { ArrowUpRight, Flower2, Leaf, School, Sprout } from 'lucide-react';
 
 import { ClassFormDialog } from '@/components/class-dialogs';
+import { ReadFailureNotice, readFailureKind } from '@/components/read-failure-notice';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { formatDateCn } from '@/lib/format';
+import { resolveServerAuth } from '@/lib/accounts/access';
 import { scopedListChildren as listChildren, scopedListClasses as listClasses, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
 import { CLASS_STAGES, CLASS_STAGE_LABELS, type Child, type ClassStage, type Observation, type SchoolClass } from '@/lib/types';
 
@@ -31,6 +33,12 @@ const stageMeta: Record<ClassStage, { icon: typeof Sprout; tone: string; descrip
 };
 
 export default async function ClassesPage() {
+  const auth = await resolveServerAuth();
+  if (auth.state.kind !== 'authenticated') {
+    return <ReadFailureNotice kind={auth.state.kind === 'unavailable' ? 'unavailable' : 'login'} what="班级资料" retryHref="/classes" />;
+  }
+  // UI projection only: server reads and writes still re-authorize on every request.
+  const isAdmin = auth.state.principal.role === 'admin';
   let classes: SchoolClass[] = [];
   let childList: Child[] = [];
   let observations: Observation[] = [];
@@ -42,8 +50,8 @@ export default async function ClassesPage() {
       listObservations({ limit: 1000 }),
     ]);
   } catch (e) {
-    if (e instanceof AccountsError) throw e;
-    dbError = e instanceof Error ? e.message : '数据库连接失败';
+    if (e instanceof AccountsError) return <ReadFailureNotice kind={readFailureKind(e)} what="班级资料" retryHref="/classes" />;
+    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
   }
 
   const stats = new Map<string, ClassStats>(
@@ -83,7 +91,7 @@ export default async function ClassesPage() {
             先找到班级，再回到这个班级里的成长档案与观察记录。
           </p>
         </div>
-        <ClassFormDialog label="新建班级" variant="default" size="default" />
+        {isAdmin ? <ClassFormDialog label="新建班级" variant="default" size="default" /> : null}
       </div>
 
       {dbError ? (
@@ -100,10 +108,12 @@ export default async function ClassesPage() {
             <div>
               <h2 className="font-medium text-slate-800">还没有班级</h2>
               <p className="mt-1 max-w-lg text-sm leading-6 text-slate-500">
-                先创建班级，再为幼儿分班；建档与记录观察都需要先有班级。
+                {isAdmin
+                  ? '先创建班级，再为幼儿分班；建档与记录观察都需要先有班级。'
+                  : '当前范围内还没有班级，请联系管理员建立班级并分配任教。'}
               </p>
             </div>
-            <ClassFormDialog label="新建班级" variant="default" />
+            {isAdmin ? <ClassFormDialog label="新建班级" variant="default" /> : null}
           </CardContent>
         </Card>
       ) : (
