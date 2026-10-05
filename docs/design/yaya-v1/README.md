@@ -1,10 +1,10 @@
-# YAYA-DESIGN0｜芽芽助手与统一图片记录 UX 设计前置（yaya-v1）— R1
+# YAYA-DESIGN0｜芽芽助手与统一图片记录 UX 设计前置（yaya-v1）— R2
 
 - 共同产品基线：`e8225f04918de2073e194cb199dc8cf1bcb7f38f`（codex/flow-close-integration）
-- 本线起点：`dd73f6c89e4755fb8a4b6112cdc0d1e7f6b05016`（YAYA-DESIGN0 R0）
+- 本线起点：`7164c6d2234176cfc43fc7407e944349b73b1381`（YAYA-DESIGN0 R1；R0 为 `dd73f6c`）
 - 工作树：`C:\Users\nanpr\AppData\Local\Temp\opencode\child-growth-yaya-design0`，分支 `codex/yaya-design0`
 - 范围：只修改 `docs/design/yaya-v1/**`。不改 PRODUCT / DESIGN / sidecar / 全局 CSS / 页面 / 组件 / API / schema / 共享类型 / 依赖锁 / `.env` / harness / 首页。`RTK.md` 不存在，仅记录。
-- 状态：**R1 规格返修完成，方向未选**；不是实现、不是接口冻结、不是浏览器/视觉验收、不是真实教师实测。
+- 状态：**R2 规格返修完成，方向未选**；不是实现、不是接口冻结、不是浏览器/视觉验收、不是真实教师实测。
 - 图稿：**NOT_RUN**（本会话无内置 ImageGen）。出稿 prompt 见 `prompts/`，台账见 `outputs/README.md`。未伪装图稿，未声称用户已选稿；需要 HTML 原型时另行申请批准，本轮不建 mock 路由。
 
 ## R1 修正概览（对应验收 A–E）
@@ -16,6 +16,15 @@
 | C 身份与历史 | 撤权/转班但有效可一般问答；停用/失效/身份不可用关闭全部模型；同账号范围变化 vs 换账号；tool part 取消不丢草稿；后台操作不显示成已撤销 | `flow-analysis.md` S11、`recovery-spec.md` §1.7/§1.9、`brief.md` §2.2 |
 | D 示例与指南事实 | 全文统一案例锚点；使用 `catalog.ts` 真实条目 id/原文/年龄段/product_rules；成人帮助不自动降级；追问为真实缺口；自洽核对表 | `synthetic-example.md`、全部 prompts、`direction-options.md` |
 | E 问答与布局 | 长答不裁断；补问答/查询/管理员/未分配呈现；B 抽屉保留未提交编辑；A 统一卡内按钮；C 分栏看实际宽度；手机原生 dvh/安全区优先；核对表单同样处理键盘；批准前内容完整；层语义明确 | `message-spec.md`、`direction-options.md`、`brief.md` §2、`future-acceptance.md` |
+
+### R2 修正概览
+
+| 项 | 修正 | 落点 |
+|---|---|---|
+| A 记录意图 | 多名幼儿的分析/咨询先回答，不自动建卡；显式记录意图 + 映射明确才独立卡；真歧义才澄清；`准备为观察` 可选；新增“帮我分析”与“帮我分别记录”对照 | `brief.md` §1.1、`message-spec.md` §0/§2.1/§3.1-3.3、`flow-analysis.md` S1b/S3/S9、`synthetic-example.md` §2 |
+| B 原操作核验 | 成功 = 原操作成功 + 身份/内容/业务结果一致；另一端归档不同内容不得显示“你的修改已保存”；未知只查原 operation_id，不新建提案绕过；保留输入/操作标记/写锁；中间效果不冒充整条归档 | `recovery-spec.md`（原则 2–4、§1.2–1.6、§1.10、§2）、`message-spec.md` §3.8/§3.9、`flow-analysis.md` S8 |
+| C 案例事实 | 不补造“口头提醒/主动去问”；提醒方式/内容为真实未知；追问问“方式或大致内容”，逐字非必填；跳过/记不清仍可事实保留与整理，暂不确认有疑问的指南关联，不阻塞；`adult_help: allowed` 不自动降级 | `synthetic-example.md`、`message-spec.md` §3.4、`prompts/02、05、06`、`prompts/README.md` |
+| D 保存语义 | “准备态不自动写库”改为：不自动形成业务观察/正式确认；聊天、私人草稿、素材可按契约账号私有持久化；关闭聊天不必然丢失 | `brief.md` §1.1/§2.2、`message-spec.md` §0、`recovery-spec.md` §1.9、`same-record-flow.md` §1/§6、`future-acceptance.md` |
 
 检查结果：`revision-check.md`（文档正反场景与跨文档一致性核对，不冒充功能/视觉 PASS）。
 
@@ -57,4 +66,4 @@
 - **[C] 代码证据**：基线 SHA 上可核对的文件与行；**只证明现状**，且恢复类 [C] 仅覆盖现有“观察状态核对”子集，不是通用回执账本。
 - **[A] 设计假设/依赖项**：合理但未验证，或依赖 CONTRACT-R1/TECH0-R1 的接口映射。
 - **[U] 尚无教师实测**：本设计没有任何真实教师可用性测试；演示数据为合成。
-- **[R1]**：本轮修正新增或改变的口径。
+- **[R1]** / **[R2]**：对应轮次修正新增或改变的口径。
