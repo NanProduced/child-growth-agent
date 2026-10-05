@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -22,6 +22,11 @@ import { DraftView } from '@/components/draft-view';
 import { GuideAssociationSection } from '@/components/guide/guide-association-section';
 import type { BasisSourceOption, GuideItemOption, GuideWriteAccessView } from '@/lib/guide/association-types';
 import { withEvidenceItemFocus } from '@/lib/guide/navigation';
+import {
+  confirmAppliedIsDecisive,
+  parseHostObservationResponse,
+  parseReviewConfirmResponse,
+} from '@/lib/guide/mutation-response';
 import type { GuideEvidenceDecisionInput, EvidenceLinkView } from '@/lib/guide/view-types';
 import { Button } from '@/components/ui/button';
 import {
@@ -61,7 +66,6 @@ import {
   type ObservationDraft,
   type TeacherEditContent,
   type TeacherEditReview,
-  type TeacherEditReviewOutput,
 } from '@/lib/types';
 
 interface DraftForm {
@@ -110,14 +114,10 @@ export interface ReviewGuideContext {
   focusItemId: string | null;
   focusItemUnknown: boolean;
   returnHref: string | null;
-}
-
-interface ConfirmGuideExtension {
-  status: 'applied' | 'deferred';
-  revision?: number;
-  links?: EvidenceLinkView[];
-  detail_unavailable?: boolean;
-  message?: string;
+  /** 稳定页面身份：账号变化时清空上一个身份的私人草稿 */
+  viewerKey: string;
+  /** 服务端版本戳：变化代表新的服务端状态已到达 */
+  serverStamp: string;
 }
 
 export function ReviewClient({
@@ -159,9 +159,24 @@ export function ReviewClient({
   const [pendingGuide, setPendingGuide] = useState<{
     expectedRevision: number;
     decisions: GuideEvidenceDecisionInput[];
+    staleCount: number;
   } | null>(null);
+  const [guideBusy, setGuideBusy] = useState(false);
+  const [confirmUnresolved, setConfirmUnresolved] = useState<null | {
+    kind: 'confirm' | 'clarify';
+    message: string;
+  }>(null);
+  // 仅表示“本客户端刚完成或经读回确认了归档写入”；普通已归档回看不因此锁死关联操作
+  const [archiveCommitted, setArchiveCommitted] = useState(false);
+  const [confirmReading, setConfirmReading] = useState(false);
 
-  // 服务端已按当前会话解析写权限；旧口令教师身份也由服务端确认，不信任客户端声明
+  // 未提交修改的脏标记：刷新带来的服务端变化不能覆盖仍属于当前身份的教师修改
+  const formDirtyRef = useRef(false);
+  const noteDirtyRef = useRef(false);
+  const viewerRef = useRef(guide.viewerKey);
+  const stampRef = useRef(guide.serverStamp);
+
+  // 服务端已按当前会话解析写权限；不信任客户端声明
   const teacherReady = writeAccess.can_organize || (configured && isTeacher);
   const liveConfirmed = useMemo(
     () =>
@@ -171,7 +186,13 @@ export function ReviewClient({
     [form],
   );
   const handlePendingGuideChange = useCallback(
-    (pending: { expectedRevision: number; decisions: GuideEvidenceDecisionInput[] } | null) => {
+    (
+      pending: {
+        expectedRevision: number;
+        decisions: GuideEvidenceDecisionInput[];
+        staleCount: number;
+      } | null,
+    ) => {
       setPendingGuide(pending);
     },
     [],
@@ -184,15 +205,124 @@ export function ReviewClient({
     },
     [],
   );
+  const handleGuideBusyChange = useCallback((value: boolean) => {
+    setGuideBusy(value);
+  }, []);
 
-  function applyObservation(updated: Observation) {
+  function applyObservation(updated: {
+    agent_context: AgentContext | null;
+    ai_draft: ObservationDraft | null;
+    ai_model: string | null;
+    ai_organized_at: string | null;
+    status: Observation['status'];
+  }) {
     setAgentContext(updated.agent_context);
     setTeacherEditReview(updated.agent_context?.teacher_edit_review ?? null);
     setAiDraft(updated.ai_draft);
     setForm(draftToForm(updated.ai_draft));
+    formDirtyRef.current = false;
     setAiModel(updated.ai_model);
     setOrganizedAt(updated.ai_organized_at);
     setStatus(updated.status);
+  }
+
+  /**
+   * 服务端新状态到达时的显式同步：更新观察状态、关联 revision/links/依据来源；
+   * 保留仍属于当前身份的未提交修改与备注；账号变化时清空旧身份草稿；
+   * 宿主已归档则清除待提交选择，不把旧草稿展示或提交。
+   */
+  useEffect(() => {
+    if (viewerRef.current !== guide.viewerKey) {
+      viewerRef.current = guide.viewerKey;
+      formDirtyRef.current = false;
+      noteDirtyRef.current = false;
+      setConfirmUnresolved(null);
+      setConfirmReading(false);
+      setArchiveCommitted(false);
+      setGuideBusy(false);
+      setPendingGuide(null);
+      setFollowUpContent('');
+      setClarifyContent('');
+      setStatus(observation.status);
+      setConfirmedContent(observation.confirmed_content);
+      setConfirmedAt(observation.confirmed_at);
+      setAiModel(observation.ai_model);
+      setOrganizedAt(observation.ai_organized_at);
+      setAiDraft(observation.ai_draft);
+      setAgentContext(observation.agent_context);
+      setTeacherEditReview(observation.agent_context?.teacher_edit_review ?? null);
+      setForm(draftToForm(observation.ai_draft));
+      setTeacherNote(observation.confirmed_content?.teacher_note ?? '');
+      setGuideRevision(guide.revision);
+      setGuideLinks(guide.links);
+      setGuideDetailUnavailable(guide.detailUnavailable);
+      stampRef.current = guide.serverStamp;
+      return;
+    }
+    if (stampRef.current === guide.serverStamp) return;
+    stampRef.current = guide.serverStamp;
+    setGuideBusy(false);
+    setGuideRevision(guide.revision);
+    setGuideLinks(guide.links);
+    setGuideDetailUnavailable(guide.detailUnavailable);
+    setStatus(observation.status);
+    setConfirmedContent(observation.confirmed_content);
+    setConfirmedAt(observation.confirmed_at);
+    setAiModel(observation.ai_model);
+    setOrganizedAt(observation.ai_organized_at);
+    setAiDraft(observation.ai_draft);
+    setAgentContext(observation.agent_context);
+    setTeacherEditReview(observation.agent_context?.teacher_edit_review ?? null);
+    if (observation.status === 'confirmed') {
+      setArchiveCommitted(false);
+      setConfirmUnresolved(null);
+      setPendingGuide(null);
+      formDirtyRef.current = false;
+      noteDirtyRef.current = false;
+      setForm(null);
+    } else {
+      setArchiveCommitted(false);
+      if (!formDirtyRef.current) setForm(draftToForm(observation.ai_draft));
+      if (!noteDirtyRef.current) setTeacherNote(observation.confirmed_content?.teacher_note ?? '');
+    }
+  }, [guide, observation]);
+
+  /** 结果不确定时的读回核对：只有确认已归档才进入已保存；确认未归档才允许教师重试 */
+  async function reconcileConfirmResult() {
+    if (confirmReading) return;
+    setConfirmReading(true);
+    try {
+      const res = await fetch(`/api/observations?child_id=${encodeURIComponent(child.id)}`, {
+        cache: 'no-store',
+        credentials: 'same-origin',
+      });
+      const rawText = await res.text();
+      const read = parseHostObservationResponse(res.status, rawText, observation.id);
+      if (!read.ok) {
+        toast.warning(
+          `${read.message} 不能据此认为未保存；可继续重试「重新读取」，不会自动重复提交归档。`,
+        );
+        return;
+      }
+      if (read.observation.status === 'confirmed') {
+        setConfirmUnresolved(null);
+        setArchiveCommitted(true);
+        setStatus('confirmed');
+        setPendingGuide(null);
+        formDirtyRef.current = false;
+        noteDirtyRef.current = false;
+        toast.info('重新读取后确认观察已归档；正在重新读取详情，请勿重复提交。');
+        router.refresh();
+        return;
+      }
+      setConfirmUnresolved(null);
+      setStatus(read.observation.status);
+      toast.info('重新读取后确认尚未归档；输入与待提交选择仍保留，可核对后重试。');
+    } catch {
+      toast.warning('读取中断，仍无法确认归档结果；可继续重试「重新读取」，不会自动重复提交。');
+    } finally {
+      setConfirmReading(false);
+    }
   }
 
   async function handleOrganize() {
@@ -258,6 +388,11 @@ export function ReviewClient({
 
   async function handleConfirm() {
     if (!form) return;
+    if (archiveCommitted || confirmUnresolved || guideBusy) return;
+    if (pendingGuide && pendingGuide.staleCount > 0) {
+      toast.error('有关联选择需要重新核对，暂不能归档；请在关联区逐条重新核对或移除。');
+      return;
+    }
     const payload = {
       content: formToContent(form),
       teacher_note: teacherNote.trim() || undefined,
@@ -287,38 +422,48 @@ export function ReviewClient({
         body: JSON.stringify(payload),
       });
     } catch {
-      // 结果不确定：先读回宿主与关联状态，不自动重复提交归档
-      toast.warning('网络中断，确认结果不确定。已重新读取记录，请核对状态后再决定是否重试；系统不会自动重复提交。');
-      router.refresh();
+      setConfirmUnresolved({
+        kind: 'confirm',
+        message: '网络中断，归档结果不确定；输入与待提交选择已保留，请重新读取核对。',
+      });
       setBusy(null);
       return;
     }
     try {
-      const data = (await res.json().catch(() => ({}))) as {
-        observation?: Observation;
-        message?: string;
-        error?: string;
-        requiresAgentConfirmation?: boolean;
-        agentReview?: TeacherEditReviewOutput;
-        profileUpdateStatus?: 'updated' | 'failed';
-        profileUpdateMessage?: string;
-        guideEvidence?: ConfirmGuideExtension;
-      };
-      if (!res.ok || !data.observation) {
-        if (
-          data.error === 'basis_expired' ||
-          data.error === 'catalog_version_mismatch' ||
-          data.error === 'state_conflict'
-        ) {
-          toast.warning(`${data.message ?? '关联决定未写入。'} 请重新读取后核对；旧决定不会自动重放。`);
-          router.refresh();
-          return;
+      const rawText = await res.text();
+      const parsed = parseReviewConfirmResponse(res.status, rawText, observation.id, child.id);
+      if (!parsed.ok) {
+        const failure = parsed.failure;
+        if (failure.kind === 'http') {
+          if (
+            failure.error === 'basis_expired' ||
+            failure.error === 'catalog_version_mismatch' ||
+            failure.error === 'state_conflict'
+          ) {
+            toast.warning(`${failure.message} 请重新读取后核对；旧决定不会自动重放。`);
+            router.refresh();
+            return;
+          }
+          if (failure.status === 409) {
+            // 其他 409（例如已被其他操作端归档）：写入确定未发生，先读回服务端事实再决定
+            toast.warning(`${failure.message} 正在重新读取服务端状态核对。`);
+            void reconcileConfirmResult();
+            return;
+          }
+          throw new Error(failure.message);
         }
-        throw new Error(data.message ?? '确认归档失败，请稍后重试');
+        setConfirmUnresolved({
+          kind: 'confirm',
+          message: `${failure.message} 输入与待提交选择已保留，请重新读取核对；系统不会自动重复提交。`,
+        });
+        return;
       }
-      if (data.guideEvidence?.status === 'applied' && data.guideEvidence.links) {
-        setGuideRevision(data.guideEvidence.revision ?? guideRevision);
-        setGuideLinks(data.guideEvidence.links);
+      const data = parsed.value;
+      const applied = confirmAppliedIsDecisive(data.guideEvidence);
+      if (applied === 'saved_with_links') {
+        setGuideRevision(data.guideEvidence?.revision ?? guideRevision);
+        setGuideLinks(data.guideEvidence?.links ?? []);
+        setGuideDetailUnavailable(false);
         setPendingGuide(null);
       }
       if (data.requiresAgentConfirmation) {
@@ -326,7 +471,7 @@ export function ReviewClient({
         setTeacherEditReview(data.observation.agent_context?.teacher_edit_review ?? null);
         setStatus(data.observation.status);
         toast.info(
-          data.guideEvidence?.status === 'deferred'
+          applied === 'deferred'
             ? '关联选择已保留，将在最终归档时与观察一起写入。'
             : data.agentReview?.decision === 'clarify'
               ? 'Agent 需要你进一步澄清这处修改。'
@@ -334,24 +479,37 @@ export function ReviewClient({
         );
         return;
       }
-      if (data.guideEvidence?.status === 'applied' && data.guideEvidence.detail_unavailable) {
+      if (applied === 'saved_detail_unavailable') {
+        setPendingGuide(null);
+        setArchiveCommitted(true);
+        setStatus('confirmed');
         toast.info(
-          data.guideEvidence.message ??
+          data.guideEvidence?.message ??
             '观察与关联决定已保存；证据详情暂时无法读取，正在重新读取，请勿重复提交。',
         );
         router.refresh();
         return;
       }
+      if (data.observation.status !== 'confirmed') {
+        setConfirmUnresolved({
+          kind: 'confirm',
+          message: '响应已收到，但无法确认归档结果；输入与待提交选择已保留，请重新读取核对。',
+        });
+        return;
+      }
+      setArchiveCommitted(true);
+      setStatus('confirmed');
+      setPendingGuide(null);
+      formDirtyRef.current = false;
+      noteDirtyRef.current = false;
       if (data.profileUpdateStatus === 'failed') {
         toast.info(data.profileUpdateMessage ?? '观察已确认，成长档案暂未更新，请稍后重试。');
       } else if (data.profileUpdateStatus === 'updated') {
         toast.success(
-          data.guideEvidence?.status === 'applied' ? '已确认归档，成长档案与指南关联已更新' : '已确认归档，成长档案已更新',
+          applied === 'saved_with_links' ? '已确认归档，成长档案与指南关联已更新' : '已确认归档，成长档案已更新',
         );
       } else {
-        toast.success(
-          data.guideEvidence?.status === 'applied' ? '已确认归档，指南关联已写入' : '已确认归档，内容进入幼儿正册',
-        );
+        toast.success(applied === 'saved_with_links' ? '已确认归档，指南关联已写入' : '已确认归档，内容进入幼儿正册');
       }
       if (guide.returnHref) {
         router.push(withEvidenceItemFocus(guide.returnHref, guide.focusItemId));
@@ -367,6 +525,11 @@ export function ReviewClient({
 
   async function handleClarify() {
     if (!form || !clarifyContent.trim()) return;
+    if (archiveCommitted || confirmUnresolved || guideBusy) return;
+    if (pendingGuide && pendingGuide.staleCount > 0) {
+      toast.error('有关联选择需要重新核对，暂不能提交；请在关联区逐条重新核对或移除。');
+      return;
+    }
     setBusy('confirm');
     let res: Response;
     try {
@@ -388,27 +551,46 @@ export function ReviewClient({
         }),
       });
     } catch {
-      toast.warning('网络中断，提交结果不确定。已重新读取记录，请核对后再决定是否重试；系统不会自动重复提交。');
-      router.refresh();
+      setConfirmUnresolved({
+        kind: 'clarify',
+        message: '网络中断，提交结果不确定；输入与待提交选择已保留，请重新读取核对。',
+      });
       setBusy(null);
       return;
     }
     try {
-      const data = (await res.json().catch(() => ({}))) as {
-        observation?: Observation;
-        message?: string;
-        agentReview?: TeacherEditReviewOutput;
-        guideEvidence?: ConfirmGuideExtension;
-      };
-      if (!res.ok || !data.observation) {
-        throw new Error(data.message ?? '提交澄清失败，请稍后重试');
+      const rawText = await res.text();
+      const parsed = parseReviewConfirmResponse(res.status, rawText, observation.id, child.id);
+      if (!parsed.ok) {
+        if (parsed.failure.kind === 'http') throw new Error(parsed.failure.message);
+        setConfirmUnresolved({
+          kind: 'clarify',
+          message: `${parsed.failure.message} 输入与待提交选择已保留，请重新读取核对；系统不会自动重复提交。`,
+        });
+        return;
+      }
+      const data = parsed.value;
+      if (!data.requiresAgentConfirmation) {
+        if (data.observation.status === 'confirmed') {
+          setArchiveCommitted(true);
+          setStatus('confirmed');
+          setPendingGuide(null);
+          toast.info('响应显示观察已归档；正在重新读取详情，请勿重复提交。');
+          router.refresh();
+          return;
+        }
+        setConfirmUnresolved({
+          kind: 'clarify',
+          message: '响应已收到，但无法确认澄清提交结果；输入与待提交选择已保留，请重新读取核对。',
+        });
+        return;
       }
       setAgentContext(data.observation.agent_context);
       setTeacherEditReview(data.observation.agent_context?.teacher_edit_review ?? null);
       setStatus(data.observation.status);
       setClarifyContent('');
       toast.success(
-        data.guideEvidence?.status === 'deferred'
+        confirmAppliedIsDecisive(data.guideEvidence) === 'deferred'
           ? '关联选择已保留，将在最终归档时写入。'
           : data.agentReview?.decision === 'accept'
             ? '已结合补充依据完成审核，请进行最终归档。'
@@ -422,9 +604,22 @@ export function ReviewClient({
     }
   }
 
-  const updateForm = (patch: Partial<DraftForm>) =>
+  const updateForm = (patch: Partial<DraftForm>) => {
+    formDirtyRef.current = true;
     setForm((prev) => (prev ? { ...prev, ...patch } : prev));
+  };
 
+  const pendingStaleCount = pendingGuide?.staleCount ?? 0;
+  const confirmLockReason = archiveCommitted
+    ? '这条观察已归档，不能重复提交'
+    : confirmUnresolved
+      ? '归档结果待核对，请先重新读取'
+      : guideBusy
+        ? '关联操作进行中，暂不能归档'
+        : pendingStaleCount > 0
+          ? '有关联选择需要重新核对或移除'
+          : null;
+  const confirmDisabled = busy !== null || confirmLockReason !== null;
   const workflowStage = status === 'draft' ? 0 : status === 'needs_input' ? 1 : status === 'ai_organized' ? 2 : 3;
   const observedClassText = schoolClassLabel(observation.observed_class);
   const workflowSteps = ['已保存', '补充信息（按需）', 'AI 整理', '教师确认'];
@@ -523,6 +718,40 @@ export function ReviewClient({
         </Alert>
       ) : null}
 
+      {confirmUnresolved ? (
+        <Alert className="border-amber-300 bg-amber-50/70" data-testid="confirm-unresolved">
+          <RefreshCw className="size-4 text-amber-700" />
+          <AlertTitle>归档结果待核对</AlertTitle>
+          <AlertDescription>
+            <p className="leading-6 text-amber-900">{confirmUnresolved.message}</p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-2 min-h-11"
+              onClick={() => void reconcileConfirmResult()}
+              disabled={confirmReading}
+              data-testid="confirm-reconcile"
+            >
+              {confirmReading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              重新读取核对
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {archiveCommitted && !confirmedContent ? (
+        <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm leading-6 text-emerald-900" role="status" data-testid="archive-committed-pending-detail">
+          这条观察已确认归档；详情暂时未读取到，正在重新读取。请勿重复提交归档或再次修改关联。
+        </p>
+      ) : null}
+
+      {teacherReady && confirmLockReason && status !== 'confirmed' ? (
+        <p className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900" role="status" data-testid="confirm-lock-note">
+          暂不能提交归档或澄清：{confirmLockReason}。
+        </p>
+      ) : null}
+
       <GuideAssociationSection
         observationId={observation.id}
         childId={child.id}
@@ -538,8 +767,13 @@ export function ReviewClient({
         focusItemId={guide.focusItemId}
         focusItemUnknown={guide.focusItemUnknown}
         liveConfirmed={liveConfirmed}
+        viewerKey={guide.viewerKey}
+        serverStamp={guide.serverStamp}
+        hostBusy={busy === 'confirm' || busy === 'organize' || busy === 'follow-up'}
+        hostCommitted={archiveCommitted}
         onRevisionChange={handleGuideRevisionChange}
         onPendingChange={handlePendingGuideChange}
+        onBusyChange={handleGuideBusyChange}
       />
 
       {status === 'needs_input' && followUp ? (
@@ -602,7 +836,7 @@ export function ReviewClient({
               <Button
                 className="w-full sm:w-auto"
                 onClick={() => void handleFollowUp('answer')}
-                disabled={busy !== null || !followUpContent.trim()}
+                disabled={busy !== null || guideBusy || !followUpContent.trim()}
               >
                 {busy === 'follow-up' ? <Loader2 className="size-4 animate-spin" /> : null}
                 回答并继续
@@ -611,7 +845,7 @@ export function ReviewClient({
                 variant="outline"
                 className="w-full sm:w-auto"
                 onClick={() => void handleFollowUp('skip')}
-                disabled={busy !== null}
+                disabled={busy !== null || guideBusy}
               >
                 跳过，直接整理
               </Button>
@@ -619,7 +853,7 @@ export function ReviewClient({
                 variant="ghost"
                 className="w-full sm:w-auto"
                 onClick={() => void handleFollowUp('stop')}
-                disabled={busy !== null}
+                disabled={busy !== null || guideBusy}
               >
                 不再追问
               </Button>
@@ -670,7 +904,7 @@ export function ReviewClient({
               结构化分析卡片，产出仅为草稿，需教师核对确认。
             </div>
             {teacherReady ? (
-              <Button onClick={() => void handleOrganize()} disabled={busy !== null}>
+              <Button onClick={() => void handleOrganize()} disabled={busy !== null || guideBusy}>
                 {busy === 'organize' ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
@@ -777,7 +1011,7 @@ export function ReviewClient({
               <Label>教师备注（确认时可选填）</Label>
               <Input
                 value={teacherNote}
-                onChange={(e) => setTeacherNote(e.target.value)}
+                onChange={(e) => { noteDirtyRef.current = true; setTeacherNote(e.target.value); }}
                 placeholder="如：记录属实，已补充细节；或说明修改原因"
                 maxLength={500}
               />
@@ -789,7 +1023,7 @@ export function ReviewClient({
                 variant="outline"
                 className="w-full sm:w-auto"
                 onClick={() => void handleOrganize()}
-                disabled={busy !== null}
+                disabled={busy !== null || guideBusy}
               >
                 {busy === 'organize' ? (
                   <Loader2 className="size-4 animate-spin" />
@@ -798,7 +1032,7 @@ export function ReviewClient({
                 )}
                 重新生成
               </Button>
-              <Button onClick={() => void handleConfirm()} disabled={busy !== null} className="w-full sm:w-auto">
+              <Button onClick={() => void handleConfirm()} disabled={confirmDisabled} className="w-full sm:w-auto" data-testid="confirm-archive">
                 {busy === 'confirm' ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
@@ -884,7 +1118,7 @@ export function ReviewClient({
           {teacherReady ? (
             <CardFooter className="justify-end border-t bg-white/60">
               {teacherEditReview.decision === 'accept' ? (
-                <Button onClick={() => void handleConfirm()} disabled={busy !== null} className="w-full sm:w-auto">
+                <Button onClick={() => void handleConfirm()} disabled={confirmDisabled} className="w-full sm:w-auto" data-testid="confirm-archive">
                   {busy === 'confirm' ? <Loader2 className="size-4 animate-spin" /> : <BadgeCheck className="size-4" />}
                   确认归档
                 </Button>
@@ -906,14 +1140,14 @@ export function ReviewClient({
                       variant="outline"
                       className="w-full sm:w-auto"
                       onClick={() => document.getElementById('objective-description')?.focus()}
-                      disabled={busy !== null}
+                      disabled={busy !== null || guideBusy}
                     >
                       返回修改
                     </Button>
                     <Button
                       className="w-full sm:w-auto"
                       onClick={() => void handleClarify()}
-                      disabled={busy !== null || !clarifyContent.trim()}
+                      disabled={confirmDisabled || !clarifyContent.trim()}
                     >
                       {busy === 'confirm' ? <Loader2 className="size-4 animate-spin" /> : null}
                       提交澄清并重新审核

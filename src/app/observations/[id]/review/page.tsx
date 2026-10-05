@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 
+import { resolveServerAuth } from '@/lib/accounts/access';
 import { scopedGetChild as getChild, scopedGetObservation as getObservation, scopedListObservations } from '@/lib/accounts/scoped-queries';
 import { GUIDE_CATALOG } from '@/data/guide';
 import type { BasisSourceOption, GuideItemOption, GuideWriteAccessView } from '@/lib/guide/association-types';
@@ -65,10 +66,14 @@ export default async function ObservationReviewPage({
 
   const focus = observationFocusFromSearch(search);
   const observationId = observation.id;
-  const [items, confirmedObservations] = await Promise.all([
+  const [items, confirmedObservations, auth] = await Promise.all([
     listGuideItems(),
     scopedListObservations({ childId: observation.child_id, status: 'confirmed' }),
+    resolveServerAuth(),
   ]);
+  // 稳定的页面身份：账号变化时客户端必须清空上一个身份的私人草稿
+  const viewerKey =
+    auth.state.kind === 'authenticated' ? auth.state.principal.account_id : 'anonymous';
 
   const itemOptions: GuideItemOption[] = items.map((item) => ({
     id: item.id,
@@ -148,9 +153,17 @@ export default async function ObservationReviewPage({
     detailUnavailable = true;
   }
 
+  // 服务端版本戳：观察修订、状态与关联修订/详情任一变化都代表新的服务端状态
+  const serverStamp = [
+    observation.updated_at ?? '',
+    observation.status,
+    revision,
+    links.length,
+    detailUnavailable ? 'detail-unavailable' : 'detail-ok',
+  ].join('|');
+
   return (
     <ReviewClient
-      key={observation.updated_at ?? observation.id}
       observation={observation}
       child={child}
       writeAccess={FULL_TEACHER_ACCESS}
@@ -165,6 +178,8 @@ export default async function ObservationReviewPage({
         focusItemId: focus.itemId,
         focusItemUnknown: Boolean(focus.itemId && !itemOptions.some((item) => item.id === focus.itemId)),
         returnHref: focus.returnTo,
+        viewerKey,
+        serverStamp,
       }}
     />
   );

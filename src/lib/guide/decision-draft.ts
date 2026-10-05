@@ -1,5 +1,6 @@
 import { parseIsoDateStrict } from "@/lib/format";
 
+import type { BasisSourceOption } from "./association-types";
 import type {
   GuideAdultHelpPolicy,
   GuideEvidencePeriodNote,
@@ -175,4 +176,61 @@ export function basisSourceLabel(input: {
 }): string {
   const context = input.context?.trim() ? input.context.trim() : "未填写情境";
   return `${input.observed_at} · ${context}${input.is_host ? " · 本观察" : ""}`;
+}
+
+/* --------------------- 未提交草稿的版本与依据失效核对 --------------------- */
+
+/** 未提交（待随归档提交）的决定：记录建立时的服务端修订与依据指纹 */
+export interface PendingDecisionDraft {
+  draft: DecisionDraft;
+  basedOnRevision: number;
+  basisFingerprint: string;
+}
+
+function sourceFingerprint(source: BasisSourceOption): string {
+  return JSON.stringify([
+    source.id,
+    source.observed_at,
+    source.status,
+    source.raw_text.length,
+    source.confirmed?.highlight_quote ?? null,
+    source.confirmed?.highlights ?? [],
+  ]);
+}
+
+/**
+ * 依据指纹：只反映依据来源（来源是否仍在、来源内容是否变化），不含教师自己填写的引用片段；
+ * 任一来源缺失返回 null（无法核验）。
+ */
+export function decisionBasisFingerprint(
+  basis: DecisionBasisDraft[],
+  sources: BasisSourceOption[],
+): string | null {
+  const byId = new Map(sources.map((source) => [source.id, source]));
+  const parts: string[] = [];
+  for (const entry of basis) {
+    const source = byId.get(entry.observation_id);
+    if (!source) return null;
+    parts.push(sourceFingerprint(source));
+  }
+  return parts.join("|");
+}
+
+/**
+ * 待提交草稿失效原因：服务端修订变化或依据来源变化时返回原因。
+ * 失效草稿不得直接更新 expectedRevision 后静默提交，必须由教师重新核对。
+ */
+export function pendingStaleReason(
+  pending: PendingDecisionDraft,
+  currentRevision: number,
+  sources: BasisSourceOption[],
+): string | null {
+  if (pending.basedOnRevision !== currentRevision) {
+    return "服务端关联修订已变化，请重新核对依据后再归档。";
+  }
+  const fingerprint = decisionBasisFingerprint(pending.draft.basis, sources);
+  if (fingerprint === null || fingerprint !== pending.basisFingerprint) {
+    return "草稿的依据来源已变化或不可用，请重新核对依据。";
+  }
+  return null;
 }

@@ -1,15 +1,36 @@
 import assert from "node:assert/strict";
 
 import type { Principal } from "../src/lib/accounts/types";
-import { basisQuoteChoices, type BasisSourceOption } from "../src/lib/guide/association-types";
 import {
+  basisQuoteChoices,
+  guideDecisionChoiceLabels,
+  guideItemRuleLine,
+  guideLinkStatusLabel,
+  guideSupportLabel,
+  isHealthReference,
+  type BasisSourceOption,
+} from "../src/lib/guide/association-types";
+import {
+  decisionBasisFingerprint,
   decisionDraftKey,
   draftToDecisionInput,
   emptyDecisionDraft,
+  pendingStaleReason,
   sustainedConditionError,
   validateDecisionDraft,
   type DecisionDraft,
+  type PendingDecisionDraft,
 } from "../src/lib/guide/decision-draft";
+import {
+  confirmAppliedIsDecisive,
+  mutationTargetOutcome,
+  parseGuideMutationResponse,
+  parseHostObservationResponse,
+  parseReviewConfirmResponse,
+  rawTargetOutcome,
+  readRawGuideLinks,
+  readRawRevision,
+} from "../src/lib/guide/mutation-response";
 import {
   observationFocusFromSearch,
   observationFocusQuery,
@@ -24,6 +45,7 @@ import {
   type IdentityFacts,
 } from "../src/lib/guide/write-access-rules";
 import { isReliableChildShape, loadChildren } from "../src/lib/child-list-client";
+import type { EvidenceLinkView } from "../src/lib/guide/view-types";
 import type { Child } from "../src/lib/types";
 
 /**
@@ -355,6 +377,342 @@ async function main(): Promise<void> {
 
   const children: Child[] = [];
   void children;
+
+  /* ---------------- R1：写入结果响应核对（反例不是只看 HTTP 状态） ---------------- */
+  const validLink: EvidenceLinkView = {
+    link_id: "link-1",
+    item_id: "item-1",
+    catalog_version: "moe-3-6-2012.v1",
+    origin: "manual",
+    status: "confirmed_performance",
+    support: "single_event",
+    sustained_note: null,
+    adult_help_used: false,
+    basis: [
+      {
+        observation_id: "obs-1",
+        observed_at: "2026-09-20",
+        quote: "请你先玩。",
+        quote_source: "raw_text",
+        quote_field: null,
+        class_context: null,
+        source_confirmed_at: "2026-09-20T01:00:00.000Z",
+        valid: true,
+        invalid_reason: null,
+        observation_status: "confirmed",
+      },
+    ],
+    ai_reason: null,
+    teacher_note: null,
+    revision: 1,
+    created_at: "2026-09-20T01:00:00.000Z",
+    decided_at: "2026-09-20T01:00:00.000Z",
+    withdrawn_at: null,
+    withdrawn_reason: null,
+    counts_toward_status: true,
+    excluded_reason: null,
+  };
+
+  const mutationRaw = (payload: unknown) => JSON.stringify(payload);
+  const okMutation = parseGuideMutationResponse(
+    200,
+    mutationRaw({ observation_id: "obs-host", revision: 1, links: [validLink] }),
+    "obs-host",
+  );
+  ok(okMutation.ok && okMutation.value.links.length === 1 && okMutation.value.notice === null, "指南操作合法响应通过");
+  const idempotent = parseGuideMutationResponse(
+    200,
+    mutationRaw({ observation_id: "obs-host", revision: 0, links: [validLink] }),
+    "obs-host",
+  );
+  ok(idempotent.ok && idempotent.value.revision === 0, "幂等结果允许 revision 不递增");
+  const emptyObject = parseGuideMutationResponse(200, "{}", "obs-host");
+  ok(!emptyObject.ok && emptyObject.failure.kind === "invalid_shape", "200 {} 不得当作成功");
+  const invalidJson = parseGuideMutationResponse(200, "<html>", "obs-host");
+  ok(!invalidJson.ok && invalidJson.failure.kind === "invalid_json", "非法 JSON 不得当作成功");
+  const wrongHost = parseGuideMutationResponse(
+    200,
+    mutationRaw({ observation_id: "obs-other", revision: 2, links: [validLink] }),
+    "obs-host",
+  );
+  ok(!wrongHost.ok && wrongHost.failure.kind === "invalid_shape", "错误宿主不得当作成功");
+  const invalidLinks = parseGuideMutationResponse(
+    200,
+    mutationRaw({ observation_id: "obs-host", revision: 2, links: [{ link_id: "x" }] }),
+    "obs-host",
+  );
+  ok(!invalidLinks.ok && invalidLinks.failure.kind === "invalid_shape", "非法 links 不得当作成功");
+  const withNotice = parseGuideMutationResponse(
+    200,
+    mutationRaw({
+      observation_id: "obs-host",
+      revision: 3,
+      links: [validLink],
+      notice: { code: "ai_link_failed", severity: "warning", message: "引用未通过核对" },
+    }),
+    "obs-host",
+  );
+  ok(withNotice.ok && withNotice.value.notice?.code === "ai_link_failed", "AI 失败 notice 原样保留");
+  const conflict = parseGuideMutationResponse(
+    409,
+    mutationRaw({ error: "state_conflict", message: "revision 过期" }),
+    "obs-host",
+  );
+  ok(!conflict.ok && conflict.failure.kind === "http" && conflict.failure.error === "state_conflict", "409 映射为明确失败");
+
+  /* 本次目标结果 */
+  ok(mutationTargetOutcome([validLink], { action: "confirm", link_id: "link-1", item_id: "item-1" }) === "applied", "确认目标已生效");
+  ok(
+    mutationTargetOutcome(
+      [{ ...validLink, status: "rejected" }],
+      { action: "confirm", link_id: "link-1", item_id: "item-1" },
+    ) === "not_applied",
+    "确认目标被拒绝时不算成功",
+  );
+  ok(mutationTargetOutcome([], { action: "confirm", link_id: "link-1", item_id: "item-1" }) === "unconfirmed", "目标缺失需要读回");
+  ok(
+    mutationTargetOutcome([validLink], { action: "confirm", link_id: null, item_id: "item-1" }) === "applied",
+    "手动关联目标按 manual 条目核对",
+  );
+  ok(
+    mutationTargetOutcome(
+      [{ ...validLink, status: "rejected" }],
+      { action: "reject", link_id: "link-1" },
+    ) === "applied",
+    "不采用目标已终态",
+  );
+  ok(
+    mutationTargetOutcome([validLink], { action: "reject", link_id: "link-1" }) === "not_applied",
+    "不采用未生效不算成功",
+  );
+  ok(
+    mutationTargetOutcome(
+      [{ ...validLink, status: "withdrawn" }],
+      { action: "withdraw", link_id: "link-1" },
+    ) === "applied",
+    "撤回目标已终态",
+  );
+
+  /* 已授权读回 */
+  const readOk = parseHostObservationResponse(
+    200,
+    mutationRaw({
+      observations: [
+        { id: "obs-host", child_id: "child-1", status: "confirmed", guide_evidence: { revision: 4, links: [] } },
+      ],
+    }),
+    "obs-host",
+  );
+  ok(readOk.ok && readOk.observation.status === "confirmed", "读回找到宿主并通过形状核对");
+  const readMissing = parseHostObservationResponse(
+    200,
+    mutationRaw({ observations: [] }),
+    "obs-host",
+  );
+  ok(!readMissing.ok && readMissing.kind === "not_found", "列表未找到宿主是 not_found（不能证明未写入）");
+  const readDenied = parseHostObservationResponse(401, mutationRaw({ message: "需要登录" }), "obs-host");
+  ok(!readDenied.ok && readDenied.kind === "http" && readDenied.status === 401, "读回 401 不视为未保存");
+  const readBroken = parseHostObservationResponse(200, JSON.stringify({ observations: [{ id: "obs-host" }] }), "obs-host");
+  ok(!readBroken.ok && readBroken.kind === "invalid_shape", "读回形状不可核对");
+
+  /* 原始容器核对 */
+  ok(readRawRevision({ revision: 3, links: [] }) === 3, "原始容器修订可读");
+  ok(readRawRevision({ links: [] }) === null, "修订缺失不当作 0");
+  ok(readRawGuideLinks(null)?.length === 0, "NULL 容器是正常未关联");
+  ok(readRawGuideLinks({ links: [{ foo: 1 }] }) === null, "损坏容器不可当作无关联");
+  ok(
+    rawTargetOutcome(
+      { revision: 2, links: [{ id: "link-1", item_id: "item-1", status: "confirmed_performance", origin: "manual" }] },
+      { action: "confirm", link_id: "link-1", item_id: "item-1" },
+    ) === "applied",
+    "读回原始容器确认目标已生效",
+  );
+  ok(
+    rawTargetOutcome({ revision: 2, links: [] }, { action: "reject", link_id: "link-1" }) === "not_applied",
+    "读回权威事实下目标缺失即未写入",
+  );
+  ok(
+    rawTargetOutcome({ revision: 2, links: [{ id: "l", item_id: "i", status: "whatever", origin: "manual" }] }, { action: "confirm", link_id: null, item_id: "i" }) === "not_applied",
+    "读回手动目标状态不符即未生效",
+  );
+  ok(
+    rawTargetOutcome({ links: "broken" }, { action: "confirm", link_id: null, item_id: "i" }) === "unconfirmed",
+    "读回容器不可读时仍需待核对",
+  );
+
+  /* Review 确认响应 */
+  const reviewOk = parseReviewConfirmResponse(
+    200,
+    mutationRaw({
+      observation: {
+        id: "obs-host",
+        child_id: "child-1",
+        status: "confirmed",
+        agent_context: null,
+        ai_draft: null,
+        ai_model: null,
+        ai_organized_at: null,
+        confirmed_content: null,
+        confirmed_at: "2026-09-20T02:00:00.000Z",
+        updated_at: "2026-09-20T02:00:00.000Z",
+      },
+      guideEvidence: { status: "applied", revision: 5, links: [validLink] },
+      profileUpdateStatus: "updated",
+    }),
+    "obs-host",
+    "child-1",
+  );
+  ok(
+    reviewOk.ok && confirmAppliedIsDecisive(reviewOk.value.guideEvidence) === "saved_with_links",
+    "归档+关联响应核对为已保存",
+  );
+  const detailUnavailable = parseReviewConfirmResponse(
+    200,
+    mutationRaw({
+      observation: {
+        id: "obs-host",
+        child_id: "child-1",
+        status: "confirmed",
+        agent_context: null,
+        ai_draft: null,
+        ai_model: null,
+        ai_organized_at: null,
+        confirmed_content: null,
+        confirmed_at: "2026-09-20T02:00:00.000Z",
+      },
+      guideEvidence: { status: "applied", detail_unavailable: true, message: "详情暂不可读" },
+    }),
+    "obs-host",
+    "child-1",
+  );
+  ok(
+    detailUnavailable.ok &&
+      confirmAppliedIsDecisive(detailUnavailable.value.guideEvidence) === "saved_detail_unavailable",
+    "applied+detail_unavailable 是已保存的充分事实",
+  );
+  const deferredResponse = parseReviewConfirmResponse(
+    200,
+    mutationRaw({
+      observation: {
+        id: "obs-host",
+        child_id: "child-1",
+        status: "ai_organized",
+        agent_context: null,
+        ai_draft: null,
+        ai_model: null,
+        ai_organized_at: null,
+        confirmed_content: null,
+        confirmed_at: null,
+      },
+      requiresAgentConfirmation: true,
+      guideEvidence: { status: "deferred" },
+    }),
+    "obs-host",
+    "child-1",
+  );
+  ok(
+    deferredResponse.ok && confirmAppliedIsDecisive(deferredResponse.value.guideEvidence) === "deferred",
+    "未归档 deferred 不当作已生效",
+  );
+  const reviewEmpty = parseReviewConfirmResponse(200, "{}", "obs-host", "child-1");
+  ok(!reviewEmpty.ok && reviewEmpty.failure.kind === "invalid_shape", "200 {} 的确认响应不得当作成功");
+  const reviewWrongChild = parseReviewConfirmResponse(
+    200,
+    mutationRaw({
+      observation: {
+        id: "obs-host",
+        child_id: "child-2",
+        status: "confirmed",
+        agent_context: null,
+        ai_draft: null,
+        ai_model: null,
+        ai_organized_at: null,
+        confirmed_content: null,
+        confirmed_at: "2026-09-20T02:00:00.000Z",
+      },
+    }),
+    "obs-host",
+    "child-1",
+  );
+  ok(!reviewWrongChild.ok, "确认响应幼儿不一致拒绝");
+  const reviewInvalidLinks = parseReviewConfirmResponse(
+    200,
+    mutationRaw({
+      observation: {
+        id: "obs-host",
+        child_id: "child-1",
+        status: "confirmed",
+        agent_context: null,
+        ai_draft: null,
+        ai_model: null,
+        ai_organized_at: null,
+        confirmed_content: null,
+        confirmed_at: "2026-09-20T02:00:00.000Z",
+      },
+      guideEvidence: { status: "applied", revision: 5, links: [{ link_id: "x" }] },
+    }),
+    "obs-host",
+    "child-1",
+  );
+  ok(!reviewInvalidLinks.ok, "确认响应非法 links 拒绝");
+
+  /* ---------------- R1：未提交草稿的修订/依据失效 ---------------- */
+  const staleSources: BasisSourceOption[] = [
+    {
+      id: "obs-1",
+      observed_at: "2026-09-20",
+      context: "区域活动",
+      class_label: null,
+      is_host: false,
+      raw_text: "他把小汽车递给同伴，说：请你先玩。",
+      confirmed: { highlight_quote: "请你先玩。", highlights: [] },
+      status: "confirmed",
+    },
+  ];
+  const pendingDraft = draft({ support: "clue_only" });
+  const fingerprint = decisionBasisFingerprint(pendingDraft.basis, staleSources);
+  ok(fingerprint !== null, "依据指纹可计算");
+  const pendingRow: PendingDecisionDraft = {
+    draft: pendingDraft,
+    basedOnRevision: 2,
+    basisFingerprint: fingerprint ?? "",
+  };
+  ok(pendingStaleReason(pendingRow, 2, staleSources) === null, "同修订同依据的草稿有效");
+  ok(
+    pendingStaleReason(pendingRow, 3, staleSources)?.includes("修订") === true,
+    "服务端修订变化后草稿必须重新核对",
+  );
+  ok(
+    decisionBasisFingerprint(pendingDraft.basis, []) === null,
+    "依据来源缺失时无法核验",
+  );
+  const changedSource: BasisSourceOption[] = [
+    { ...staleSources[0], confirmed: { highlight_quote: "请你先玩。", highlights: ["后来补充的亮点"] } },
+  ];
+  ok(
+    pendingStaleReason({ ...pendingRow, basedOnRevision: 3 }, 3, changedSource)?.includes("依据") === true,
+    "依据来源内容变化后草稿必须重新核对",
+  );
+
+  /* ---------------- R1：保健参考语义 ---------------- */
+  ok(isHealthReference("health_reference") && !isHealthReference("behavior"), "保健参考判定");
+  ok(guideLinkStatusLabel("health_reference", "confirmed_performance") === "资料已核对", "保健参考不套行为确认文案");
+  ok(guideLinkStatusLabel("behavior", "confirmed_performance") === "已确认观察到", "行为条目保持原状态文案");
+  ok(guideSupportLabel("health_reference", "single_event") === "单次资料", "保健参考使用资料语义");
+  ok(
+    guideDecisionChoiceLabels("health_reference").performance === "资料已核对" &&
+      guideDecisionChoiceLabels("behavior").performance === "已确认观察到",
+    "编辑器决定文案按条目类型区分",
+  );
+  const healthRule = guideItemRuleLine({ evidence_type: "health_reference", age_band: "3-4", adult_help: "allowed" });
+  ok(
+    healthRule.includes("不参与行为统计") && healthRule.includes("不构成发展确认") && !healthRule.includes("成人帮助"),
+    "保健参考规则不出现成人帮助/能力判断",
+  );
+  ok(
+    guideItemRuleLine({ evidence_type: "behavior", age_band: "3-4", adult_help: "allowed" }).includes("成人帮助"),
+    "行为条目保留成人帮助规则",
+  );
 
   console.log(
     JSON.stringify({ passed, total: passed, offline: true, db: false, model_requests: 0 }),

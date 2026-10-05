@@ -1,9 +1,13 @@
-import type {
-  GuideAdultHelpPolicy,
-  GuideAgeBand,
-  GuideEvidenceQuoteField,
-  GuideEvidenceQuoteSource,
-  GuideItemEvidenceType,
+import {
+  GUIDE_AGE_BAND_LABELS,
+  type GuideAdultHelpPolicy,
+  type GuideAgeBand,
+  type GuideEvidenceLinkOrigin,
+  type GuideEvidenceLinkStatus,
+  type GuideEvidenceQuoteField,
+  type GuideEvidenceQuoteSource,
+  type GuideEvidenceSupportKind,
+  type GuideItemEvidenceType,
 } from "./types";
 
 /**
@@ -131,3 +135,104 @@ export const READ_ONLY_ACCESS: GuideWriteAccessView = {
 
 /** 班级证据页按幼儿的可操作性（当前名单内逐人判定，不用教师角色一刀切） */
 export type ChildRecordAccess = Record<string, boolean>;
+
+/* --------------------- 条目语义：行为表现 / 保健参考 --------------------- */
+
+const BEHAVIOR_LINK_STATUS_LABELS: Record<GuideEvidenceLinkStatus, string> = {
+  ai_suggested: "AI 关联待核对",
+  confirmed_performance: "已确认观察到",
+  confirmed_clue: "已有相关线索",
+  rejected: "已不采用",
+  withdrawn: "已撤回",
+};
+
+/** 保健参考资料语义：只做查阅与核对，不使用行为表现的达成式文案 */
+const HEALTH_LINK_STATUS_LABELS: Record<GuideEvidenceLinkStatus, string> = {
+  ai_suggested: "AI 建议待核对",
+  confirmed_performance: "资料已核对",
+  confirmed_clue: "资料线索已核对",
+  rejected: "已不采用",
+  withdrawn: "已撤回",
+};
+
+const BEHAVIOR_SUPPORT_LABELS: Record<GuideEvidenceSupportKind, string> = {
+  single_event: "单次表现",
+  sustained: "持续表现",
+  clue_only: "仅相关线索",
+};
+
+const HEALTH_SUPPORT_LABELS: Record<GuideEvidenceSupportKind, string> = {
+  single_event: "单次资料",
+  sustained: "连续资料",
+  clue_only: "参考线索",
+};
+
+const BEHAVIOR_ORIGIN_LABELS: Record<GuideEvidenceLinkOrigin, string> = {
+  ai: "AI 建议",
+  manual: "教师手动关联",
+};
+
+const HEALTH_ORIGIN_LABELS: Record<GuideEvidenceLinkOrigin, string> = {
+  ai: "AI 建议关联",
+  manual: "教师核对关联",
+};
+
+export function isHealthReference(evidenceType: GuideItemEvidenceType): boolean {
+  return evidenceType === "health_reference";
+}
+
+export function guideLinkStatusLabel(
+  evidenceType: GuideItemEvidenceType,
+  status: GuideEvidenceLinkStatus,
+): string {
+  return isHealthReference(evidenceType)
+    ? HEALTH_LINK_STATUS_LABELS[status]
+    : BEHAVIOR_LINK_STATUS_LABELS[status];
+}
+
+export function guideSupportLabel(
+  evidenceType: GuideItemEvidenceType,
+  support: GuideEvidenceSupportKind,
+): string {
+  return isHealthReference(evidenceType)
+    ? HEALTH_SUPPORT_LABELS[support]
+    : BEHAVIOR_SUPPORT_LABELS[support];
+}
+
+export function guideOriginLabel(
+  evidenceType: GuideItemEvidenceType,
+  origin: GuideEvidenceLinkOrigin,
+): string {
+  return isHealthReference(evidenceType)
+    ? HEALTH_ORIGIN_LABELS[origin]
+    : BEHAVIOR_ORIGIN_LABELS[origin];
+}
+
+/** 两种合法决定在编辑器里的文案；保健参考不出现“确认表现/成人帮助”的能力判断 */
+export function guideDecisionChoiceLabels(evidenceType: GuideItemEvidenceType): {
+  clue: string;
+  performance: string;
+} {
+  return isHealthReference(evidenceType)
+    ? { clue: "资料线索已核对", performance: "资料已核对" }
+    : { clue: "已有相关线索", performance: "已确认观察到" };
+}
+
+/** 条目规则说明：保健参考明确不入行为统计、不构成发展确认 */
+export function guideItemRuleLine(input: {
+  evidence_type: GuideItemEvidenceType;
+  age_band: GuideAgeBand;
+  adult_help: GuideAdultHelpPolicy;
+}): string {
+  const age = GUIDE_AGE_BAND_LABELS[input.age_band];
+  if (isHealthReference(input.evidence_type)) {
+    return `资料参考：指南参考 ${age} · 保育参考资料；只作查阅与核对，不参与行为统计，也不构成发展确认。`;
+  }
+  const help =
+    input.adult_help === "allowed"
+      ? "允许成人帮助（说明帮助方式后可确认表现）"
+      : "要求独立完成（有成人帮助只确认线索）";
+  return `条目规则：指南参考 ${age} · ${
+    input.evidence_type === "sustained" ? "持续性表现" : "行为表现"
+  } · ${help}`;
+}
