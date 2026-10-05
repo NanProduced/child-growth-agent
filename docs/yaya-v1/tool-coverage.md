@@ -1,5 +1,7 @@
 # 芽芽助手 v1 工具覆盖表（YAYA0-CONTRACT-R2 草案）
 
+> 当前开工口径为 contract-v1.md / development-plan.md。此表保留 R2 现有平台清单；implemented 表示原平台功能存在，不表示助手 tools 已实现。
+
 - 状态：`reference_only` R2 草案；**未冻结**。与 TECH0 协议能力相关的行是 provisional，三线复审后由主评审统一冻结。
 - 基线：`e8225f04918de2073e194cb199dc8cf1bcb7f38f`；R1 `3248c2d`；R2 起点 `38da64564bce108d7510877b179decd02094f803`；分支 `codex/yaya0-contract`。
 - 事实来源：现有 `src/app/api/**/route.ts`、`src/lib/queries.ts`、`src/lib/accounts/access.ts`、`src/lib/accounts/authorize.ts`、`src/lib/accounts/scoped-queries.ts`、`src/lib/guide/*`、现有页面入口。没有真实实现的功能不登记（见第 4 节）。

@@ -1,5 +1,7 @@
 # 芽芽助手 v1 业务契约草案（YAYA0-CONTRACT-R2）
 
+> 历史稿：R0–R2 记录保留。2026-10-05 三线整合后的正式开发口径已冻结，见 **contract-v1.md**；以下“未冻结/provisional”对应当时交付，不是当前开工阻塞。
+
 - 状态：**R2 返修草案 / `reference_only`，未冻结**。本文件不实现运行时；与 TECH0 协议能力相关的内容标 provisional；三线复审后由主评审统一冻结，不得自称接口已可实现。
 - 基线：共同产品基线 `e8225f04918de2073e194cb199dc8cf1bcb7f38f`；R1 `3248c2de6c9832fdfae08b96fca3724ce669fce9`；R2 起点 `38da64564bce108d7510877b179decd02094f803`；分支 `codex/yaya0-contract`（独立工作树，沿分支追加提交）。
 - 依据：`logs/yaya-grilling-20261005/requirements-and-plan.md`、`docs/auth-v1/contract.md`、`docs/guide-evidence-v1/contract.md`、`PRODUCT.md`、现有 routes/queries/授权与保存路径。
@@ -121,7 +123,7 @@
 6. **迟到写入**：准备/审批期间目标修订、归属、任教或会话变化，执行事务内重新核对；不一致 409 `state_conflict` 零写入。模型等待不持锁。
 7. **一次性**：批准执行成功后消费；同 `operation_id` 重复提交返回原回执，不产生第二条业务记录。
 8. **停止/取消**：教师可取消待批准卡；关闭聊天/中止模型不构成撤销，也不会自动继续执行。
-9. **批准身份 ≠ 执行幂等身份**：`approval_id` 表示一次人工批准动作（绑定 actor/session/内容/附件/版本），`operation_id` 表示一次执行（审计与幂等的身份）。一个批准对应一个 operation_id；原操作结果未知时**只能按原 operation_id 查询**，不能新建操作重新执行。
+9. **批准身份 ≠ 执行幂等身份**：`approval_id` 表示一次人工批准，可绑定明确选中的 operation_id 集合；每个批准条目与执行条目一一对应。原操作结果未知时**只能按原 operation_id 查询**，不能新建操作重新执行。
 
 ## 7. 操作回执与幂等
 

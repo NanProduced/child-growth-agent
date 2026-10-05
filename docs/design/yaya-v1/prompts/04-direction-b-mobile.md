@@ -15,8 +15,8 @@ Chat thread of short bubbles (max 2 lines each):
 - user (pale green): 小满自己搭长桥，塌了三次，换了底座第四次成功了。
 - assistant: 好，整理成观察草稿吗？ with two small buttons 整理成草稿 / 只保存原文
 - assistant: 整理好了：科学 · 数学认知。 with an outline button 核对草稿
-- a batch strip: 本批 2 条 · 已保存 1 · 待补充 1
-- assistant receipt small line: 已保存 · 14:32
+- a batch strip: 本批 2 条 · 待确认 1 · 待补充 1
+- assistant status small line: 原文已保存，草稿待确认。 No archive-success receipt; this is a pre-approval editing screen.
 An open BOTTOM SHEET (drawer) covering the lower ~80% of the screen, rounded top corners, title 核对草稿, close ✕ at right; inside: 对象 小满 · 10月8日 · 积木区, a gray quote block with this exact text: 小满自己搭长桥，中间塌了三次，他换了更宽的底座，第四次搭稳了。, editable rows 领域 科学, 子领域 数学认知, a photo thumbnail row of TWO small thumbnails (one labeled 共同, one 长桥特写), a small quiet line 有未提交修改 [继续编辑] [放弃修改], a full-width green primary button 确认归档, and a quiet outline button 保存修改并重新审核.
 The sheet sits above a collapsed input dock with chips 对象：小满 and a rounded field 回复… and green send button. Use native dynamic viewport height and safe-area insets; do not double-lift the sheet and the dock. Flat, minimal accurate Chinese text.
 ```

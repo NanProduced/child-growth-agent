@@ -207,73 +207,98 @@ function createProposalServer() {
       const id = `p-${sequence}`;
       const record = {
         id,
+        operationId: `op-${id}`,
         tool,
-        args,
+        args: structuredClone(args),
         status: "pending",
         actor: meta.actor ?? "teacher-1",
         contentVersion: meta.contentVersion ?? 1,
       };
       proposals.set(id, record);
+      operations.set(record.operationId, { status: "not_executed", actor: record.actor, proposalId: id });
       return record;
     },
     cancelProposal(id) {
       const proposal = proposals.get(id);
-      if (proposal) proposal.status = "cancelled";
+      if (proposal && proposal.status === "pending") {
+        proposal.status = "cancelled";
+        operations.set(proposal.operationId, { status: "failed_no_effect", actor: proposal.actor, proposalId: id });
+      }
       return proposal;
     },
     expireProposal(id) {
       const proposal = proposals.get(id);
-      if (proposal) proposal.status = "expired";
+      if (proposal && proposal.status === "pending") {
+        proposal.status = "expired";
+        operations.set(proposal.operationId, { status: "failed_no_effect", actor: proposal.actor, proposalId: id });
+      }
       return proposal;
     },
     /** 替身：当前会话真实用户批准（必须是服务端记录，不能来自本地 approved part）。 */
     grantTrustedApproval(id, { actor, session }) {
-      trustedApprovals.set(approvalKey(id, actor, session), { at: "simulated" });
+      const proposal = proposals.get(id);
+      if (!proposal || proposal.status !== "pending" || proposal.actor !== actor || !session) return false;
+      trustedApprovals.set(approvalKey(id, actor, session), {
+        at: "simulated", contentVersion: proposal.contentVersion,
+        tool: proposal.tool, argsText: JSON.stringify(proposal.args),
+      });
       return true;
     },
     /** 消费：缺前提、无可信批准、actor/session/状态/版本任一不符都不通过；重复消费返回原回执。 */
     consume(id, premise) {
-      if (consumed.has(id)) return { ok: false, reason: "already_consumed", receipt: consumed.get(id) };
       if (
         !premise ||
-        typeof premise.actor !== "string" ||
-        typeof premise.session !== "string" ||
-        typeof premise.contentVersion !== "number"
+        typeof premise.actor !== "string" || !premise.actor.trim() ||
+        typeof premise.session !== "string" || !premise.session.trim() ||
+        !Number.isFinite(premise.contentVersion)
       ) {
         return { ok: false, reason: "missing_premise" };
       }
       const proposal = proposals.get(id);
       if (!proposal) return { ok: false, reason: "unknown_proposal" };
-      if (!trustedApprovals.has(approvalKey(id, premise.actor, premise.session))) {
+      if (proposal.actor !== premise.actor) return { ok: false, reason: "actor_mismatch" };
+      // Replay is an owner-scoped read, not a new execution or reuse of an old session approval.
+      if (consumed.has(id)) return { ok: false, reason: "already_consumed", receipt: consumed.get(id) };
+      const approval = trustedApprovals.get(approvalKey(id, premise.actor, premise.session));
+      if (!approval) {
         return { ok: false, reason: "no_trusted_approval" };
       }
-      if (proposal.actor !== premise.actor) return { ok: false, reason: "actor_mismatch" };
       if (proposal.status === "cancelled") return { ok: false, reason: "proposal_cancelled" };
       if (proposal.status === "expired") return { ok: false, reason: "proposal_expired" };
       if (proposal.status !== "pending") return { ok: false, reason: `proposal_${proposal.status}` };
       if (proposal.contentVersion !== premise.contentVersion) {
         return { ok: false, reason: "premise_version_mismatch" };
       }
-      const receipt = { receiptId: `r-${id}`, operationId: `op-${id}`, executedAt: "simulated" };
+      if (approval.contentVersion !== proposal.contentVersion || approval.tool !== proposal.tool || approval.argsText !== JSON.stringify(proposal.args)) {
+        return { ok: false, reason: "approval_snapshot_mismatch" };
+      }
+      const receipt = { receiptId: `r-${id}`, operationId: proposal.operationId, executedAt: "simulated" };
       proposal.status = "consumed";
       consumed.set(id, receipt);
-      operations.set(receipt.operationId, { status: "committed", receipt });
+      operations.set(receipt.operationId, { status: "committed", actor: proposal.actor, proposalId: id, receipt });
       writeAttempts.push(id);
       return { ok: true, receipt };
     },
-    /** 恢复路线：只按原 operation_id / 原提案查询，不重发。 */
-    queryOperation(operationId) {
+    /** 恢复路线：使用客户端在执行前已持有的原 operation_id；actor 来自已认证服务端上下文。 */
+    queryOperation(operationId, actor) {
       const operation = operations.get(operationId);
-      return operation ? { ...operation } : { status: "not_found" };
+      if (!operation) return { status: "not_found" };
+      if (!actor || operation.actor !== actor) return { status: "query_failed" };
+      return { ...operation };
     },
-    queryByProposal(id) {
-      if (consumed.has(id)) return { status: "committed", receipt: consumed.get(id) };
-      const proposal = proposals.get(id);
-      if (!proposal) return { status: "unknown" };
-      if (proposal.status === "cancelled" || proposal.status === "expired") {
-        return { status: "failed_no_effect" };
+    /** Synchronous mock of the future short transaction: fence old operation before publishing replacement. */
+    replacePreparedProposal(id, actor) {
+      const old = proposals.get(id);
+      if (!old || old.actor !== actor) return { ok: false, reason: "owner_mismatch" };
+      const operation = operations.get(old.operationId);
+      if (!operation || !["not_executed", "failed_no_effect"].includes(operation.status) || !["pending", "cancelled", "expired"].includes(old.status)) {
+        return { ok: false, reason: "original_operation_not_replaceable" };
       }
-      return { status: "not_executed" };
+      old.status = "superseded";
+      operations.set(old.operationId, { status: "failed_no_effect", actor: old.actor, proposalId: id });
+      const replacement = this.createProposal(old.tool, old.args, { actor, contentVersion: old.contentVersion });
+      old.replacementOperationId = replacement.operationId;
+      return { ok: true, proposal: replacement };
     },
     naiveExecute(id) {
       this.naiveWrites.push(id);
@@ -388,9 +413,15 @@ async function runBoundedAgent({ userText, decide, server, bounds, control = {} 
   const history = [{ role: "user", content: userText }];
   let lastResult = null;
   const deadline = Date.now() + bounds.deadlineMs;
-  const isCancelled = () => control.cancelled === true;
+  const expectedRunId = control.runId;
+  const isStale = () => control.runId !== expectedRunId || (control.status !== undefined && !["running", "cancelled"].includes(control.status));
+  const isCancelled = () => control.cancelled === true || control.status === "cancelled";
   const isExpired = () => Date.now() > deadline;
   const stopIfInvalid = () => {
+    if (isStale()) {
+      trace.stoppedBy = "stale_run";
+      return true;
+    }
     if (isCancelled()) {
       trace.stoppedBy = "cancelled";
       return true;
@@ -412,6 +443,7 @@ async function runBoundedAgent({ userText, decide, server, bounds, control = {} 
       Promise.resolve().then(() => decide({ history, lastResult })),
       deadline - Date.now(),
     );
+    if (isStale()) { trace.stoppedBy = "stale_run"; break; }
     if (isCancelled()) {
       trace.stoppedBy = "cancelled";
       break;
@@ -458,6 +490,7 @@ async function runBoundedAgent({ userText, decide, server, bounds, control = {} 
       let result;
       let error;
       for (let attempt = 0; attempt <= bounds.maxToolRetries; attempt += 1) {
+        if (stopIfInvalid()) break;
         if (trace.toolAttempts >= bounds.maxToolAttempts) break;
         trace.toolAttempts += 1;
         let wait;
@@ -469,6 +502,7 @@ async function runBoundedAgent({ userText, decide, server, bounds, control = {} 
         } catch (thrown) {
           wait = { timedOut: false, error: thrown };
         }
+        if (isStale()) { trace.stoppedBy = "stale_run"; break; }
         if (isCancelled()) {
           trace.stoppedBy = "cancelled";
           break;
@@ -488,7 +522,7 @@ async function runBoundedAgent({ userText, decide, server, bounds, control = {} 
         error = undefined;
         break;
       }
-      if (trace.stoppedBy === "cancelled" || trace.stoppedBy === "deadline" || trace.stoppedBy === "deadline_after_await") break;
+      if (["stale_run", "cancelled", "deadline", "deadline_after_await"].includes(trace.stoppedBy)) break;
       if (error || result === undefined) {
         if (!trace.stoppedBy) trace.stoppedBy = "tool_error";
         break;
@@ -512,6 +546,7 @@ async function runBoundedAgent({ userText, decide, server, bounds, control = {} 
         trace.stoppedBy = validated.reason;
         break;
       }
+      if (stopIfInvalid()) break;
       const proposal = server.createProposal(decision.tool, decision.args);
       trace.proposals.push(proposal.id);
       trace.stoppedBy = "awaiting_approval";
@@ -846,7 +881,7 @@ async function scenarioLostResponseRecovery() {
         .find((part) => part.type === "tool-call" && part.approval && part.approval.id === proposal.id && part.approval.approved === true);
       if (approvedInHistory) {
         trace.queries += 1;
-        const query = server.queryByProposal(proposal.id);
+        const query = server.queryOperation(proposal.operationId, "teacher-1");
         const decision = recoveryActionFor(query);
         if (decision.action === "restore_result") {
           trace.recoveredText = `原保存已完成，回执 ${query.receipt.receiptId}`;
@@ -1409,13 +1444,11 @@ async function main() {
       { child_id: "c1", raw_text: "x" },
       { actor: "teacher-1", contentVersion: 1 },
     );
-    const notExecuted = recoveryActionFor(recoveryServer.queryByProposal(original.id));
+    const notExecuted = recoveryActionFor(recoveryServer.queryOperation(original.operationId, "teacher-1"));
     assert(notExecuted.action === "reverify_and_approve", "not-executed proposal may be re-verified");
-    const reopened = recoveryServer.createProposal(
-      "create_observation_draft",
-      { child_id: "c1", raw_text: "x" },
-      { actor: "teacher-1", contentVersion: 1 },
-    );
+    const replaced = recoveryServer.replacePreparedProposal(original.id, "teacher-1");
+    assert(replaced.ok, "old prepared operation must be fenced before replacement");
+    const reopened = replaced.proposal;
     assert(reopened.id !== original.id, "re-verified execution must use a new operation identity");
     recoveryServer.grantTrustedApproval(reopened.id, { actor: "teacher-1", session: "s2" });
     const executed = recoveryServer.consume(reopened.id, { actor: "teacher-1", session: "s2", contentVersion: 1 });
@@ -1466,6 +1499,73 @@ async function main() {
       original_receipt_returned: second.receipt.receiptId,
     };
     return `attempts=2, business_writes=1, replay=${second.reason}, receipt=${second.receipt.receiptId}`;
+  });
+
+  // Integration: exercise the real PoC control flow, not detached guard expressions.
+  await check("unit/approval-snapshot-does-not-follow-current-version", async () => {
+    const store = createProposalServer();
+    const proposal = store.createProposal("create_observation_draft", { child_id: "c1", raw_text: "original" });
+    store.grantTrustedApproval(proposal.id, { actor: "teacher-1", session: "s1" });
+    proposal.args.raw_text = "changed after approval";
+    proposal.contentVersion = 2;
+    const result = store.consume(proposal.id, { actor: "teacher-1", session: "s1", contentVersion: 2 });
+    assert(result.ok === false && store.writeAttempts.length === 0, "v1 approval must not approve updated v2 facts");
+    store.grantTrustedApproval(proposal.id, { actor: "teacher-1", session: "s1" });
+    assert(store.consume(proposal.id, { actor: "teacher-1", session: "s1", contentVersion: 2 }).ok, "fresh approval may execute v2");
+    return "old snapshot rejected; fresh approval executes once";
+  });
+  await check("unit/receipt-replay-still-requires-owner", async () => {
+    const store = createProposalServer();
+    const proposal = store.createProposal("create_observation_draft", { child_id: "c1", raw_text: "x" });
+    store.grantTrustedApproval(proposal.id, { actor: "teacher-1", session: "s1" });
+    store.consume(proposal.id, { actor: "teacher-1", session: "s1", contentVersion: 1 });
+    assert(store.consume(proposal.id).receipt === undefined, "missing identity cannot read replay receipt");
+    assert(store.consume(proposal.id, { actor: "other", session: "s2", contentVersion: 1 }).receipt === undefined, "foreign account cannot read replay receipt");
+    assert(store.queryOperation(proposal.operationId, "other").receipt === undefined, "query is owner scoped");
+    return "receipt stays private; replay does not bypass identity";
+  });
+  await check("unit/operation-identity-precedes-execution", async () => {
+    const store = createProposalServer();
+    const proposal = store.createProposal("create_observation_draft", { child_id: "c1", raw_text: "x" });
+    assert(typeof proposal.operationId === "string" && proposal.operationId.length > 0, "client must know operation ID before write");
+    assert(store.queryOperation(proposal.operationId, "teacher-1").status === "not_executed", "original ID is queryable before execution");
+    store.grantTrustedApproval(proposal.id, { actor: "teacher-1", session: "s1" });
+    const written = store.consume(proposal.id, { actor: "teacher-1", session: "s1", contentVersion: 1 });
+    assert(written.receipt.operationId === proposal.operationId, "receipt retains preallocated identity");
+    return "prepared ID = receipt ID; original ID queryable";
+  });
+  await check("unit/reprepare-fences-old-approved-operation", async () => {
+    const store = createProposalServer();
+    const original = store.createProposal("create_observation_draft", { child_id: "c1", raw_text: "x" });
+    store.grantTrustedApproval(original.id, { actor: "teacher-1", session: "s-old" });
+    const replaced = store.replacePreparedProposal(original.id, "teacher-1");
+    assert(replaced.ok && replaced.proposal.operationId !== original.operationId, "replacement gets a new operation ID");
+    const oldLate = store.consume(original.id, { actor: "teacher-1", session: "s-old", contentVersion: 1 });
+    assert(!oldLate.ok, "old approved operation is fenced before replacement can execute");
+    store.grantTrustedApproval(replaced.proposal.id, { actor: "teacher-1", session: "s-new" });
+    assert(store.consume(replaced.proposal.id, { actor: "teacher-1", session: "s-new", contentVersion: 1 }).ok, "new approval executes replacement");
+    assert(store.writeAttempts.length === 1, "old + new cannot both write");
+    assert(!store.replacePreparedProposal(replaced.proposal.id, "teacher-1").ok, "committed operation cannot be replaced");
+    return "old late request rejected; total writes=1";
+  });
+  await check("unit/main-loop-drops-replaced-run", async () => {
+    const control = { runId: "run-1", status: "running", cancelled: false };
+    const decide = async () => {
+      await sleep(30);
+      return { type: "propose_write", tool: "create_observation_draft", args: { child_id: "c1", raw_text: "late" } };
+    };
+    setTimeout(() => { control.runId = "run-2"; }, 5);
+    const trace = await runBoundedAgent({ userText: "x", decide, server: createProposalServer(), bounds, control });
+    assert(trace.stoppedBy === "stale_run" && trace.proposals.length === 0, "old run cannot create proposal after new run replaces it");
+    return "run-1 result discarded by actual loop";
+  });
+  await check("unit/main-loop-drops-run-change-before-retry", async () => {
+    const control = { runId: "run-1", status: "running", cancelled: false };
+    let attempts = 0;
+    const readServer = { async read() { attempts++; control.runId = "run-2"; throw new Error("late error"); } };
+    const trace = await runBoundedAgent({ userText: "x", decide: async () => ({ type: "read", tool: "list_class_children", args: { class: "A" } }), server: readServer, bounds, control });
+    assert(trace.stoppedBy === "stale_run" && attempts === 1, "old run cannot retry under new run identity");
+    return "run change blocks retry and result consumption";
   });
 
   // B/C：LocalRuntime 生命周期（runtime_unit_mock）

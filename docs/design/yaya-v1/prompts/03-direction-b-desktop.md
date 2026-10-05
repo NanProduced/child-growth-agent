@@ -18,7 +18,7 @@ RIGHT CHAT PANEL (about 420px, over the page, rounded 16px, 1px warm border):
   2. user: 小满自己搭长桥，塌了三次，换了底座第四次成功了。
   3. assistant: 好，整理成观察草稿吗？ with two small inline buttons: green 整理成草稿 and outline 只保存原文.
   4. assistant: 整理好了：科学 · 数学认知。 with one compact preview row 草稿预览 2 行… and an outline button 核对草稿.
-  5. assistant receipt line in small text: 已确认归档。档案已更新。 · 14:32
+  5. assistant status line in small text: 原文已保存，草稿待确认。 This is BEFORE archive approval; no archive-success receipt yet.
 - an open EDIT DRAWER anchored on the right/center over the panel, titled 核对草稿, containing: metadata row 对象 小满 · 10月8日 · 积木区, the gray quote block with this exact text: 小满自己搭长桥，中间塌了三次，他换了更宽的底座，第四次搭稳了。; editable field rows 领域 科学, 子领域 数学认知, two short highlight lines; a small photo thumbnail row of TWO thumbnails (one labeled 共同, one 长桥特写); a footer with a small quiet line 有未提交修改 [继续编辑] [放弃修改] and buttons outline 保存修改并重新审核 and green primary 确认归档.
 - bottom input: small chips 对象：小满, 来源：观察草稿; rounded field placeholder 回复…; paperclip; circular green send button.
 - small floating sprout entry button bottom-right of the page.

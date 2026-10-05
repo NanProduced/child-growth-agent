@@ -1,5 +1,7 @@
 # YAYA-DESIGN0｜芽芽助手与统一图片记录 UX 设计前置（yaya-v1）— R2
 
+> 整合收口（2026-10-05）：接口见 docs/yaya-v1/contract-v1.md，实施顺序见 development-plan.md。已归档原记录只读；图稿01–06固定批准前场景，合成示例另展示批准后结果，不能混用。A/B/C仍未获用户选稿；图稿/视觉/浏览器仍NOT_RUN。下方R1/R2表保留历史。
+
 - 共同产品基线：`e8225f04918de2073e194cb199dc8cf1bcb7f38f`（codex/flow-close-integration）
 - 本线起点：`7164c6d2234176cfc43fc7407e944349b73b1381`（YAYA-DESIGN0 R1；R0 为 `dd73f6c`）
 - 工作树：`C:\Users\nanpr\AppData\Local\Temp\opencode\child-growth-yaya-design0`，分支 `codex/yaya-design0`

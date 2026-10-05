@@ -1,5 +1,7 @@
 # YAYA-TECH0-R2｜runtime 生命周期 PoC 复现说明
 
+> 整合版当前包含38项（R2 32 + 收口6）：批准快照不随当前版本漂移、回执 owner、prepare 预分配/查询 operation_id、替代前封旧操作、主循环 run 更替及重试前更替。以下32项表保留历史；证据仍为 unit/jsdom/simulated，不是真实服务或事务。
+
 状态：离线替身 PoC。分层为 **runtime_unit_mock（jsdom + 真实发布包）**、**unit（有界 Agent 协议替身）**、**simulated（假服务端计数器）**；不是真实浏览器验收，不是真实 provider/DB 并发验收。真实网络出口在探针内默认拒绝；非自检的出口尝试会判定整体失败并使进程非零退出。
 
 ## 1. 运行入口

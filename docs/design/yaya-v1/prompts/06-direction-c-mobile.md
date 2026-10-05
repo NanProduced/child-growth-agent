@@ -13,7 +13,7 @@ Top header: back chevron ‹, title 芽芽, and two segmented tabs: 对话 (inac
 Active tab content = 核对 list, single column:
 - a white card titled 小满 · 观察草稿 with metadata 10月8日 · 积木区; a gray quote block with this exact text: 小满自己搭长桥，中间塌了三次，他换了更宽的底座，第四次搭稳了。; an AI section with violet badge AI 生成 and rows 科学 · 数学认知, 发展表现说明（可展开）; a horizontal row of TWO small photo thumbnails (one labeled 共同, one labeled 长桥特写); a 核对 fact list: 对象 小满（中班·向日葵班）, 日期 10月8日, 事实依据 原文对照, 附件 积木区全景（与阿依共用）+ 长桥特写.
 - a full-width green primary button 确认归档 and a small quiet outline button 稍后处理.
-- below: a QUEUE block titled 队列 with TWO checkbox rows: ☑ 小满 已保存, ☐ 阿依 待补充：提醒方式未知; then a full-width green button 保存已选 1 条 and a small line 已保存 1 条 · 1 条待补充.
+- below: a QUEUE block titled 队列 with TWO checkbox rows: ☑ 小满 待确认, ☐ 阿依 待补充：提醒方式未知; then a full-width green button 确认已选 1 条 and a small line 待确认 1 条 · 1 条待补充. This is BEFORE archive approval; no completed item is selected or resubmitted.
 No input dock on this tab. The 核对 tab uses native dynamic viewport height and safe-area insets so its buttons stay visible with the soft keyboard. Everything flat and minimal, accurate legible Chinese text, no real children faces.
 ```
 

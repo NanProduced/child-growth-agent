@@ -1,9 +1,9 @@
 /**
- * 芽芽助手 v1 契约草案共享类型（YAYA0-CONTRACT-R1）。
+ * 芽芽助手 v1 共享核心契约（整合冻结版 yaya-v1.0）。
  *
- * 状态：reference_only（仅类型与纯函数，无运行时实现，不得当作接口冻结）。
+ * 核心口径已冻结；reference_only 仅表示这些纯函数检查不证明真实认证或事务实现。
  * - 不实现认证、会话、数据库、对象存储、模型调用、聊天 UI 与迁移。
- * - 与 TECH0 协议能力相关的结论仍是 provisional；三线复审后由主评审统一冻结。
+ * - 正式开发与归属见 docs/yaya-v1/contract-v1.md / development-plan.md。
  * - 授权事实始终来自服务端 AUTH 契约；本模块只读引用并复用
  *   `authorizeAction` / `isLegalAccessCombination` / `modelWaitPremiseChanged`，
  *   不维护第二套角色权限。
@@ -43,8 +43,9 @@ import type { ConfirmObservationInput } from "../validation";
 /** 契约检查输出标志：只证明草案内部自洽，不证明运行时守门通过 */
 export const YAYA_CONTRACT_STATUS = "reference_only" as const;
 
-/** TECH0 未交付前不得声称冻结 */
-export const YAYA_CONTRACT_FROZEN = false as const;
+/** Core semantics are frozen for development, not certified for production. */
+export const YAYA_CONTRACT_FROZEN = true as const;
+export const YAYA_CONTRACT_VERSION = "yaya-v1.0" as const;
 
 /** 已保存 raw_text 永不改写 */
 export const YAYA_RAW_TEXT_IS_IMMUTABLE = true as const;
@@ -359,6 +360,7 @@ export const YAYA_PAYLOAD_KINDS = [
   "manage_teacher",
   "refresh_growth_profile",
   "refresh_activity_support",
+  "attach_observation_images",
 ] as const;
 export type YayaPayloadKind = (typeof YAYA_PAYLOAD_KINDS)[number];
 
@@ -449,7 +451,15 @@ export type YayaDomainPayload =
       secret_via_secure_control: true;
     }
   | { kind: "refresh_growth_profile"; child_id: string }
-  | { kind: "refresh_activity_support"; child_id: string };
+  | { kind: "refresh_activity_support"; child_id: string }
+  | {
+      /** Teacher-approved attachment append; never changes raw_text/confirmed_content. */
+      kind: "attach_observation_images";
+      observation_id: string;
+      image_ids: readonly string[];
+      expected_attachment_revision: number;
+      source_confirmed_at: string | null;
+    };
 
 /**
  * 同一宿主观察内的指南决定与归档是 G0/G5 的“全有或全无”事务；
@@ -458,6 +468,7 @@ export type YayaDomainPayload =
 export const YAYA_ALL_OR_NOTHING_PAYLOAD_KINDS = [
   "confirm_observation",
   "guide_decision",
+  "attach_observation_images",
 ] as const;
 
 export function payloadIsAllOrNothing(kind: YayaPayloadKind): boolean {
@@ -814,7 +825,7 @@ export interface YayaOperationReceipt {
  * - `effect=unknown`、缺业务标识或状态/效果不匹配一律不算成功（unknown 效果不能成为确定成功）。
  */
 export function receiptProvesSuccess(receipt: YayaOperationReceipt): boolean {
-  if (receipt.business_object_id === null) return false;
+  if (typeof receipt.business_object_id !== "string" || receipt.business_object_id.trim().length === 0) return false;
   if (receipt.effect !== "committed") return false;
   return (
     receipt.status === "saved" ||
@@ -1064,9 +1075,21 @@ export function queryOperationOutcome(
 }
 
 export function itemsToResend(
+  plan: readonly YayaPlannedOperation[],
   receipts: readonly YayaOperationReceipt[]
 ): readonly YayaOperationReceipt[] {
-  return receipts.filter((receipt) => receiptCanBeResent(receipt));
+  const comparison = compareBatchReceipts(plan, receipts);
+  if (comparison.duplicate_plan_operation_ids.length > 0 || comparison.duplicate_plan_item_keys.length > 0) {
+    return [];
+  }
+  // A candidate permits explicit recovery, never automatic replay of a business POST.
+  // ponytail: small bounded batches; index receipts if the batch limit grows.
+  return plan.flatMap((expected) => {
+    const outcome = queryOperationOutcome(receipts, expected);
+    if (outcome.kind !== "failed" || outcome.effect !== "none") return [];
+    const receipt = receipts.find((entry) => entry.operation_id === expected.operation_id);
+    return receipt === undefined ? [] : [receipt];
+  });
 }
 
 /* ------------------------------- 会话与投影 ------------------------------- */
@@ -1340,7 +1363,9 @@ export function projectConversationTitle(
 
 /** 通用幼教问答不需要业务对象；只有业务工具才要求目标 */
 export function requiresBusinessTarget(auth: YayaToolAuth | null): boolean {
-  return auth !== null;
+  // Authorization is independent of object selection; lists/catalogs use server scope.
+  // Concrete required parameters are still defined by each tool's schema.
+  return auth?.kind === "action";
 }
 
 export type YayaChildIdentifierScan = "known_absent" | "present" | "unknown";

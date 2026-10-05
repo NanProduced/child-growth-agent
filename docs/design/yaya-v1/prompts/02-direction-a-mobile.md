@@ -12,7 +12,7 @@ Design a mobile full-screen app mockup (780x1688, logical 390x844) for a Chinese
 Top header: back chevron ‹, title 芽芽, right small 历史 and ⋯ icons.
 Message area, single column of full-width notebook cards:
 - Card 1: title 观察草稿卡, amber text badge 待核对, metadata 小满 · 10月8日 · 积木区; gray quote block with this exact text: 小满自己搭长桥，中间塌了三次，他换了更宽的底座，第四次搭稳了。; a horizontal row of TWO photo thumbnails (one labeled 共同, one labeled 长桥特写); AI section with violet badge AI 生成 and rows 科学 · 数学认知, 发展亮点 2 条 [展开全文]; an expanded 核对区 fact list: 对象 小满（中班·向日葵班）, 日期 10月8日, 事实依据 原文对照, 附件 积木区全景（与阿依共用）+ 长桥特写; card buttons stacked full-width INSIDE the card: outline 修改草稿 above green primary 确认归档.
-- Card 2 (partially visible below): a batch summary strip 本批 2 条 · 已保存 1 · 待补充 1, with one compact child card showing a checkbox, name 阿依 and a rose text badge 待补充：提醒方式未知.
+- Card 2 (partially visible below): a batch summary strip 本批 2 条 · 待确认 1 · 待补充 1, with one compact child card showing a checkbox, name 阿依 and a rose text badge 待补充：提醒方式未知. This is BEFORE archive approval; no completed receipt for 小满.
 Bottom input dock above the safe area: small chips 对象：小满 and 来源：观察草稿, a rounded text field with placeholder 写下补充…, paperclip icon, green circular send button. The soft keyboard is OPEN, taking the lower ~40% of the screen; the input dock sits directly above the keyboard and is fully visible; content above is scrolled, not compressed.
 
 Everything flat, calm, high legibility, minimal Chinese text, accurate characters. No real children faces; thumbnails are abstract block-area photos without faces.

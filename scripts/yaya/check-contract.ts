@@ -559,9 +559,9 @@ function chatMessage(overrides: Partial<YayaChatMessageRef> = {}): YayaChatMessa
 
 /* --------------------------------- 反例断言 --------------------------------- */
 
-check("草案标记 reference_only 且未冻结（TECH0 未交付）", () => {
+check("核心契约冻结；纯函数检查仍标 reference_only", () => {
   assert.equal(YAYA_CONTRACT_STATUS, "reference_only");
-  assert.equal(YAYA_CONTRACT_FROZEN, false);
+  assert.equal(YAYA_CONTRACT_FROZEN, true);
 });
 
 check("覆盖表无虚构入口：组合合法、范围策略与来源完整", () => {
@@ -780,7 +780,7 @@ check("两人不同事实不串档：回执按完整身份匹配", () => {
   assert.equal(comparison.saved, 1);
   assert.equal(comparison.failed, 1);
   assert.deepEqual(
-    itemsToResend(receipts).map((entry) => entry.operation_id),
+    itemsToResend(plan, receipts).map((entry) => entry.operation_id),
     ["op-b"]
   );
   const wrongTarget = compareBatchReceipts(plan, [
@@ -803,8 +803,10 @@ check("部分成功不重发：只重试确认无已提交效果的失败项", (
     receipt({ operation_id: "op-g", status: "saved_detail_unavailable", effect: "committed" }),
     receipt({ operation_id: "op-h", status: "unchanged", effect: "committed" }),
   ];
+  const expected = receipts.map((entry) => planned({ operation_id: entry.operation_id, item_key: entry.operation_id }));
+  const identifiedReceipts = receipts.map((entry) => ({ ...entry, item_key: entry.operation_id }));
   assert.deepEqual(
-    itemsToResend(receipts).map((entry) => entry.operation_id),
+    itemsToResend(expected, identifiedReceipts).map((entry) => entry.operation_id),
     ["op-b"]
   );
 });
@@ -980,7 +982,9 @@ check("密码仅安全控件：覆盖表标注 secure_control，且聊天 payloa
 
 check("公开检索不带幼儿识别信息；通用问答不强制选对象", () => {
   assert.equal(requiresBusinessTarget(null), false);
-  assert.equal(requiresBusinessTarget(toolAuth("query.children")), true);
+  assert.equal(requiresBusinessTarget(toolAuth("query.children")), false);
+  assert.equal(requiresBusinessTarget(toolAuth("query.guide_catalog")), false);
+  assert.equal(requiresBusinessTarget(toolAuth("create_observation")), true);
   assert.deepEqual(decidePublicSearch({ provider_enabled: true, child_identifier_scan: "present", server_redaction_applied: true }), {
     allowed: false,
     reason: "identifiers_present",
@@ -1305,11 +1309,11 @@ check("操作身份预分配：batch_id 与逐项 operation_id，完整匹配不
 
 check("失败效果分级：只有 failed+none 可重发", () => {
   assert.equal(
-    itemsToResend([receipt({ status: "failed", effect: "committed" })]).length,
+    itemsToResend([planned()], [receipt({ status: "failed", effect: "committed" })]).length,
     0
   );
-  assert.equal(itemsToResend([receipt({ status: "failed", effect: "none" })]).length, 1);
-  assert.equal(itemsToResend([receipt({ status: "conflict", effect: "unknown" })]).length, 0);
+  assert.equal(itemsToResend([planned()], [receipt({ status: "failed", effect: "none" })]).length, 1);
+  assert.equal(itemsToResend([planned()], [receipt({ status: "conflict", effect: "unknown" })]).length, 0);
 });
 
 check("回执查询语义：进行中/失败/冲突/已保存/详情不可读/未知", () => {
@@ -1856,11 +1860,11 @@ check("R2 未知/进行中不得转换为未保存；确定失败才进重试路
     "in_progress"
   );
   assert.equal(
-    itemsToResend([receipt({ operation_id: "op-x", status: "failed", effect: "committed" })]).length,
+    itemsToResend([expected], [receipt({ operation_id: "op-x", status: "failed", effect: "committed" })]).length,
     0
   );
   assert.equal(
-    itemsToResend([receipt({ operation_id: "op-x", status: "failed", effect: "none" })]).length,
+    itemsToResend([expected], [receipt({ operation_id: "op-x", status: "failed", effect: "none" })]).length,
     1
   );
 });

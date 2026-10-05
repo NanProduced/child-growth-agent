@@ -1,5 +1,7 @@
 # 芽芽助手 v1 并行归属与文件边界（YAYA0-CONTRACT-R2 草案）
 
+> 当前唯一 owner / 波次以 development-plan.md 为准；共享核心按 contract-v1.md 冻结。下文保留前置归属记录，不再等待已完成的 TECH0。
+
 - 状态：`reference_only` R2 草案；与 `contract-draft.md`、`tool-coverage.md` 同批，三线复审后由主评审统一冻结。
 - 基线：共同产品基线 `e8225f04918de2073e194cb199dc8cf1bcb7f38f`；R1 `3248c2d`；R2 起点 `38da64564bce108d7510877b179decd02094f803`；三个首轮任务从同一完整 SHA 建独立工作树，不等待其他 agent 在制文件。
 - 纪律：只提交自己文件、不 `git add .`、不 push、不部署、不合并 main、不 reset 其他分支；不修改 AUTH/G0 冻结类型与现有业务代码/queries/API/schema、PRODUCT/DESIGN、依赖锁、`.env`。
