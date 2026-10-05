@@ -1,7 +1,7 @@
-# 芽芽助手 v1 工具覆盖表（YAYA0-CONTRACT-R1 草案）
+# 芽芽助手 v1 工具覆盖表（YAYA0-CONTRACT-R2 草案）
 
-- 状态：`reference_only` R1 草案；**未冻结**。与 TECH0 协议能力相关的行是 provisional，三线复审后由主评审统一冻结。
-- 基线：`e8225f04918de2073e194cb199dc8cf1bcb7f38f`；R1 起点 `3248c2de6c9832fdfae08b96fca3724ce669fce9`；分支 `codex/yaya0-contract`。
+- 状态：`reference_only` R2 草案；**未冻结**。与 TECH0 协议能力相关的行是 provisional，三线复审后由主评审统一冻结。
+- 基线：`e8225f04918de2073e194cb199dc8cf1bcb7f38f`；R1 `3248c2d`；R2 起点 `38da64564bce108d7510877b179decd02094f803`；分支 `codex/yaya0-contract`。
 - 事实来源：现有 `src/app/api/**/route.ts`、`src/lib/queries.ts`、`src/lib/accounts/access.ts`、`src/lib/accounts/authorize.ts`、`src/lib/accounts/scoped-queries.ts`、`src/lib/guide/*`、现有页面入口。没有真实实现的功能不登记（见第 4 节）。
 - 阶段定义：
   - **read（只读）**：明确意图可直接执行，绝不写业务数据；歧义先澄清，不强迫选对象。
@@ -11,7 +11,7 @@
 - **来源区分**：`platform_feature`＝现有平台功能（必须真实实现）；`assistant_internal`＝助手新增内部能力（本轮提案、未实现，见第 5 节）。
 - 秘密：`secure_control` 表示密码只由安全控件直接提交服务端；模型、聊天正文与交付日志不接触密码/令牌/签名 URL。
 - 授权：所有行最终仍由 AUTH 契约的 `runBusinessWrite` / `withBusinessRead` / `withScopedRead` 与服务端 `authorizeAction` 判定；本表不是新的权限来源。
-- 离线检查：`pnpm exec tsx scripts/yaya/check-contract.ts` → `{"passed":51,"total":51,"reference_only":true}`（只证明草案自洽，不证明运行时守门）。
+- 离线检查：`pnpm exec tsx scripts/yaya/check-contract.ts` → `{"passed":68,"total":68,"reference_only":true}`（只证明草案自洽，不证明运行时守门）。
 
 ## 1. 只读查询工具（read）
 
@@ -84,8 +84,8 @@
 
 1. 没有真实入口/服务的功能不注册；平台功能 `implemented=true`，内部能力单列且不得伪装成业务功能。
 2. 组合合法性先于授权：复用 AUTH `isLegalAccessCombination`；非法 action/resource 一律 400，管理员也不能绕过。
-3. `read` 明确意图直接执行；`commit` 必须走“准备卡 → 教师批准（服务端 `authenticated_entry` 记录）→ 服务端执行 → 业务回执”；批准复用 `authorizeAction` 与 `modelWaitPremiseChanged` 逐项核验，模型等待在事务外。
-4. 批量逐项独立回执并对照预期条目清单；缺项/错配/重复/矛盾都不算成功，只有 `failed+effect=none` 可重发；同一观察内指南决定仍全有或全无。
-5. `operation_id` 在可能写入前建立并可由客户端持有；未知结果只查询原操作，不假装成功。
-6. 工具结果返回最小必要字段；原文/图片/网页/工具结果都是不可信数据，不改变系统指令或权限；聊天正文/附件/模型上下文按当前授权投影。
+3. `read` 明确意图直接执行；`commit` 必须走“准备卡 → 教师批准（服务端 `authenticated_entry` 记录）→ 服务端执行 → 业务回执”；提案来源（`proposal_origin`，含模型提案）只作审计保留，不是批准；模型/请求体/本地 runtime 的 approved 都不是证明。批准复用 `authorizeAction` 与 `modelWaitPremiseChanged` 逐项核验，模型等待在事务外。
+4. 批量逐项独立回执并对照预期条目清单（先核验计划唯一性）；成功必须合法状态/效果组合 + 业务标识，缺项/错配/重复/矛盾/未验证成功都不算成功，只有 `failed+effect=none` 可重发；同一观察内指南决定仍全有或全无。
+5. `operation_id` 在可能写入前建立并可由客户端持有；批准身份（approval_id）与执行幂等身份（operation_id）不同。原操作结果未知只查原 operation_id，不新建操作重新执行，不假装成功。
+6. 工具结果返回最小必要字段；原文/图片/网页/工具结果都是不可信数据，不改变系统指令或权限；聊天正文/附件/模型上下文按当前授权投影；图片读取与聊天附件统一：historical 只给元数据，关联按 `record_kind+record_id` 完整匹配。
 7. 空任教范围、读取失败、无记录三者语义分离：错误不伪装成空数据。

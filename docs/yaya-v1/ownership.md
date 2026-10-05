@@ -1,18 +1,18 @@
-# 芽芽助手 v1 并行归属与文件边界（YAYA0-CONTRACT-R1 草案）
+# 芽芽助手 v1 并行归属与文件边界（YAYA0-CONTRACT-R2 草案）
 
-- 状态：`reference_only` R1 草案；与 `contract-draft.md`、`tool-coverage.md` 同批，三线复审后由主评审统一冻结。
-- 基线：共同产品基线 `e8225f04918de2073e194cb199dc8cf1bcb7f38f`；R1 起点 `3248c2de6c9832fdfae08b96fca3724ce669fce9`；三个首轮任务从同一完整 SHA 建独立工作树，不等待其他 agent 在制文件。
+- 状态：`reference_only` R2 草案；与 `contract-draft.md`、`tool-coverage.md` 同批，三线复审后由主评审统一冻结。
+- 基线：共同产品基线 `e8225f04918de2073e194cb199dc8cf1bcb7f38f`；R1 `3248c2d`；R2 起点 `38da64564bce108d7510877b179decd02094f803`；三个首轮任务从同一完整 SHA 建独立工作树，不等待其他 agent 在制文件。
 - 纪律：只提交自己文件、不 `git add .`、不 push、不部署、不合并 main、不 reset 其他分支；不修改 AUTH/G0 冻结类型与现有业务代码/queries/API/schema、PRODUCT/DESIGN、依赖锁、`.env`。
 
 ## 1. 本轮（YAYA0-CONTRACT）独占文件
 
 | 文件 | 内容 | 备注 |
 |---|---|---|
-| `docs/yaya-v1/contract-draft.md` | 业务契约草案、DTO/批准/回执/来源/会话/不可信数据、最小存储/API 提案、反例与 R1 交付附录 | 本文件 |
+| `docs/yaya-v1/contract-draft.md` | 业务契约草案、DTO/批准/回执/来源/会话/不可信数据、最小存储/API 提案、反例与 R1/R2 交付附录 | 本文件 |
 | `docs/yaya-v1/tool-coverage.md` | 全工具覆盖表、范围策略/来源区分与“无工具”清单 | 不登记未实现功能 |
 | `docs/yaya-v1/ownership.md` | 并行 owner 表与共享变更流程 | 本文件 |
 | `src/lib/yaya/types.ts` | 可组合 DTO 与批准/回执/投影纯函数；只读复用 `authorizeAction`/`isLegalAccessCombination`/`modelWaitPremiseChanged` | 不改 AUTH 冻结类型 |
-| `scripts/yaya/check-contract.ts` | 离线 assert 参考检查（51 项；原 26 + R1 25） | 输出 `reference_only:true` |
+| `scripts/yaya/check-contract.ts` | 离线 assert 参考检查（68 项；R1 51 + R2 17） | 输出 `reference_only:true` |
 
 ## 2. 并行 owner 表（后续轮次）
 
@@ -37,6 +37,7 @@
 4. TECH0 结论未交付前，`contract-draft.md` 第 12 节相关项保持 provisional；禁止任何模块按未确认的协议能力抢跑。
 5. 产品边界争议（新工具、新角色、新数据）回契约负责人/主评审，不各自扩展接口。
 6. R1 新增的接口面（批准绑定与执行判定、回执账本与查询接口、多来源消息投影、图片引用/读取规则、无损业务 payload）由对应 owner 按上一表接入；任何字段级变更回 YAYA0/主评审。
+7. R2 修订：提案来源（`proposal_origin`）与批准来源（`approval_source=authenticated_entry`）分离；成功回执必须有合法状态/效果/业务标识证明并对照唯一预期清单；图片读取与聊天附件统一为 historical 仅元数据、按 `record_kind+record_id` 匹配、最佳投影与顺序无关。恢复协议共同口径：原操作未知只查原 `operation_id`，批准身份（approval_id）与执行幂等身份（operation_id）不同。
 
 ## 4. 本工作树提交与资源纪律
 

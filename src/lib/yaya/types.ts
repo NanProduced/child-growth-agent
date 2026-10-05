@@ -238,6 +238,7 @@ export interface YayaImageBusinessRef {
 }
 
 export interface YayaImageViewerRecordAccess {
+  record_kind: "observation" | "proposal";
   record_id: string;
   projection: "full" | "historical_read_only";
 }
@@ -249,33 +250,51 @@ export interface YayaImageReadFacts {
 }
 
 export type YayaImageReadDecision =
-  | { readable: true; via: "business_record"; projection: "full" | "historical_read_only" }
+  | { readable: true; via: "business_record"; projection: "full" }
   | { readable: true; via: "uploader_private" }
-  | { readable: false; reason: "attached_but_no_record_access" | "not_attached_and_not_uploader" };
+  | {
+      readable: false;
+      metadata_only: boolean;
+      reason:
+        | "historical_metadata_only"
+        | "attached_but_no_record_access"
+        | "not_attached_and_not_uploader";
+    };
 
 /**
- * 图片读取投影：
- * - 已挂到业务记录：按记录的合法引用与投影读取，不裸 image_id 放行，
- *   也不只凭上传者身份否定其他合法业务读取；
- * - 未关联素材：仅上传者本人可读（账号私有）。
+ * 图片读取投影（与聊天附件投影同一口径）：
+ * - 已挂到业务记录：按 `record_kind + record_id` 完整匹配合法引用与投影读取，
+ *   不裸 image_id 放行，也不只凭上传者身份否定其他合法业务读取；
+ * - historical_read_only 只返回元数据，**不可读图片字节/预览 URL**；
+ * - full 才是真正可读；
+ * - 多引用时取最佳可用投影（full 优先于 historical），结果与遍历顺序无关；
+ * - 未关联素材：仅上传者本人可读（账号私有）；未知/缺失授权一律拒绝。
  */
 export function decideImageReadAccess(
   facts: YayaImageReadFacts,
   viewer: { account_id: string; record_access: readonly YayaImageViewerRecordAccess[] }
 ): YayaImageReadDecision {
   if (facts.attached_records.length > 0) {
+    const projections: ("full" | "historical_read_only")[] = [];
     for (const record of facts.attached_records) {
-      const access = viewer.record_access.find((entry) => entry.record_id === record.record_id);
-      if (access !== undefined) {
-        return { readable: true, via: "business_record", projection: access.projection };
+      for (const access of viewer.record_access) {
+        if (access.record_kind === record.record_kind && access.record_id === record.record_id) {
+          projections.push(access.projection);
+        }
       }
     }
-    return { readable: false, reason: "attached_but_no_record_access" };
+    if (projections.includes("full")) {
+      return { readable: true, via: "business_record", projection: "full" };
+    }
+    if (projections.includes("historical_read_only")) {
+      return { readable: false, metadata_only: true, reason: "historical_metadata_only" };
+    }
+    return { readable: false, metadata_only: false, reason: "attached_but_no_record_access" };
   }
   if (viewer.account_id === facts.uploader_account_id) {
     return { readable: true, via: "uploader_private" };
   }
-  return { readable: false, reason: "not_attached_and_not_uploader" };
+  return { readable: false, metadata_only: false, reason: "not_attached_and_not_uploader" };
 }
 
 /* -------------------------------- 候选选择 -------------------------------- */
@@ -485,10 +504,16 @@ export interface YayaApprovalItemRef {
 
 /**
  * 批准绑定（服务端记录）。
+ * - `proposal_origin` 只记录提案来源（模型或教师卡片），不得改写用来掩盖来源；
+ *   模型提案同样可以执行，只要存在真实教师批准。
  * - `approval_source` 必须是 `authenticated_entry`：经认证、CSRF 保护的教师入口写入；
- *   请求体自报或模型输出都不是批准证明。
+ *   请求体自报、模型输出或仅本地 runtime 的 approved 状态都不是批准证明。
  * - 绑定 actor/原始 session、逐项 action/resource/target/operation_id、
  *   批准时资源事实、内容摘要、附件关联、业务版本与生命周期。
+ *
+ * 批准身份（approval_id，一次人工批准动作）与执行幂等身份（operation_id，一次执行）
+ * 不是同一概念：同一个批准可以对应一个 operation_id 的一次执行；原操作结果未知时
+ * 只能按原 operation_id 查询，不能新建操作重新执行。
  */
 export interface YayaApprovalBinding {
   approval_id: string;
@@ -511,6 +536,8 @@ export interface YayaApprovalSubmitter {
   session_id: string | null;
   session_valid: boolean;
   csrf_verified: boolean;
+  /** 仅本地 runtime 的 approved 状态；不参与判定，只用于拒绝自报来源的场景说明 */
+  runtime_approved_state: boolean;
   execution_at: string;
 }
 
@@ -526,7 +553,6 @@ export interface YayaApprovalItemExecution {
 
 export const YAYA_APPROVAL_INVALID_REASONS = [
   "untrusted_approval_source",
-  "model_proposal_not_approved",
   "csrf_not_verified",
   "unauthenticated",
   "identity_unavailable",
@@ -623,6 +649,8 @@ export function compareAttachmentAssociations(
 /**
  * 批准执行判定（纯参考算法）：
  * - 只信任服务端批准记录与批准原 session；CSRF、身份、生命周期先校验；
+ *   模型提案（proposal_origin=model_suggestion）不因来源被拒绝，但必须有可信批准；
+ *   本地 runtime approved 状态、请求体自报、模型输出都不构成批准。
  * - 逐项身份完整匹配（item_key + operation_id + target + resource kind），缺项/重复/多出都拒绝；
  * - 先组合合法性，再复用 `authorizeAction`（管理员教学动作、教师管理动作都会正确拒绝）；
  * - 复用 `modelWaitPremiseChanged` 比较批准时与执行时的服务端归属事实：
@@ -637,9 +665,6 @@ export function evaluateApprovalExecution(
   const reasons: YayaApprovalInvalidReason[] = [];
   if (binding.approval_source !== "authenticated_entry") {
     reasons.push("untrusted_approval_source");
-  }
-  if (binding.proposal_origin !== "teacher_card") {
-    reasons.push("model_proposal_not_approved");
   }
   if (!submitter.csrf_verified) {
     reasons.push("csrf_not_verified");
@@ -783,8 +808,19 @@ export interface YayaOperationReceipt {
   recorded_at: string;
 }
 
-export function receiptClaimsSuccess(status: YayaReceiptStatus): boolean {
-  return status === "saved" || status === "saved_detail_unavailable" || status === "unchanged";
+/**
+ * 成功必须同时具备：合法状态/效果组合 + 该操作必需的业务标识。
+ * - saved / saved_detail_unavailable / unchanged：`effect=committed` 且 `business_object_id` 非空；
+ * - `effect=unknown`、缺业务标识或状态/效果不匹配一律不算成功（unknown 效果不能成为确定成功）。
+ */
+export function receiptProvesSuccess(receipt: YayaOperationReceipt): boolean {
+  if (receipt.business_object_id === null) return false;
+  if (receipt.effect !== "committed") return false;
+  return (
+    receipt.status === "saved" ||
+    receipt.status === "saved_detail_unavailable" ||
+    receipt.status === "unchanged"
+  );
 }
 
 /** 只有“明确失败且确认无已提交效果”才可重发；其余只能查询或重新批准 */
@@ -795,10 +831,16 @@ export function receiptCanBeResent(receipt: YayaOperationReceipt): boolean {
 export interface YayaBatchComparison {
   expected: number;
   received: number;
+  /** 预期清单本身不合法（重复 operation_id / 重复 item_key），必须先修正计划 */
+  duplicate_plan_operation_ids: readonly string[];
+  duplicate_plan_item_keys: readonly string[];
   missing_operation_ids: readonly string[];
   unexpected_operation_ids: readonly string[];
+  /** 同一 operation_id 收到多余回执（即使内容相同也单独表达） */
   duplicate_operation_ids: readonly string[];
   contradictory_operation_ids: readonly string[];
+  /** 声称成功但缺少完整证明（效果未知/缺业务标识）的条目 */
+  unverified_success_operation_ids: readonly string[];
   saved: number;
   failed: number;
   conflict: number;
@@ -820,29 +862,50 @@ function receiptIdentifiesPlan(
   );
 }
 
-function receiptsContradict(
-  receipts: readonly YayaOperationReceipt[],
-  planned: YayaPlannedOperation
-): boolean {
-  const first = receipts[0];
-  if (first === undefined) return false;
-  return receipts.some(
-    (receipt) =>
-      receipt.status !== first.status ||
-      receipt.effect !== first.effect ||
-      !receiptIdentifiesPlan(receipt, planned)
+/** 同一操作的重复回执是否表达同一业务结果（合法幂等重放 vs 矛盾） */
+function receiptSameResult(a: YayaOperationReceipt, b: YayaOperationReceipt): boolean {
+  return (
+    a.status === b.status &&
+    a.effect === b.effect &&
+    a.business_object_id === b.business_object_id &&
+    a.business_revision === b.business_revision
   );
+}
+
+function receiptGroupIsIdentical(group: readonly YayaOperationReceipt[]): boolean {
+  const first = group[0];
+  if (first === undefined) return true;
+  return group.every((receipt) => receiptSameResult(receipt, first));
 }
 
 /**
  * 回执汇总对照预期条目清单（不是只数收到的回执）：
- * 缺项、多出、重复 operation_id、身份不匹配、相互矛盾都使 all_saved=false。
+ * - 汇总前核验预期清单的唯一性（重复 operation_id / item_key 直接判计划不合法）；
+ * - 身份不匹配的回执进入 `unexpected`，不参与任何状态统计；
+ * - 成功统计只统计已核验且证明完整的条目；`effect=unknown`/缺业务标识进入
+ *   `unverified_success_operation_ids`，不得计入 saved；
+ * - 缺项、多出、重复回执、矛盾回执、未验证成功都使 `all_saved=false`；
+ * - 完全相同且身份一致的重复回执按同一结果处理（合法幂等重放），但仍单独表达。
  */
 export function compareBatchReceipts(
   plan: readonly YayaPlannedOperation[],
   receipts: readonly YayaOperationReceipt[]
 ): YayaBatchComparison {
-  const planByOperationId = new Map(plan.map((item) => [item.operation_id, item] as const));
+  const duplicatePlanOperations: string[] = [];
+  const duplicatePlanItems: string[] = [];
+  const seenOperations = new Set<string>();
+  const seenItems = new Set<string>();
+  for (const item of plan) {
+    if (seenOperations.has(item.operation_id)) duplicatePlanOperations.push(item.operation_id);
+    seenOperations.add(item.operation_id);
+    if (seenItems.has(item.item_key)) duplicatePlanItems.push(item.item_key);
+    seenItems.add(item.item_key);
+  }
+  const planByOperationId = new Map<string, YayaPlannedOperation>();
+  for (const item of plan) {
+    if (!planByOperationId.has(item.operation_id)) planByOperationId.set(item.operation_id, item);
+  }
+
   const receiptsByOperationId = new Map<string, YayaOperationReceipt[]>();
   for (const receipt of receipts) {
     const list = receiptsByOperationId.get(receipt.operation_id);
@@ -854,58 +917,87 @@ export function compareBatchReceipts(
   const unexpected: string[] = [];
   const duplicate: string[] = [];
   const contradictory: string[] = [];
+  const unverifiedSuccess: string[] = [];
   const matched = new Set<string>();
+  let saved = 0;
+  let failed = 0;
+  let conflict = 0;
+  let inProgress = 0;
+  let needsVerification = 0;
 
-  for (const [operationId, list] of receiptsByOperationId) {
+  for (const [operationId, group] of receiptsByOperationId) {
     const planned = planByOperationId.get(operationId);
-    if (planned === undefined) {
-      unexpected.push(operationId);
-      continue;
-    }
-    if (!list.every((receipt) => receiptIdentifiesPlan(receipt, planned))) {
+    if (planned === undefined || !group.every((receipt) => receiptIdentifiesPlan(receipt, planned))) {
       unexpected.push(operationId);
       continue;
     }
     matched.add(operationId);
-    if (list.length > 1) {
-      duplicate.push(operationId);
-      if (receiptsContradict(list, planned)) contradictory.push(operationId);
+    if (group.length > 1) duplicate.push(operationId);
+    if (!receiptGroupIsIdentical(group)) {
+      contradictory.push(operationId);
+      continue;
+    }
+    const representative = group[0];
+    if (representative === undefined) continue;
+    switch (representative.status) {
+      case "saved":
+      case "saved_detail_unavailable":
+      case "unchanged":
+        if (receiptProvesSuccess(representative)) saved += 1;
+        else unverifiedSuccess.push(operationId);
+        break;
+      case "failed":
+        failed += 1;
+        break;
+      case "conflict":
+        conflict += 1;
+        break;
+      case "in_progress":
+        inProgress += 1;
+        break;
+      case "needs_verification":
+        needsVerification += 1;
+        break;
     }
   }
   for (const operationId of planByOperationId.keys()) {
     if (!matched.has(operationId)) missing.push(operationId);
   }
 
-  const count = (status: YayaReceiptStatus) =>
-    receipts.filter((receipt) => receipt.status === status).length;
   const all_saved =
     plan.length > 0 &&
+    duplicatePlanOperations.length === 0 &&
+    duplicatePlanItems.length === 0 &&
     missing.length === 0 &&
     unexpected.length === 0 &&
     duplicate.length === 0 &&
     contradictory.length === 0 &&
+    unverifiedSuccess.length === 0 &&
     plan.every((item) => {
-      const list = receiptsByOperationId.get(item.operation_id);
+      const group = receiptsByOperationId.get(item.operation_id);
       return (
-        list !== undefined &&
-        list.length === 1 &&
-        list[0] !== undefined &&
-        receiptClaimsSuccess(list[0].status)
+        group !== undefined &&
+        group.length === 1 &&
+        group[0] !== undefined &&
+        receiptProvesSuccess(group[0])
       );
     });
 
   return {
     expected: plan.length,
     received: receipts.length,
+    duplicate_plan_operation_ids: duplicatePlanOperations,
+    duplicate_plan_item_keys: duplicatePlanItems,
     missing_operation_ids: missing,
     unexpected_operation_ids: unexpected,
     duplicate_operation_ids: duplicate,
     contradictory_operation_ids: contradictory,
-    saved: count("saved") + count("saved_detail_unavailable") + count("unchanged"),
-    failed: count("failed"),
-    conflict: count("conflict"),
-    in_progress: count("in_progress"),
-    needs_verification: count("needs_verification"),
+    unverified_success_operation_ids: unverifiedSuccess,
+    saved,
+    failed,
+    conflict,
+    in_progress: inProgress,
+    needs_verification: needsVerification,
     all_saved,
   };
 }
@@ -920,23 +1012,34 @@ export type YayaOperationQueryOutcome =
   | { kind: "conflict" }
   | { kind: "saved"; receipt: YayaOperationReceipt }
   | { kind: "saved_detail_unavailable"; receipt: YayaOperationReceipt }
-  | { kind: "unknown"; reason: "no_receipt" | "contradictory_receipts" | "verification_required" };
+  | {
+      kind: "unknown";
+      reason:
+        | "no_receipt"
+        | "identity_mismatch"
+        | "contradictory_receipts"
+        | "invalid_success_proof"
+        | "verification_required";
+    };
 
+/**
+ * 原操作查询：必须携带预分配的完整身份（operation_id + batch/proposal/item/target/actor）。
+ * - 只按原 operation_id 查询，不新建操作重新执行（批准身份 ≠ 执行幂等身份）；
+ * - 身份不匹配、业务结果矛盾、成功证明不完整都返回 unknown，不任选第一条；
+ * - 完全相同的重复回执（合法幂等重放）视为同一结果；`unchanged` 保留合法幂等语义，
+ *   不要求 revision 必须递增。
+ */
 export function queryOperationOutcome(
   receipts: readonly YayaOperationReceipt[],
-  operationId: string
+  expected: YayaPlannedOperation
 ): YayaOperationQueryOutcome {
-  const matches = receipts.filter((receipt) => receipt.operation_id === operationId);
+  const matches = receipts.filter((receipt) => receipt.operation_id === expected.operation_id);
   const first = matches[0];
   if (first === undefined) return { kind: "unknown", reason: "no_receipt" };
-  if (
-    matches.some(
-      (receipt) =>
-        receipt.status !== first.status ||
-        receipt.effect !== first.effect ||
-        receipt.target_id !== first.target_id
-    )
-  ) {
+  if (!matches.every((receipt) => receiptIdentifiesPlan(receipt, expected))) {
+    return { kind: "unknown", reason: "identity_mismatch" };
+  }
+  if (!matches.every((receipt) => receiptSameResult(receipt, first))) {
     return { kind: "unknown", reason: "contradictory_receipts" };
   }
   switch (first.status) {
@@ -948,9 +1051,13 @@ export function queryOperationOutcome(
       return { kind: "conflict" };
     case "saved":
     case "unchanged":
-      return { kind: "saved", receipt: first };
+      return receiptProvesSuccess(first)
+        ? { kind: "saved", receipt: first }
+        : { kind: "unknown", reason: "invalid_success_proof" };
     case "saved_detail_unavailable":
-      return { kind: "saved_detail_unavailable", receipt: first };
+      return receiptProvesSuccess(first)
+        ? { kind: "saved_detail_unavailable", receipt: first }
+        : { kind: "unknown", reason: "invalid_success_proof" };
     case "needs_verification":
       return { kind: "unknown", reason: "verification_required" };
   }

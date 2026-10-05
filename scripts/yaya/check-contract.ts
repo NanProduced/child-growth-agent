@@ -34,7 +34,8 @@ import {
   projectChatMessage,
   projectConversationTitle,
   queryOperationOutcome,
-  receiptClaimsSuccess,
+  receiptCanBeResent,
+  receiptProvesSuccess,
   requiresBusinessTarget,
   resolveCandidateSelection,
   scopeFromClassIds,
@@ -494,6 +495,7 @@ function submitter(overrides: Partial<YayaApprovalSubmitter> = {}): YayaApproval
     session_id: "session-1",
     session_valid: true,
     csrf_verified: true,
+    runtime_approved_state: false,
     execution_at: "2026-10-05T08:05:00.000Z",
     ...overrides,
   };
@@ -705,18 +707,11 @@ check("停用账号/停止批准/过期不沿用：disabled、cancelled、expire
   assert.ok(reasonsOf(expired).includes("approval_expired"));
 });
 
-check("模型生成 approved 无效：模型提案与请求体自报都不是批准", () => {
-  const modelProposal = evaluateApprovalExecution(
-    binding({ proposal_origin: "model_suggestion" }),
-    submitter(),
-    [executionItem()]
-  );
-  assert.equal(modelProposal.ok, false);
-  assert.ok(reasonsOf(modelProposal).includes("model_proposal_not_approved"));
+check("模型生成 approved 无效：模型/请求体自报批准都不是证明", () => {
   for (const source of ["model_output", "request_body_claim"] as const) {
     const result = evaluateApprovalExecution(
-      binding({ approval_source: source }),
-      submitter(),
+      binding({ approval_source: source, proposal_origin: "model_suggestion" }),
+      submitter({ runtime_approved_state: true }),
       [executionItem()]
     );
     assert.equal(result.ok, false);
@@ -815,21 +810,34 @@ check("部分成功不重发：只重试确认无已提交效果的失败项", (
 });
 
 check("未知回执不假成功：无回执 → unknown，绝不显示 saved", () => {
-  const outcome = queryOperationOutcome([], "op-lost");
+  const expected = planned({ operation_id: "op-lost" });
+  const outcome = queryOperationOutcome([], expected);
   assert.equal(outcome.kind, "unknown");
-  assert.equal(receiptClaimsSuccess("needs_verification"), false);
-  assert.equal(receiptClaimsSuccess("failed"), false);
-  assert.equal(receiptClaimsSuccess("conflict"), false);
-  assert.equal(receiptClaimsSuccess("in_progress"), false);
-  assert.equal(receiptClaimsSuccess("saved"), true);
-  assert.equal(receiptClaimsSuccess("saved_detail_unavailable"), true);
-  assert.equal(receiptClaimsSuccess("unchanged"), true);
+  assert.equal(
+    receiptProvesSuccess(receipt({ status: "needs_verification", effect: "unknown", business_object_id: null })),
+    false
+  );
+  assert.equal(
+    receiptProvesSuccess(receipt({ status: "failed", effect: "none", business_object_id: null })),
+    false
+  );
+  assert.equal(
+    receiptProvesSuccess(receipt({ status: "conflict", effect: "unknown", business_object_id: null })),
+    false
+  );
+  assert.equal(
+    receiptProvesSuccess(receipt({ status: "in_progress", effect: "unknown", business_object_id: null })),
+    false
+  );
+  assert.equal(receiptProvesSuccess(receipt({ status: "saved" })), true);
+  assert.equal(receiptProvesSuccess(receipt({ status: "saved_detail_unavailable" })), true);
+  assert.equal(receiptProvesSuccess(receipt({ status: "unchanged" })), true);
 });
 
 check("重复提交幂等：同 operation_id 回执重放，不再次执行", () => {
   const plan = [planned({ operation_id: "op-dup" })];
   const receipts = [receipt({ operation_id: "op-dup", status: "saved" })];
-  const outcome = queryOperationOutcome(receipts, "op-dup");
+  const outcome = queryOperationOutcome(receipts, planned({ operation_id: "op-dup" }));
   assert.equal(outcome.kind, "saved");
   const comparison = compareBatchReceipts(plan, receipts);
   assert.equal(comparison.all_saved, true);
@@ -1247,15 +1255,23 @@ check("错配回执：身份不匹配 → missing + unexpected，不得算成功
 
 check("重复与矛盾回执：duplicate/contradictory → 非全成功且查询未知", () => {
   const plan = [planned({ item_key: "item-a", operation_id: "op-a", target_id: "child-a" })];
+  const expected = planned({ item_key: "item-a", operation_id: "op-a", target_id: "child-a" });
   const contradictory = [
     receipt({ item_key: "item-a", operation_id: "op-a", target_id: "child-a", status: "saved", effect: "committed" }),
-    receipt({ item_key: "item-a", operation_id: "op-a", target_id: "child-a", status: "failed", effect: "none" }),
+    receipt({
+      item_key: "item-a",
+      operation_id: "op-a",
+      target_id: "child-a",
+      status: "failed",
+      effect: "none",
+      business_object_id: null,
+    }),
   ];
   const comparison = compareBatchReceipts(plan, contradictory);
   assert.deepEqual(comparison.duplicate_operation_ids, ["op-a"]);
   assert.deepEqual(comparison.contradictory_operation_ids, ["op-a"]);
   assert.equal(comparison.all_saved, false);
-  const outcome = queryOperationOutcome(contradictory, "op-a");
+  const outcome = queryOperationOutcome(contradictory, expected);
   assert.equal(outcome.kind, "unknown");
   const duplicateOnly = compareBatchReceipts(plan, [
     receipt({ item_key: "item-a", operation_id: "op-a", status: "saved" }),
@@ -1278,10 +1294,13 @@ check("操作身份预分配：batch_id 与逐项 operation_id，完整匹配不
   assert.deepEqual(byOtherId.missing_operation_ids, ["op-pre-a"]);
   assert.deepEqual(byOtherId.unexpected_operation_ids, ["op-other"]);
   assert.equal(byOtherId.all_saved, false);
-  assert.deepEqual(queryOperationOutcome(
-    [receipt({ operation_id: "op-other", status: "saved" })],
-    "op-pre-a"
-  ).kind, "unknown");
+  assert.deepEqual(
+    queryOperationOutcome(
+      [receipt({ operation_id: "op-other", status: "saved" })],
+      planned({ batch_id: "batch-9", item_key: "item-a", operation_id: "op-pre-a", target_id: "child-a" })
+    ).kind,
+    "unknown"
+  );
 });
 
 check("失败效果分级：只有 failed+none 可重发", () => {
@@ -1294,23 +1313,24 @@ check("失败效果分级：只有 failed+none 可重发", () => {
 });
 
 check("回执查询语义：进行中/失败/冲突/已保存/详情不可读/未知", () => {
-  assert.deepEqual(queryOperationOutcome([], "op-q"), { kind: "unknown", reason: "no_receipt" });
-  assert.deepEqual(queryOperationOutcome([receipt({ operation_id: "op-q", status: "in_progress", effect: "unknown" })], "op-q"), {
+  const expected = planned({ item_key: "child-a", operation_id: "op-q", target_id: "child-a" });
+  assert.deepEqual(queryOperationOutcome([], expected), { kind: "unknown", reason: "no_receipt" });
+  assert.deepEqual(queryOperationOutcome([receipt({ operation_id: "op-q", status: "in_progress", effect: "unknown" })], expected), {
     kind: "in_progress",
   });
-  assert.deepEqual(queryOperationOutcome([receipt({ operation_id: "op-q", status: "failed", effect: "none" })], "op-q"), {
+  assert.deepEqual(queryOperationOutcome([receipt({ operation_id: "op-q", status: "failed", effect: "none", business_object_id: null })], expected), {
     kind: "failed",
     effect: "none",
   });
-  assert.deepEqual(queryOperationOutcome([receipt({ operation_id: "op-q", status: "conflict", effect: "unknown" })], "op-q"), {
+  assert.deepEqual(queryOperationOutcome([receipt({ operation_id: "op-q", status: "conflict", effect: "unknown" })], expected), {
     kind: "conflict",
   });
-  assert.equal(queryOperationOutcome([receipt({ operation_id: "op-q", status: "saved" })], "op-q").kind, "saved");
+  assert.equal(queryOperationOutcome([receipt({ operation_id: "op-q", status: "saved" })], expected).kind, "saved");
   assert.equal(
-    queryOperationOutcome([receipt({ operation_id: "op-q", status: "saved_detail_unavailable" })], "op-q").kind,
+    queryOperationOutcome([receipt({ operation_id: "op-q", status: "saved_detail_unavailable" })], expected).kind,
     "saved_detail_unavailable"
   );
-  assert.deepEqual(queryOperationOutcome([receipt({ operation_id: "op-q", status: "needs_verification", effect: "unknown" })], "op-q"), {
+  assert.deepEqual(queryOperationOutcome([receipt({ operation_id: "op-q", status: "needs_verification", effect: "unknown" })], expected), {
     kind: "unknown",
     reason: "verification_required",
   });
@@ -1331,7 +1351,7 @@ check("图片读取按记录投影：不裸 image_id、不只凭上传者", () =
   };
   const otherTeacher = decideImageReadAccess(attached, {
     account_id: "account-teacher-b",
-    record_access: [{ record_id: "observation-1", projection: "full" }],
+    record_access: [{ record_kind: "observation", record_id: "observation-1", projection: "full" }],
   });
   assert.equal(otherTeacher.readable, true);
   assert.equal(otherTeacher.via, "business_record");
@@ -1658,6 +1678,330 @@ check("工具覆盖补管理员教师列表与内部能力区分", () => {
   assert.equal(internal.coverage_origin, "assistant_internal");
   assert.equal(internal.implemented, false);
   assert.equal(internal.scope_policy, "business_scope");
+});
+
+/* --------------------------- R2 反例（RED→GREEN 修复后） --------------------------- */
+
+check("R2 模型提案+可信教师批准+前提一致可执行（保留提案来源）", () => {
+  const modelProposal = binding({ proposal_origin: "model_suggestion" });
+  assert.equal(modelProposal.proposal_origin, "model_suggestion", "proposal source must be preserved");
+  const result = evaluateApprovalExecution(modelProposal, submitter(), [executionItem()]);
+  assert.equal(result.ok, true, "trusted authenticated approval of a model proposal must execute");
+});
+
+check("R2 模型提案前提变化仍失效（内容/session/归属）", () => {
+  const modelProposal = binding({ proposal_origin: "model_suggestion" });
+  const contentChanged = evaluateApprovalExecution(modelProposal, submitter(), [
+    executionItem({ content_digest: "digest-v2" }),
+  ]);
+  assert.equal(contentChanged.ok, false);
+  assert.ok(reasonsOf(contentChanged).includes("content_changed"));
+  const sessionChanged = evaluateApprovalExecution(
+    modelProposal,
+    submitter({ session_id: "session-2" }),
+    [executionItem()]
+  );
+  assert.equal(sessionChanged.ok, false);
+  assert.ok(reasonsOf(sessionChanged).includes("session_changed"));
+  const moved = evaluateApprovalExecution(
+    modelProposal,
+    submitter({ principal: principalOf("teacher", ["class-a", "class-b"]) }),
+    [executionItem({ resource_facts: observationResource("observation-1", "child-a", "class-b", "class-a") })]
+  );
+  assert.equal(moved.ok, false);
+  assert.ok(reasonsOf(moved).includes("attribution_changed"));
+});
+
+check("R2 本地 runtime approved 状态不参与判定", () => {
+  const trusted = evaluateApprovalExecution(binding(), submitter({ runtime_approved_state: true }), [
+    executionItem(),
+  ]);
+  assert.equal(trusted.ok, true);
+  const forged = evaluateApprovalExecution(
+    binding({ approval_source: "request_body_claim" }),
+    submitter({ runtime_approved_state: true }),
+    [executionItem()]
+  );
+  assert.equal(forged.ok, false);
+  assert.ok(reasonsOf(forged).includes("untrusted_approval_source"));
+});
+
+check("R2 saved+effect=unknown+business_id=null 不得成功", () => {
+  const comparison = compareBatchReceipts(
+    [planned({ item_key: "item-a", operation_id: "op-a", target_id: "child-a" })],
+    [
+      receipt({
+        item_key: "item-a",
+        operation_id: "op-a",
+        target_id: "child-a",
+        status: "saved",
+        effect: "unknown",
+        business_object_id: null,
+      }),
+    ]
+  );
+  assert.equal(comparison.all_saved, false, "unknown effect without business id cannot be success");
+  assert.deepEqual(comparison.unverified_success_operation_ids, ["op-a"]);
+  assert.equal(comparison.saved, 0, "unverified success must not count as saved");
+});
+
+check("R2 预期清单重复 operation_id 不得全成功", () => {
+  const duplicatedPlan = [
+    planned({ item_key: "item-a", operation_id: "op-a", target_id: "child-a" }),
+    planned({ item_key: "item-b", operation_id: "op-a", target_id: "child-b" }),
+  ];
+  const comparison = compareBatchReceipts(duplicatedPlan, [
+    receipt({ item_key: "item-b", operation_id: "op-a", target_id: "child-b" }),
+  ]);
+  assert.equal(comparison.all_saved, false, "duplicated plan operation_id must not collapse");
+  assert.deepEqual(comparison.duplicate_plan_operation_ids, ["op-a"]);
+});
+
+check("R2 预期清单重复 item_key 不得全成功", () => {
+  const duplicatedItems = [
+    planned({ item_key: "item-a", operation_id: "op-a", target_id: "child-a" }),
+    planned({ item_key: "item-a", operation_id: "op-b", target_id: "child-b" }),
+  ];
+  const comparison = compareBatchReceipts(duplicatedItems, [
+    receipt({ item_key: "item-a", operation_id: "op-a", target_id: "child-a" }),
+    receipt({ item_key: "item-a", operation_id: "op-b", target_id: "child-b" }),
+  ]);
+  assert.equal(comparison.all_saved, false);
+  assert.deepEqual(comparison.duplicate_plan_item_keys, ["item-a"]);
+});
+
+check("R2 错目标回执不得计入 saved 统计且算缺项", () => {
+  const comparison = compareBatchReceipts(
+    [planned({ item_key: "item-a", operation_id: "op-a", target_id: "child-a" })],
+    [receipt({ item_key: "item-a", operation_id: "op-a", target_id: "child-b", status: "saved" })]
+  );
+  assert.equal(comparison.saved, 0, "identity-mismatched receipt must not count as saved");
+  assert.deepEqual(comparison.unexpected_operation_ids, ["op-a"]);
+  assert.deepEqual(comparison.missing_operation_ids, ["op-a"]);
+  assert.equal(comparison.all_saved, false);
+});
+
+check("R2 查询矛盾 actor/业务对象不得返回 saved", () => {
+  const expected = planned({ operation_id: "op-q" });
+  const actorConflict = queryOperationOutcome(
+    [
+      receipt({ operation_id: "op-q", actor_account_id: "account-teacher-a" }),
+      receipt({ operation_id: "op-q", actor_account_id: "account-teacher-b" }),
+    ],
+    expected
+  );
+  assert.deepEqual(actorConflict, { kind: "unknown", reason: "identity_mismatch" });
+  const businessConflict = queryOperationOutcome(
+    [
+      receipt({ operation_id: "op-q", business_object_id: "observation-a" }),
+      receipt({ operation_id: "op-q", business_object_id: "observation-b" }),
+    ],
+    expected
+  );
+  assert.deepEqual(businessConflict, { kind: "unknown", reason: "contradictory_receipts" });
+});
+
+check("R2 合法重复同一回执：查询按同一结果，批内仍单独表达", () => {
+  const expected = planned({ operation_id: "op-dup" });
+  const identical = [
+    receipt({ operation_id: "op-dup", business_object_id: "observation-a" }),
+    receipt({ operation_id: "op-dup", business_object_id: "observation-a" }),
+  ];
+  assert.equal(queryOperationOutcome(identical, expected).kind, "saved");
+  const comparison = compareBatchReceipts([planned({ operation_id: "op-dup" })], identical);
+  assert.deepEqual(comparison.duplicate_operation_ids, ["op-dup"]);
+  assert.deepEqual(comparison.contradictory_operation_ids, []);
+  assert.equal(comparison.saved, 1, "identical duplicates count as one verified result");
+  assert.equal(comparison.all_saved, false, "duplicate ledger rows must still be reviewed");
+});
+
+check("R2 unchanged 保留合法幂等语义：不要求 revision 递增", () => {
+  const unchanged = receipt({
+    operation_id: "op-u",
+    status: "unchanged",
+    effect: "committed",
+    business_object_id: "observation-a",
+    business_revision: null,
+  });
+  assert.equal(receiptProvesSuccess(unchanged), true);
+  assert.equal(queryOperationOutcome([unchanged], planned({ operation_id: "op-u" })).kind, "saved");
+  const comparison = compareBatchReceipts([planned({ operation_id: "op-u" })], [unchanged]);
+  assert.equal(comparison.all_saved, true);
+});
+
+check("R2 saved_detail_unavailable 是已保存；无完整证明则未知", () => {
+  const savedDetail = receipt({ operation_id: "op-d", status: "saved_detail_unavailable" });
+  assert.equal(
+    queryOperationOutcome([savedDetail], planned({ operation_id: "op-d" })).kind,
+    "saved_detail_unavailable"
+  );
+  const invalid = receipt({
+    operation_id: "op-d",
+    status: "saved",
+    effect: "committed",
+    business_object_id: null,
+  });
+  assert.deepEqual(queryOperationOutcome([invalid], planned({ operation_id: "op-d" })), {
+    kind: "unknown",
+    reason: "invalid_success_proof",
+  });
+  assert.equal(receiptCanBeResent(savedDetail), false, "saved detail unavailable must not be resent");
+});
+
+check("R2 未知/进行中不得转换为未保存；确定失败才进重试路线", () => {
+  const expected = planned({ operation_id: "op-x" });
+  assert.deepEqual(queryOperationOutcome([], expected), { kind: "unknown", reason: "no_receipt" });
+  assert.equal(
+    queryOperationOutcome([receipt({ operation_id: "op-x", status: "in_progress", effect: "unknown" })], expected).kind,
+    "in_progress"
+  );
+  assert.equal(
+    itemsToResend([receipt({ operation_id: "op-x", status: "failed", effect: "committed" })]).length,
+    0
+  );
+  assert.equal(
+    itemsToResend([receipt({ operation_id: "op-x", status: "failed", effect: "none" })]).length,
+    1
+  );
+});
+
+check("R2 批准身份≠执行幂等身份：原操作未知只查原 operation_id", () => {
+  const original = planned({ operation_id: "op-original", target_id: "child-a" });
+  const receipts = [receipt({ operation_id: "op-original", target_id: "child-a" })];
+  assert.equal(queryOperationOutcome(receipts, original).kind, "saved");
+  const newIdentity = planned({ operation_id: "op-new", target_id: "child-a" });
+  assert.deepEqual(queryOperationOutcome(receipts, newIdentity), {
+    kind: "unknown",
+    reason: "no_receipt",
+  });
+});
+
+check("R2 历史只读图片统一为仅元数据（与聊天附件投影一致）", () => {
+  const decision = decideImageReadAccess(
+    {
+      image_id: "image-1",
+      uploader_account_id: "account-teacher-a",
+      attached_records: [{ record_kind: "observation", record_id: "observation-1" }],
+    },
+    {
+      account_id: "account-teacher-b",
+      record_access: [
+        { record_kind: "observation", record_id: "observation-1", projection: "historical_read_only" },
+      ],
+    }
+  );
+  assert.equal(decision.readable, false, "historical read-only must not expose bytes");
+  assert.equal(decision.readable === false ? decision.metadata_only : null, true);
+  assert.equal(decision.readable === false ? decision.reason : null, "historical_metadata_only");
+  const chatProjection = projectChatMessage(
+    chatMessage({
+      fragments: [],
+      attachment_ids: ["image-1"],
+    }),
+    { account_id: "account-teacher-a", role: "teacher" },
+    [],
+    [{ attachment_id: "image-1", access: "historical_read_only" }]
+  );
+  assert.equal(chatProjection.attachments[0]?.readable, false);
+  assert.equal(chatProjection.attachments[0]?.metadata_only, true);
+});
+
+check("R2 图片关联身份按 record_kind + record_id 完整匹配", () => {
+  const decision = decideImageReadAccess(
+    {
+      image_id: "image-1",
+      uploader_account_id: "account-teacher-a",
+      attached_records: [{ record_kind: "observation", record_id: "record-1" }],
+    },
+    {
+      account_id: "account-teacher-b",
+      record_access: [
+        { record_kind: "proposal", record_id: "record-1", projection: "full" },
+      ],
+    }
+  );
+  assert.equal(decision.readable, false);
+  assert.equal(decision.readable === false ? decision.reason : null, "attached_but_no_record_access");
+});
+
+check("R2 多引用结果不受遍历顺序影响", () => {
+  const access = [
+    { record_kind: "observation" as const, record_id: "record-a", projection: "historical_read_only" as const },
+    { record_kind: "observation" as const, record_id: "record-b", projection: "full" as const },
+  ];
+  const viewer = { account_id: "account-teacher-b", record_access: access };
+  const first = decideImageReadAccess(
+    {
+      image_id: "image-1",
+      uploader_account_id: "account-teacher-a",
+      attached_records: [
+        { record_kind: "observation", record_id: "record-a" },
+        { record_kind: "observation", record_id: "record-b" },
+      ],
+    },
+    viewer
+  );
+  const second = decideImageReadAccess(
+    {
+      image_id: "image-1",
+      uploader_account_id: "account-teacher-a",
+      attached_records: [
+        { record_kind: "observation", record_id: "record-b" },
+        { record_kind: "observation", record_id: "record-a" },
+      ],
+    },
+    viewer
+  );
+  assert.equal(
+    first.readable && "projection" in first ? first.projection : null,
+    "full",
+    "best projection must win over traversal order"
+  );
+  assert.equal(
+    second.readable && "projection" in second ? second.projection : null,
+    "full",
+    "best projection must win over traversal order"
+  );
+  const historicalOnly = decideImageReadAccess(
+    {
+      image_id: "image-2",
+      uploader_account_id: "account-teacher-a",
+      attached_records: [
+        { record_kind: "observation", record_id: "record-a" },
+        { record_kind: "observation", record_id: "record-b" },
+      ],
+    },
+    {
+      account_id: "account-teacher-b",
+      record_access: access.map((entry) => ({ ...entry, projection: "historical_read_only" as const })),
+    }
+  );
+  assert.equal(historicalOnly.readable, false);
+  assert.equal(historicalOnly.readable === false ? historicalOnly.metadata_only : null, true);
+});
+
+check("R2 上传者已无业务权限/未知授权一律拒绝", () => {
+  const attached = {
+    image_id: "image-1",
+    uploader_account_id: "account-teacher-a",
+    attached_records: [{ record_kind: "observation" as const, record_id: "observation-1" }],
+  };
+  const uploaderWithoutAccess = decideImageReadAccess(attached, {
+    account_id: "account-teacher-a",
+    record_access: [],
+  });
+  assert.equal(uploaderWithoutAccess.readable, false);
+  assert.equal(
+    uploaderWithoutAccess.readable === false ? uploaderWithoutAccess.reason : null,
+    "attached_but_no_record_access"
+  );
+  const unrelatedRecordAccess = decideImageReadAccess(attached, {
+    account_id: "account-teacher-b",
+    record_access: [
+      { record_kind: "proposal", record_id: "proposal-1", projection: "full" },
+    ],
+  });
+  assert.equal(unrelatedRecordAccess.readable, false);
 });
 
 /* ----------------------------------- 汇总 ----------------------------------- */
