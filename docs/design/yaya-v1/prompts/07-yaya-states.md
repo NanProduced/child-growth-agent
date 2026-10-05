@@ -14,7 +14,7 @@ Six labeled cells in a 3x2 grid, each with the mascot, a small static status bad
 3. 待确认 — sprout holding a tiny amber flag, amber dot badge, text 待确认 · 请你核对
 4. 保存中 — sprout leaves wrapped around itself, amber ring badge, text 保存中 · 正在保存…
 5. 成功 — sprout open and relaxed, small green check badge, text 已保存
-6. 待核对/异常 — sprout with leaves curled back, amber warning badge, text 保存结果待核对
+6. 结果未知/异常 — sprout with leaves curled back, amber warning badge, text 保存结果未知，按原操作核对
 
 No animation, no motion lines, no 3D, no gradients, no glow, no emoji smileys, no text other than the specified labels, no UI screens, no children. Flat, friendly, professional, high legibility.
 ```
