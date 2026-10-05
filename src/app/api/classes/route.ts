@@ -1,17 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireTeacher } from "@/lib/auth";
-import { createClass, findClassByName, listClasses } from "@/lib/queries";
+import { runBusinessWrite, AccountsError, mapAccountsError } from "@/lib/auth";
+import { createClass, findClassByName } from "@/lib/queries";
+import { scopedListClasses } from "@/lib/accounts/scoped-queries";
 import { createClassSchema } from "@/lib/validation";
 
 /**
  * 班级：
- * - GET 对访客开放（只读），返回全部班级（含已停用，用 is_active 区分）；
- * - POST 需教师身份：新建小班 / 中班 / 大班班级，同学年内不允许重名。
+ * - GET 默认当前任教班级；catalog=true 仅提供基础目录，仍须有业务范围；
+ * - POST 仅管理员：新建班级，同学年内不允许重名。
  */
-export async function GET() {
+export async function GET(request?: NextRequest) {
   try {
-    return NextResponse.json({ classes: await listClasses() });
+    return NextResponse.json({ classes: await scopedListClasses({ catalog: request?.nextUrl.searchParams.get("catalog") === "true" }, request) });
   } catch (e) {
+    if (e instanceof AccountsError) return mapAccountsError(e);
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "查询班级失败" },
       { status: 500 }
@@ -20,9 +22,6 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const guard = requireTeacher(request);
-  if (guard) return guard;
-
   const body = await request.json().catch(() => null);
   const parsed = createClassSchema.safeParse(body);
   if (!parsed.success) {
@@ -33,6 +32,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    return await runBusinessWrite(request, "class.manage", { kind: "class" }, async () => {
     const existing = await findClassByName(parsed.data.name, parsed.data.school_year);
     if (existing) {
       return NextResponse.json(
@@ -42,7 +42,9 @@ export async function POST(request: NextRequest) {
     }
     const created = await createClass(parsed.data);
     return NextResponse.json({ class: created }, { status: 201 });
+    });
   } catch (e) {
+    if (e instanceof AccountsError) return mapAccountsError(e);
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "创建班级失败" },
       { status: 500 }

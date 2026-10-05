@@ -1,4 +1,25 @@
 import { Pool, type PoolClient } from "pg";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const readClient = new AsyncLocalStorage<TransactionClient>();
+const saveAuthorization = new AsyncLocalStorage<{
+  authorize: (client: TransactionClient) => Promise<void>;
+  unavailable: () => Error;
+}>();
+
+/** Only scoped server reads enter this context; never keep it around a model call. */
+export function withReadClient<T>(client: TransactionClient, read: () => Promise<T>): Promise<T> {
+  return readClient.run(client, read);
+}
+
+/** Business request's original session/resource premise, rechecked in every short save. */
+export function withSaveAuthorization<T>(
+  authorize: (client: TransactionClient) => Promise<void>,
+  work: () => Promise<T>,
+  unavailable: () => Error,
+): Promise<T> {
+  return saveAuthorization.run({ authorize, unavailable }, work);
+}
 
 declare global {
   // eslint-disable-next-line no-var
@@ -23,7 +44,8 @@ export async function query<T = Record<string, unknown>>(
   sql: string,
   params: unknown[] = []
 ): Promise<T[]> {
-  const res = await pool().query(sql, params as never[]);
+  const client = readClient.getStore();
+  const res = client ? await client.query(sql, params) : await pool().query(sql, params as never[]);
   return res.rows as T[];
 }
 
@@ -46,10 +68,15 @@ export type TransactionConnect = () => Promise<TransactionClient>;
 export async function withTransaction<T>(
   fn: (client: TransactionClient) => Promise<T>,
   connect: TransactionConnect = () => pool().connect(),
+  unavailable?: () => Error,
 ): Promise<T> {
-  const client = await connect();
+  const authorization = saveAuthorization.getStore();
+  const connectionFailure = unavailable ?? authorization?.unavailable;
+  const client = await connect().catch((error: unknown) => { throw connectionFailure ? connectionFailure() : error; });
   try {
-    await client.query("BEGIN");
+    try { await client.query("BEGIN"); }
+    catch (error) { throw connectionFailure ? connectionFailure() : error; }
+    await authorization?.authorize(client);
     const result = await fn(client);
     await client.query("COMMIT");
     return result;

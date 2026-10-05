@@ -1,0 +1,44 @@
+{
+  "file": "03-admin-desktop.png",
+  "state": "admin",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "a84050e45eb56a8b6cd83fcf4b6a7052c10896207266fc7e0c6ee44856737172",
+  "source": "C:/Users/nanpr/.codex/generated_images/01a0ebae-c34b-7341-b7cc-aee62ce28509/exec-057dd211-4ebc-4886-bfde-83c4476c2311.png",
+  "prompts": [
+    "Administrator desktop"
+  ],
+  "role_example": {
+    "classes": 6,
+    "children": 94,
+    "stages": [
+      {
+        "stage": "small",
+        "classes": 2,
+        "children": 34
+      },
+      {
+        "stage": "middle",
+        "classes": 2,
+        "children": 32
+      },
+      {
+        "stage": "large",
+        "classes": 2,
+        "children": 28
+      }
+    ],
+    "teaching_confirmation_action": false
+  },
+  "tool": "image_gen.imagegen (built-in)",
+  "model": "unknown",
+  "usage": null,
+  "recorded_at_utc": "2026-10-04T11:47:04Z",
+  "date_anchor": "2026-10-04",
+  "timezone": "Asia/Shanghai",
+  "status": "user_approved_for_implementation",
+  "approved": true,
+  "prompt_file": "PROMPTS.md",
+  "not_browser_validation": true,
+  "synthetic_design_data": true
+}

@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { AccountsError } from '@/lib/accounts/errors';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import {
@@ -28,7 +29,7 @@ import {
 } from '@/lib/format';
 import { hasCurrentActivitySupport } from '@/lib/activity-support';
 import { buildGrowthProfileFallback } from '@/lib/growth-profile';
-import { getChild, listClasses, listEnrollments, listObservations } from '@/lib/queries';
+import { scopedGetChild as getChild, scopedListClasses as listClasses, scopedListEnrollments as listEnrollments, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
 import { evidenceEntryQuery } from '@/lib/guide/navigation';
 import type {
   Child,
@@ -160,6 +161,7 @@ export default async function ChildDetailPage({
   try {
     child = await getChild(id);
   } catch (e) {
+    if (e instanceof AccountsError) { if (e.code === 'not_found') notFound(); throw e; }
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
 
@@ -192,6 +194,7 @@ export default async function ChildDetailPage({
       listClasses(),
     ]);
   } catch (e) {
+    if (e instanceof AccountsError) { if (e.code === 'not_found') notFound(); throw e; }
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
 

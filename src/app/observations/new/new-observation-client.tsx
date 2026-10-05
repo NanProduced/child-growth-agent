@@ -26,6 +26,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
+import { fetchWithAccountAuth } from '@/lib/accounts/client';
 import {
   fetchClassContextState,
   isAbortError,
@@ -147,7 +148,7 @@ export function NewObservationClient({
     let alive = true;
     setClassesLoading(true);
     setClassesError(null);
-    fetch('/api/classes')
+    fetch('/api/classes?catalog=true')
       .then(async (r) => {
         const data = (await r.json().catch(() => null)) as { classes?: unknown } | null;
         if (!r.ok) {
@@ -250,7 +251,7 @@ export function NewObservationClient({
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      const res = await fetch('/api/observations', {
+      const res = await fetchWithAccountAuth('/api/observations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -305,7 +306,7 @@ export function NewObservationClient({
           <AlertTitle>需要教师身份</AlertTitle>
           <AlertDescription>
             {writeAccess.read_only_reason ??
-              '录入观察属于写操作，需教师身份验证。请登录后再来；访客模式可浏览档案与已归档记录。'}
+              '录入观察属于写操作，需教师身份验证。请点击右上角「园所账号登录」输入账号密码后再来；访客模式可浏览档案与已归档记录。'}
           </AlertDescription>
         </Alert>
       </div>

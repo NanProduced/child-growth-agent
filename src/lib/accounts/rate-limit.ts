@@ -1,8 +1,10 @@
 /**
  * 基础登录限流：进程内固定窗口。
  * 明确限制：多实例之间不共享计数（未引入 Redis），只作为基础防线；
- * 键 = 规范化用户名 + 客户端地址（地址取 X-Forwarded-For 首跳，仅作辅助，可被伪造）。
+ * 键 = 规范化用户名；客户端地址不参与账号桶，伪造 X-Forwarded-For 不能重开窗口。
  */
+
+import { normalizeUsername } from "./normalize";
 
 export interface RateLimitPolicy {
   maxFailures: number;
@@ -61,11 +63,12 @@ export function createLoginRateLimiter(clock: () => number = Date.now): LoginRat
   };
 }
 
-export function rateLimitKey(normalizedUsername: string, clientAddress: string): string {
-  return `${normalizedUsername}|${clientAddress}`;
+export function rateLimitKey(normalizedUsername: string, _clientAddress?: string): string {
+  void _clientAddress; // 兼容现有登录调用，地址不参与账号桶。
+  return normalizeUsername(normalizedUsername);
 }
 
-/** 仅作限流辅助键；不用于任何授权或可信源判定 */
+/** 保留调用兼容；地址不参与限流桶，也不用于授权或可信源判定 */
 export function clientAddressOf(request: { headers: { get(name: string): string | null } }): string {
   const forwarded = request.headers.get("x-forwarded-for");
   if (forwarded) {

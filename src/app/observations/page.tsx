@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { AccountsError } from '@/lib/accounts/errors';
 import Link from 'next/link';
 import { ClipboardList, PenLine } from 'lucide-react';
 
@@ -8,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/components/status-badges';
 import { classLabel, excerpt, formatDateCn, schoolClassLabel } from '@/lib/format';
-import { listChildren, listClasses, listObservations } from '@/lib/queries';
+import { scopedListChildren as listChildren, scopedListClasses as listClasses, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
 import type { Child, Observation, ObservationStatus, SchoolClass } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -61,6 +62,7 @@ export default async function ObservationsPage({
       listClasses(),
     ]);
   } catch (e) {
+    if (e instanceof AccountsError) throw e;
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
 

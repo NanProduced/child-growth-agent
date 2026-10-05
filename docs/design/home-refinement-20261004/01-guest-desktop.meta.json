@@ -1,0 +1,23 @@
+{
+  "file": "01-guest-desktop.png",
+  "state": "logged_out",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "4b2cc1cbf41148d410ab8b2828cde99f8aa11bc77a0da9108a1529c9c7e8281f",
+  "source": "C:/Users/nanpr/.codex/generated_images/01a0ebae-c34b-7341-b7cc-aee62ce28509/exec-b5ce759e-961e-42a3-83f9-3b29e06b3697.png",
+  "prompts": [
+    "Logged-out desktop"
+  ],
+  "role_example": null,
+  "tool": "image_gen.imagegen (built-in)",
+  "model": "unknown",
+  "usage": null,
+  "recorded_at_utc": "2026-10-04T11:47:04Z",
+  "date_anchor": "2026-10-04",
+  "timezone": "Asia/Shanghai",
+  "status": "user_approved_for_implementation",
+  "approved": true,
+  "prompt_file": "PROMPTS.md",
+  "not_browser_validation": true,
+  "synthetic_design_data": true
+}

@@ -1,6 +1,7 @@
 import { type TransactionClient } from "@/storage/database/pg-client";
 
 import {
+  AccountsError,
   AccountNotFoundError,
   AdminAlreadyInitializedError,
   ClassNotFoundError,
@@ -74,11 +75,13 @@ const CURRENT_CLASS_IDS_SQL = `COALESCE((
 const ADMIN_BOOTSTRAP_ADVISORY_LOCK = 725032101;
 
 function asRole(value: unknown): AccountRole {
-  return value === "admin" ? "admin" : "teacher";
+  if (value === "admin" || value === "teacher") return value;
+  throw new AccountsError("identity_unavailable", "账号角色数据不合法，已拒绝解析身份");
 }
 
 function asStatus(value: unknown): AccountStatus {
-  return value === "disabled" ? "disabled" : "active";
+  if (value === "active" || value === "disabled") return value;
+  throw new AccountsError("identity_unavailable", "账号状态数据不合法，已拒绝解析身份");
 }
 
 function isoDate(value: Date | string): string {
@@ -213,9 +216,11 @@ export async function loginWithPassword(
       await verifyPassword(password, dummy);
       return { kind: "invalid_credentials" } as const;
     }
+    asRole(account.role);
+    const status = asStatus(account.status);
     const valid = await verifyPassword(password, account.password_hash);
     if (!valid) return { kind: "invalid_credentials" } as const;
-    if (asStatus(account.status) !== "active") return { kind: "account_disabled" } as const;
+    if (status !== "active") return { kind: "account_disabled" } as const;
     const { token, tokenHash } = createSessionToken();
     const inserted = await client.query<{ session_id: string; created_at: Date; expires_at: Date }>(
       `INSERT INTO app_sessions (account_id, token_hash, expires_at)
@@ -391,12 +396,13 @@ async function lockTeacherAccount(
   client: TransactionClient,
   accountId: string,
 ): Promise<void> {
-  const locked = await client.query<{ role: string }>(
-    `SELECT role FROM app_accounts WHERE id = $1 FOR UPDATE`,
+  const locked = await client.query<{ role: string; status: string }>(
+    `SELECT role, status FROM app_accounts WHERE id = $1 FOR UPDATE`,
     [accountId],
   );
   const row = locked.rows[0];
   if (!row) throw new AccountNotFoundError();
+  asStatus(row.status);
   if (asRole(row.role) !== "teacher") {
     throw new ForbiddenTargetError();
   }
@@ -407,6 +413,7 @@ export async function setTeacherStatus(
   accountId: string,
   status: AccountStatus,
 ): Promise<{ teacher: TeacherAccountSummary; revokedSessionCount: number }> {
+  asStatus(status);
   return safeTransaction(async (client) => {
     await lockTeacherAccount(client, accountId);
     // $2 只出现一次并显式定型，避免同一参数被推导出 varchar/text 两种类型

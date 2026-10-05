@@ -20,7 +20,6 @@ import {
 } from "../src/lib/guide/navigation";
 import {
   guideAccessForChild,
-  guideAccessForObservation,
   guideCanCreateObservation,
   type IdentityFacts,
 } from "../src/lib/guide/write-access-rules";
@@ -52,16 +51,7 @@ const admin: Principal = {
   scope: { kind: "school", school_id: "school-1" },
 };
 
-const legacy: IdentityFacts = { kind: "legacy_teacher" };
 const none: IdentityFacts = { kind: "none" };
-
-const observation = (currentClassId: string | null) => ({
-  observation_id: "obs-1",
-  child_id: "child-1",
-  current_class_id: currentClassId,
-  observed_class_id: "class-a",
-  author_account_id: null,
-});
 
 const draft = (overrides: Partial<DecisionDraft> = {}): DecisionDraft => ({
   ...emptyDecisionDraft("item-1", [
@@ -132,50 +122,40 @@ async function main(): Promise<void> {
     "非法关注条目不会写入返回地址",
   );
 
-  /* ---------------- 写权限规则 ---------------- */
-  ok(guideAccessForChild(legacy, { id: "c1", current_class_id: "a" }).can_record, "旧口令教师可记录");
+  /* ---------------- 写权限规则（B0：只认园所账号） ---------------- */
   ok(!guideAccessForChild(none, { id: "c1", current_class_id: "a" }).can_record, "无身份不可记录");
   ok(
     !guideAccessForChild({ kind: "principal", principal: admin }, { id: "c1", current_class_id: "a" }).can_record,
     "管理员不能记录（教学动作）",
   );
+  const adminChild = guideAccessForChild({ kind: "principal", principal: admin }, { id: "c1", current_class_id: "a" });
+  ok(adminChild.read_only_reason?.includes("管理员") === true, "管理员只读原因说明无教学操作权限");
   ok(
     guideAccessForChild({ kind: "principal", principal: teacher(["a"]) }, { id: "c1", current_class_id: "a" }).can_record,
     "任教班级内教师可记录",
   );
-  ok(
-    !guideAccessForChild({ kind: "principal", principal: teacher(["b"]) }, { id: "c1", current_class_id: "a" }).can_record,
-    "无权限班级不可记录",
+  const outOfScope = guideAccessForChild(
+    { kind: "principal", principal: teacher(["b"]) },
+    { id: "c1", current_class_id: "a" },
   );
+  ok(!outOfScope.can_record, "无权限班级不可记录");
   const emptyScope = guideAccessForChild(
     { kind: "principal", principal: teacher([]) },
     { id: "c1", current_class_id: "a" },
   );
   ok(!emptyScope.can_record && emptyScope.read_only_reason !== null, "空任教范围只读并给出原因");
+  ok(!guideAccessForChild({ kind: "unavailable" }, { id: "c1", current_class_id: "a" }).can_record, "身份不可用 fail closed");
+  const disabledTeacher = guideAccessForChild(
+    { kind: "principal", principal: { ...teacher(["a"]), account_status: "disabled" } },
+    { id: "c1", current_class_id: "a" },
+  );
+  ok(!disabledTeacher.can_record, "停用账号不可记录");
 
-  const inScopeObservation = guideAccessForObservation(
-    { kind: "principal", principal: teacher(["class-a"]) },
-    observation("class-a"),
-  );
-  ok(inScopeObservation.can_decide && inScopeObservation.can_organize, "当前负责教师可决定与整理");
-  const historicalReadOnly = guideAccessForObservation(
-    { kind: "principal", principal: teacher(["class-a"]) },
-    observation("class-b"),
-  );
-  ok(!historicalReadOnly.can_decide, "原班历史只读时不能写入关联");
-  ok(
-    historicalReadOnly.read_only_reason?.includes("操作权限") === true,
-    "只读原因说明无操作权限",
-  );
-  const adminObservation = guideAccessForObservation({ kind: "principal", principal: admin }, observation("class-a"));
-  ok(!adminObservation.can_decide && !adminObservation.can_organize, "管理员没有教学写权限");
-  ok(guideAccessForObservation(legacy, observation("class-a")).can_decide, "旧口令教师可决定关联");
-
-  ok(guideCanCreateObservation(legacy), "旧口令教师可进入录入");
   ok(guideCanCreateObservation({ kind: "principal", principal: teacher(["a"]) }), "有任教范围教师可进入录入");
   ok(!guideCanCreateObservation({ kind: "principal", principal: admin }), "管理员不能进入录入");
   ok(!guideCanCreateObservation({ kind: "principal", principal: teacher([]) }), "空范围不能进入录入");
   ok(!guideCanCreateObservation(none), "无身份不能进入录入");
+  ok(!guideCanCreateObservation({ kind: "unavailable" }), "身份不可用不能进入录入");
 
   /* ---------------- 决定草稿校验 ---------------- */
   const basisDates = new Map([

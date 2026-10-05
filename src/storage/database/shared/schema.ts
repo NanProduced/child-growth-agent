@@ -11,6 +11,7 @@ import {
   unique,
   uniqueIndex,
   serial,
+  check,
 } from "drizzle-orm/pg-core";
 
 /**
@@ -171,6 +172,8 @@ export const appAccounts = pgTable(
     uniqueIndex("app_accounts_username_unique").on(t.username),
     index("app_accounts_role_idx").on(t.role),
     index("app_accounts_status_idx").on(t.status),
+    check("app_accounts_role_check", sql`${t.role} IN ('admin', 'teacher')`),
+    check("app_accounts_status_check", sql`${t.status} IN ('active', 'disabled')`),
   ],
 );
 

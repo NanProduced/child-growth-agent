@@ -1,0 +1,15 @@
+/* Noto Sans SC, Google Fonts v41, OFL 1.1. Self-hosted UI subset; no runtime third-party request.
+ * ponytail: fixed UI + approved example glyphs; regenerate with fetch-home-font.mjs after copy changes.
+ * Arbitrary names outside the subset retain the normal Chinese font fallback, never missing glyph boxes. */
+@font-face {
+  font-family: 'Home Noto Sans SC';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/assets/fonts/home-v2/noto-sans-sc-ui.woff2') format('woff2');
+}
+
+/* The rest of the application keeps its existing ground. */
+body:has([data-home-state]) {
+  background: #fefdf9;
+}

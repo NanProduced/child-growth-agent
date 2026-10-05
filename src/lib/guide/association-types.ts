@@ -115,8 +115,8 @@ export interface GuideWriteAccessView {
   can_record: boolean;
   can_decide: boolean;
   can_organize: boolean;
-  /** 展示来源：旧口令教师 / 账号教师 / 只读（无写控件） */
-  mode: "legacy_teacher" | "account_teacher" | "read_only";
+  /** 展示来源：账号教师 / 只读（无写控件） */
+  mode: "account_teacher" | "read_only";
   /** 无权限时可读原因（如管理员无教学操作权、原班历史只读） */
   read_only_reason: string | null;
 }
@@ -126,14 +126,6 @@ export const READ_ONLY_ACCESS: GuideWriteAccessView = {
   can_decide: false,
   can_organize: false,
   mode: "read_only",
-  read_only_reason: null,
-};
-
-export const LEGACY_TEACHER_ACCESS: GuideWriteAccessView = {
-  can_record: true,
-  can_decide: true,
-  can_organize: true,
-  mode: "legacy_teacher",
   read_only_reason: null,
 };
 

@@ -4,6 +4,7 @@ import { useEffect, useId, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, Link2, Loader2, Sparkles } from "lucide-react";
 
+import { fetchWithAccountAuth } from "@/lib/accounts/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -242,7 +243,7 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
     setBusy("submit");
     setNotice(null);
     try {
-      const res = await fetch(`/api/observations/${props.observationId}/guide-evidence`, {
+      const res = await fetchWithAccountAuth(`/api/observations/${props.observationId}/guide-evidence`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -284,7 +285,7 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
     setBusy("suggest");
     setNotice(null);
     try {
-      const res = await fetch(`/api/observations/${props.observationId}/guide-evidence`, {
+      const res = await fetchWithAccountAuth(`/api/observations/${props.observationId}/guide-evidence`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "suggest" }),
@@ -322,7 +323,7 @@ export function GuideAssociationSection(props: GuideAssociationSectionProps) {
     setBusy("terminal");
     setNotice(null);
     try {
-      const res = await fetch(`/api/observations/${props.observationId}/guide-evidence`, {
+      const res = await fetchWithAccountAuth(`/api/observations/${props.observationId}/guide-evidence`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

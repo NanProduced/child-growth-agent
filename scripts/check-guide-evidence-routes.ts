@@ -3,11 +3,13 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import type { Child, Observation } from "../src/lib/types";
+import type { Principal } from "../src/lib/accounts/types";
 
 /**
  * G5 路由离线检查：confirm 扩展（applied/deferred/回滚/成长小结失败不连带）、
  * guide-evidence 操作路由（suggest 成功/失败、错误映射、401/404/400）与 GET 只读语义。
- * 全部通过模块替身，不写数据库、不调用模型。
+ * 授权、查询与模型均使用显式模块替身：仅证明路由业务语义，不证明真实认证。
+ * 真实认证另由主任务的 19 Next HTTP / 107 DB 检查覆盖；本脚本不连接数据库/模型。
  * 运行：pnpm tsx scripts/check-guide-evidence-routes.ts
  */
 
@@ -73,7 +75,8 @@ async function runWithMocks(): Promise<number> {
   const { mock } = await import("node:test");
   const mockModule = mock as unknown as ModuleMock;
   const { NextRequest } = await import("next/server");
-  const { createSessionToken, TEACHER_COOKIE } = await import("../src/lib/auth");
+  const { AccountsError } = await import("../src/lib/accounts/errors");
+  const { mapAccountsError } = await import("../src/lib/accounts/guards");
   const {
     GuideEvidenceCatalogError,
     GuideEvidenceConflictError,
@@ -86,9 +89,30 @@ async function runWithMocks(): Promise<number> {
     normalizeTeacherNote,
   } = await import("../src/lib/teacher-edit-review");
 
-  process.env.TEACHER_PASSCODE = "g5-routes-passcode";
-  const token = createSessionToken().token;
-  const COOKIE = `${TEACHER_COOKIE}=${encodeURIComponent(token)}`;
+  const COOKIE = "offlineCookie=g5-route-fixture";
+  const principal: Principal = {
+    account_id: "offline-teacher", username: "offline-teacher", display_name: "离线教师",
+    role: "teacher", account_status: "active", scope: { kind: "classes", class_ids: ["class-1"] },
+  };
+  const requireOfflineCookie = (request: InstanceType<typeof NextRequest>) => {
+    if (!request.headers.get("cookie")?.split(";").some((cookie) => cookie.trim() === COOKIE)) {
+      throw new AccountsError("unauthenticated", "离线路由 fixture 缺少 offlineCookie");
+    }
+  };
+  mockModule.module("@/lib/auth", {
+    exports: {
+      AccountsError,
+      mapAccountsError,
+      runBusinessWrite: async <T>(request: InstanceType<typeof NextRequest>, ...args: [unknown, unknown, () => Promise<T>]) => {
+        requireOfflineCookie(request);
+        return args[2]();
+      },
+      withBusinessRead: async <T>(request: InstanceType<typeof NextRequest>, ...args: [unknown, unknown, (viewer: Principal) => Promise<T>]) => {
+        requireOfflineCookie(request);
+        return args[2](principal);
+      },
+    },
+  });
 
   const state = {
     observation: makeObservation(),
@@ -355,7 +379,7 @@ async function runWithMocks(): Promise<number> {
   ok(plainBody.guideEvidence === undefined, "兼容路径不新增字段");
   ok(state.confirmArgs?.[4] === undefined, "兼容路径不传 guide 计划");
 
-  /* ---- 6) 无教师身份 → 401；未配置口令 → 503 ---- */
+  /* ---- 6) 离线授权替身：缺少 offlineCookie → 401 ---- */
   state.observation = makeObservation();
   const unauthorized = await confirmRoute.POST(request("POST", { content: { ...DRAFT } }), params("obs-1"));
   assert.equal(unauthorized.status, 401, "无 cookie 返回 401");
@@ -484,21 +508,21 @@ async function runWithMocks(): Promise<number> {
   const beforeSuggest = state.suggestCalls;
   const beforeApply = state.applyCalls;
   state.bookResult = { ok: true, value: { audience: "child_history", status_counts: { no_records: 0, has_clues: 0, confirmed_observed: 0 } } };
-  const bookResponse = await bookRoute.GET(request("GET"), params("child-1"));
+  const bookResponse = await bookRoute.GET(request("GET", undefined, COOKIE), params("child-1"));
   assert.equal(bookResponse.status, 200, "个人证据册 GET 200");
   state.overviewResult = { ok: true, value: { audience: "class_current_roster" } };
-  const overviewResponse = await overviewRoute.GET(request("GET"), params("class-1"));
+  const overviewResponse = await overviewRoute.GET(request("GET", undefined, COOKIE), params("class-1"));
   assert.equal(overviewResponse.status, 200, "班级概览 GET 200");
   ok(state.suggestCalls === beforeSuggest && state.applyCalls === beforeApply, "GET 零模型零写入");
 
   state.bookResult = { ok: false, failure: { status: 400, error: "invalid_request", message: "日期范围非法" } };
-  const bookBad = await bookRoute.GET(request("GET"), params("child-1"));
+  const bookBad = await bookRoute.GET(request("GET", undefined, COOKIE), params("child-1"));
   assert.equal(bookBad.status, 400, "读模型 400 透传");
   state.bookResult = { ok: false, failure: { status: 409, error: "semester_config_missing", message: "学期配置缺失" } };
-  const bookMissing = await bookRoute.GET(request("GET"), params("child-1"));
+  const bookMissing = await bookRoute.GET(request("GET", undefined, COOKIE), params("child-1"));
   assert.equal(bookMissing.status, 409, "读模型 409 透传");
   state.bookResult = { ok: false, failure: { status: 404, error: "not_found", message: "幼儿不存在" } };
-  const bookNotFound = await bookRoute.GET(request("GET"), params("child-1"));
+  const bookNotFound = await bookRoute.GET(request("GET", undefined, COOKIE), params("child-1"));
   assert.equal(bookNotFound.status, 404, "读模型 404 透传");
 
   return passed;
@@ -520,7 +544,7 @@ async function main(): Promise<void> {
   }
 
   const passed = await runWithMocks();
-  console.log(JSON.stringify({ passed, total: passed, offline: true, routes_mocked: true }));
+  console.log(JSON.stringify({ passed, total: passed, offline: true, routes_mocked: true, authorization_substituted: true, real_auth: false }));
 }
 
 void main().catch((error: unknown) => {

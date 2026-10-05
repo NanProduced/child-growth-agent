@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { withBusinessRead, AccountsError, mapAccountsError } from "@/lib/auth";
 
 import { loadClassEvidenceOverview } from "@/lib/guide/read-model";
 
@@ -13,6 +14,7 @@ export async function GET(
   const { id } = await params;
   const search = request.nextUrl.searchParams;
   try {
+    return await withBusinessRead(request, "class.read", { kind: "class", class_id: id }, async () => {
     const result = await loadClassEvidenceOverview(id, {
       scope: search.get("scope"),
       semester_id: search.get("semester_id"),
@@ -29,7 +31,9 @@ export async function GET(
       );
     }
     return NextResponse.json(result.value);
+    });
   } catch (error) {
+    if (error instanceof AccountsError) return mapAccountsError(error);
     return NextResponse.json(
       {
         error: "server_error",

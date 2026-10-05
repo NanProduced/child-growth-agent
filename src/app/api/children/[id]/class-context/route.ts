@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { withBusinessRead, AccountsError, mapAccountsError } from "@/lib/auth";
 import {
   CLASS_CONTEXT_REASON_MESSAGES,
   resolveClassContextAt,
@@ -25,6 +26,7 @@ export async function GET(
   }
 
   try {
+    return await withBusinessRead(request, "child.read", { kind: "child", child_id: id }, async () => {
     const child = await getChild(id);
     if (!child) {
       return NextResponse.json({ message: "幼儿不存在" }, { status: 404 });
@@ -51,7 +53,9 @@ export async function GET(
       candidates: lookup.candidates,
       message: CLASS_CONTEXT_REASON_MESSAGES[lookup.reason],
     });
+    });
   } catch (e) {
+    if (e instanceof AccountsError) return mapAccountsError(e);
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "查询发生时班级失败" },
       { status: 500 }

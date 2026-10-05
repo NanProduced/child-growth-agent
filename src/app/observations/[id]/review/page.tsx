@@ -1,15 +1,15 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 
+import { scopedGetChild as getChild, scopedGetObservation as getObservation, scopedListObservations } from '@/lib/accounts/scoped-queries';
 import { GUIDE_CATALOG } from '@/data/guide';
-import type { BasisSourceOption, GuideItemOption } from '@/lib/guide/association-types';
+import type { BasisSourceOption, GuideItemOption, GuideWriteAccessView } from '@/lib/guide/association-types';
 import { listGuideItems } from '@/lib/guide/catalog';
 import { observationFocusFromSearch, type EvidencePageSearch } from '@/lib/guide/navigation';
 import { parseGuideEvidence } from '@/lib/guide/runtime';
 import type { ObservationClassContextSnapshot } from '@/lib/guide/types';
 import type { EvidenceLinkView } from '@/lib/guide/view-types';
-import { resolveObservationWriteAccess } from '@/lib/guide/write-access';
-import { buildGuideResponseLinks, getChild, getObservation, listObservations } from '@/lib/queries';
+import { buildGuideResponseLinks } from '@/lib/queries';
 import { CLASS_STAGE_LABELS } from '@/lib/types';
 
 import { ReviewClient } from './review-client';
@@ -18,6 +18,15 @@ export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {
   title: '整理与确认',
+};
+
+/** 可写路径由 scopedGetObservation 决定：历史只读与管理员只读在上方提前返回，不挂载写客户端 */
+const FULL_TEACHER_ACCESS: GuideWriteAccessView = {
+  can_record: true,
+  can_decide: true,
+  can_organize: true,
+  mode: 'account_teacher',
+  read_only_reason: null,
 };
 
 function goalLabels(): Record<string, string> {
@@ -42,15 +51,23 @@ export default async function ObservationReviewPage({
   const [{ id }, search] = await Promise.all([params, searchParams]);
   const observation = await getObservation(id);
   if (!observation) notFound();
+  if (!observation.can_write) {
+    return (
+      <div className="space-y-4">
+        <p>{observation.access_projection === 'historical_read_only' ? '原班历史观察 · 只读回看' : '观察记录 · 管理员只读'}</p>
+        <p className="whitespace-pre-wrap">{observation.raw_text}</p>
+        {observation.confirmed_content ? <p>{observation.confirmed_content.objective_description}</p> : null}
+      </div>
+    );
+  }
   const child = await getChild(observation.child_id);
   if (!child) notFound();
 
   const focus = observationFocusFromSearch(search);
   const observationId = observation.id;
-  const [writeAccess, items, confirmedObservations] = await Promise.all([
-    resolveObservationWriteAccess(observation, child),
+  const [items, confirmedObservations] = await Promise.all([
     listGuideItems(),
-    listObservations({ childId: observation.child_id, status: 'confirmed' }),
+    scopedListObservations({ childId: observation.child_id, status: 'confirmed' }),
   ]);
 
   const itemOptions: GuideItemOption[] = items.map((item) => ({
@@ -136,7 +153,7 @@ export default async function ObservationReviewPage({
       key={observation.updated_at ?? observation.id}
       observation={observation}
       child={child}
-      writeAccess={writeAccess}
+      writeAccess={FULL_TEACHER_ACCESS}
       guide={{
         mode: observation.status === 'confirmed' ? 'archived' : 'pre_archive',
         revision,

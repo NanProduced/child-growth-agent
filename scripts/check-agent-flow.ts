@@ -384,16 +384,16 @@ async function main(): Promise<void> {
   );
   assert.equal(invalidReviewCalls, 2);
 
-  // 9) 未登录写接口 401；10) 未配置教师口令 503。
-  const previousPasscode = process.env.TEACHER_PASSCODE;
+  // 9) 未登录写接口 401；10) 未配置可信来源 503。
+  const previousTrustedOrigins = process.env.AUTH_TRUSTED_ORIGINS;
   try {
-    delete process.env.TEACHER_PASSCODE;
+    delete process.env.AUTH_TRUSTED_ORIGINS;
     assert.equal(requireTeacher(new Request('http://localhost/api/observations'))?.status, 503);
-    process.env.TEACHER_PASSCODE = 'local-test-passcode';
+    process.env.AUTH_TRUSTED_ORIGINS = 'http://127.0.0.1';
     assert.equal(requireTeacher(new Request('http://localhost/api/observations'))?.status, 401);
   } finally {
-    if (previousPasscode === undefined) delete process.env.TEACHER_PASSCODE;
-    else process.env.TEACHER_PASSCODE = previousPasscode;
+    if (previousTrustedOrigins === undefined) delete process.env.AUTH_TRUSTED_ORIGINS;
+    else process.env.AUTH_TRUSTED_ORIGINS = previousTrustedOrigins;
   }
 
   console.log(JSON.stringify({ passed: 30, total: 30 }));

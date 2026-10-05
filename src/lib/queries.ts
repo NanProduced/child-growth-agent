@@ -51,6 +51,11 @@ type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const strOrNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
+/** Single-statement saves also enter the shared original-session authorization hook. */
+async function mutationQueryOne<T extends Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T | null> {
+  return withTransaction(async (client) => (await client.query<T>(sql, params)).rows[0] ?? null);
+}
+
 /**
  * 一条 SQL 取出儿童 + 当前班级：班级信息随行返回，列表页不会出现逐条查班级的 N+1。
  */
@@ -213,7 +218,7 @@ export async function createClass(input: {
   is_active?: boolean;
 }): Promise<SchoolClass> {
   // 每个参数只出现一次并显式定型，避免 Postgres 对同一参数推导出 varchar / text 两种类型
-  const row = await queryOne<{ data: Row }>(
+  const row = await mutationQueryOne<{ data: Row }>(
     `WITH input AS (
        SELECT $1::varchar AS name, $2::varchar AS stage, $3::varchar AS school_year, $4::boolean AS is_active
      )
@@ -271,7 +276,7 @@ export async function updateClass(
 
   const changesStageOrYear = patch.stage !== undefined || patch.school_year !== undefined;
   if (!changesStageOrYear) {
-    const row = await queryOne<{ data: Row }>(updateSql, params);
+    const row = await mutationQueryOne<{ data: Row }>(updateSql, params);
     return row ? mapClass(row.data) : null;
   }
 
@@ -399,7 +404,7 @@ export async function createChild(input: {
 }): Promise<Child> {
   // 首次分班日期与转班、观察默认日期同一口径：亚洲/上海日历日，不用数据库 CURRENT_DATE
   const enrollmentStart = isoDateInShanghai();
-  const row = await queryOne<{ data: Row }>(
+  const row = await mutationQueryOne<{ data: Row }>(
     `WITH klass AS (
        SELECT id, name FROM classes WHERE id = $4
      ), new_child AS (
@@ -804,7 +809,7 @@ export async function updateObservationAiDraft(
   const now = new Date().toISOString();
   const params: unknown[] = [id, JSON.stringify(ai_draft), ai_model, now];
   const guardSql = observationWriteConditions(guard, params);
-  const row = await queryOne<{ data: Row }>(
+  const row = await mutationQueryOne<{ data: Row }>(
     `UPDATE observations
      SET ai_draft = $2::jsonb, ai_model = $3, ai_organized_at = $4, status = 'ai_organized', updated_at = $4
      WHERE id = $1 AND status <> 'confirmed'${guardSql}
@@ -835,7 +840,7 @@ export async function updateObservationAgentContext(
   const now = new Date().toISOString();
   const params: unknown[] = [id, JSON.stringify(agent_context), status, now];
   const guardSql = observationWriteConditions(guard, params);
-  const row = await queryOne<{ data: Row }>(
+  const row = await mutationQueryOne<{ data: Row }>(
     `UPDATE observations
      SET agent_context = $2::jsonb, status = $3, updated_at = $4
      WHERE id = $1 AND status <> 'confirmed'${guardSql}

@@ -27,6 +27,7 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { useTeacher } from '@/components/teacher-provider';
+import { fetchWithAccountAuth } from "@/lib/accounts/client";
 import { classLabel } from '@/lib/format';
 import { CLASS_STAGES, CLASS_STAGE_LABELS, type Child, type SchoolClass } from '@/lib/types';
 import { createClassSchema } from '@/lib/validation';
@@ -62,7 +63,7 @@ export function ClassFormDialog({
   size?: 'sm' | 'default';
 }) {
   const router = useRouter();
-  const { loading, configured, isTeacher } = useTeacher();
+  const { loading, configured, canManageClasses } = useTeacher();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [stage, setStage] = useState<string>('small');
@@ -73,7 +74,7 @@ export function ClassFormDialog({
   // 已有分班或观察记录的班级不能直接改学段/学年（升班需新建班级并转班）
   const [hasHistory, setHasHistory] = useState(false);
 
-  const locked = loading || !configured || !isTeacher;
+  const locked = loading || !configured || !canManageClasses;
 
   function handleOpen(next: boolean) {
     if (next) {
@@ -128,7 +129,7 @@ export function ClassFormDialog({
     setErrors({});
     setBusy(true);
     try {
-      const res = await fetch(klass ? `/api/classes/${klass.id}` : '/api/classes', {
+      const res = await fetchWithAccountAuth(klass ? `/api/classes/${klass.id}` : '/api/classes', {
         method: klass ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(parsed.data),
@@ -154,7 +155,7 @@ export function ClassFormDialog({
           variant={variant}
           size={size}
           disabled={locked}
-          title={locked ? '管理班级需要教师登录' : undefined}
+          title={locked ? '管理班级需要园所账号登录' : undefined}
           className="min-h-11"
         >
           {klass ? <Pencil className="size-4" /> : <Plus className="size-4" />}
@@ -254,13 +255,13 @@ export function TransferClassDialog({
   classes: SchoolClass[];
 }) {
   const router = useRouter();
-  const { loading, configured, isTeacher } = useTeacher();
+  const { loading, configured, canManageClasses } = useTeacher();
   const [open, setOpen] = useState(false);
   const [targetId, setTargetId] = useState('');
   const [busy, setBusy] = useState(false);
 
   const options = classes.filter((c) => c.is_active && c.id !== child.class_id);
-  const locked = loading || !configured || !isTeacher || options.length === 0;
+  const locked = loading || !configured || !canManageClasses || options.length === 0;
   const target = options.find((c) => c.id === targetId) ?? null;
 
   function handleOpen(next: boolean) {
@@ -277,7 +278,7 @@ export function TransferClassDialog({
     }
     setBusy(true);
     try {
-      const res = await fetch(`/api/classes/${target.id}/children`, {
+      const res = await fetchWithAccountAuth(`/api/classes/${target.id}/children`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ child_id: child.id }),
@@ -303,7 +304,7 @@ export function TransferClassDialog({
           variant="outline"
           size="sm"
           disabled={locked}
-          title={locked ? '转班需要教师登录' : undefined}
+          title={locked ? '转班需要园所账号登录' : undefined}
           className="min-h-11"
         >
           <Repeat2 className="size-4" />

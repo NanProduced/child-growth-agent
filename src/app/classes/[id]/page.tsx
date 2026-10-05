@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { AccountsError } from '@/lib/accounts/errors';
 import { evidenceEntryQuery } from '@/lib/guide/navigation';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
@@ -23,12 +24,8 @@ import {
   formatDateCn,
   schoolClassLabel,
 } from '@/lib/format';
-import {
-  getClass,
-  getClassChildren,
-  listChildren,
-  listObservations,
-} from '@/lib/queries';
+import { scopedGetClass as getClass, scopedGetClassChildren as getClassChildren, scopedListChildren as listChildren, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
+import type { ScopedObservation } from '@/lib/accounts/scoped-queries';
 import {
   CLASS_STAGE_LABELS,
   type Child,
@@ -77,6 +74,7 @@ export default async function ClassDetailPage({
   try {
     klass = await getClass(id);
   } catch (e) {
+    if (e instanceof AccountsError) { if (e.code === 'not_found') notFound(); throw e; }
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
 
@@ -100,9 +98,9 @@ export default async function ClassDetailPage({
   if (!klass) notFound();
 
   let children: Child[] = [];
-  // 全园档案只用于历史观察的作者显示；当前班级名单以 getClassChildren 为准
+  // 仅使用当前负责的档案显示姓名；转走幼儿不读取整份档案。
   let allChildren: Child[] = [];
-  let allObservations: Observation[] = [];
+  let allObservations: ScopedObservation[] = [];
   try {
     [children, allChildren, allObservations] = await Promise.all([
       getClassChildren(id),
@@ -110,6 +108,7 @@ export default async function ClassDetailPage({
       listObservations({ limit: 1000 }),
     ]);
   } catch (e) {
+    if (e instanceof AccountsError) { if (e.code === 'not_found') notFound(); throw e; }
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
 
@@ -120,8 +119,8 @@ export default async function ClassDetailPage({
         b.observed_at.localeCompare(a.observed_at) ||
         b.created_at.localeCompare(a.created_at),
     );
-  const pending = observations.filter((observation) => observation.status !== 'confirmed');
-  const confirmedCount = observations.length - pending.length;
+  const pending = observations.filter((observation) => observation.can_write && observation.status !== 'confirmed');
+  const confirmedCount = observations.filter((observation) => observation.status === 'confirmed').length;
   const recent = observations.slice(0, 6);
   const latest = observations[0];
 

@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { AccountsError } from '@/lib/accounts/errors';
 import Link from 'next/link';
 import {
   ArrowUpRight,
@@ -19,7 +20,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { hasCurrentActivitySupport } from '@/lib/activity-support';
 import { buildGrowthProfileFallback } from '@/lib/growth-profile';
 import { ageText, classLabel, formatDateCn, formatDateTimeCn } from '@/lib/format';
-import { listChildren, listObservations } from '@/lib/queries';
+import { scopedListChildren as listChildren, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
 import { activitySupportSchema } from '@/lib/validation';
 import type { ActivitySupport, Child, Observation, ObservationDraft } from '@/lib/types';
 
@@ -51,6 +52,7 @@ export default async function ReportsPage({
       listObservations({ limit: 1000 }),
     ]);
   } catch (e) {
+    if (e instanceof AccountsError) throw e;
     dbError = e instanceof Error ? e.message : '数据库连接失败';
   }
 
