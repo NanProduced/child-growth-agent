@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 
 import { ClassFormDialog } from '@/components/class-dialogs';
+import { ReadFailureNotice, readFailureKind } from '@/components/read-failure-notice';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -24,12 +25,12 @@ import {
   formatDateCn,
   schoolClassLabel,
 } from '@/lib/format';
+import { resolveServerAuth } from '@/lib/accounts/access';
 import { scopedGetClass as getClass, scopedGetClassChildren as getClassChildren, scopedListChildren as listChildren, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
 import type { ScopedObservation } from '@/lib/accounts/scoped-queries';
 import {
   CLASS_STAGE_LABELS,
   type Child,
-  type Observation,
   type SchoolClass,
 } from '@/lib/types';
 
@@ -69,13 +70,22 @@ export default async function ClassDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  const auth = await resolveServerAuth();
+  if (auth.state.kind !== 'authenticated') {
+    return <ReadFailureNotice kind={auth.state.kind === 'unavailable' ? 'unavailable' : 'login'} what="班级资料" retryHref={`/classes/${encodeURIComponent(id)}`} />;
+  }
+  // UI projection only: the server re-authorizes every read and write.
+  const isAdmin = auth.state.principal.role === 'admin';
   let klass: SchoolClass | null = null;
   let dbError: string | null = null;
   try {
     klass = await getClass(id);
   } catch (e) {
-    if (e instanceof AccountsError) { if (e.code === 'not_found') notFound(); throw e; }
-    dbError = e instanceof Error ? e.message : '数据库连接失败';
+    if (e instanceof AccountsError) {
+      if (e.code === 'not_found') notFound();
+      return <ReadFailureNotice kind={readFailureKind(e)} what="班级资料" retryHref={`/classes/${encodeURIComponent(id)}`} />;
+    }
+    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
   }
 
   if (dbError) {
@@ -108,8 +118,11 @@ export default async function ClassDetailPage({
       listObservations({ limit: 1000 }),
     ]);
   } catch (e) {
-    if (e instanceof AccountsError) { if (e.code === 'not_found') notFound(); throw e; }
-    dbError = e instanceof Error ? e.message : '数据库连接失败';
+    if (e instanceof AccountsError) {
+      if (e.code === 'not_found') notFound();
+      return <ReadFailureNotice kind={readFailureKind(e)} what="班级内的成长档案与观察" retryHref={`/classes/${encodeURIComponent(id)}`} />;
+    }
+    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
   }
 
   const observations = allObservations
@@ -163,12 +176,14 @@ export default async function ClassDetailPage({
                 查看班级证据概览
               </Link>
             </Button>
-            <Button asChild size="sm" className="min-h-11">
-              <Link href="/observations/new">
-                <PenLine className="size-4" />
-                记录一次观察
-              </Link>
-            </Button>
+            {isAdmin ? null : (
+              <Button asChild size="sm" className="min-h-11">
+                <Link href="/observations/new">
+                  <PenLine className="size-4" />
+                  记录一次观察
+                </Link>
+              </Button>
+            )}
             <Button asChild variant="outline" size="sm" className="min-h-11">
               <Link href="/children/new">
                 <UserPlus className="size-4" />
@@ -326,15 +341,15 @@ export default async function ClassDetailPage({
             />
             {recent.length === 0 ? (
               <EmptyHint
-                text="班级还没有观察记录，从一次具体行为开始记录。"
-                action={
+                text={isAdmin ? '班级还没有观察记录。教师录入并确认后，记录会显示在这里。' : '班级还没有观察记录，从一次具体行为开始记录。'}
+                action={isAdmin ? undefined : (
                   <Button asChild size="sm" className="min-h-11">
                     <Link href="/observations/new">
                       <PenLine className="size-4" />
                       记录一次观察
                     </Link>
                   </Button>
-                }
+                )}
               />
             ) : (
               <div className="relative space-y-2 border-l border-amber-200 pl-5 sm:pl-6">
@@ -384,17 +399,19 @@ export default async function ClassDetailPage({
         </>
       )}
 
-      <section aria-labelledby="class-manage-title" className="border-t border-slate-200/80 pt-5">
-        <h2 id="class-manage-title" className="text-sm font-medium text-slate-700">
-          班级管理
-        </h2>
-        <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
-          编辑名称、学段、学年，或停用班级。停用只影响新分班，历史记录不受影响。
-        </p>
-        <div className="mt-3">
-          <ClassFormDialog klass={klass} label="编辑班级" />
-        </div>
-      </section>
+      {isAdmin ? (
+        <section aria-labelledby="class-manage-title" className="border-t border-slate-200/80 pt-5">
+          <h2 id="class-manage-title" className="text-sm font-medium text-slate-700">
+            班级管理
+          </h2>
+          <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
+            编辑名称、学段、学年，或停用班级。停用只影响新分班，历史记录不受影响。
+          </p>
+          <div className="mt-3">
+            <ClassFormDialog klass={klass} label="编辑班级" />
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }

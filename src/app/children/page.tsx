@@ -3,12 +3,14 @@ import { AccountsError } from '@/lib/accounts/errors';
 import Link from 'next/link';
 import { ArrowUpRight, Baby, ClipboardList, Sprout, UserPlus } from 'lucide-react';
 
+import { ReadFailureNotice, readFailureKind } from '@/components/read-failure-notice';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/components/status-badges';
 import { ageText, classLabel, excerpt, formatDateCn } from '@/lib/format';
+import { resolveServerAuth } from '@/lib/accounts/access';
 import { scopedListChildren as listChildren, scopedListClasses as listClasses, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
 import type { Child, Observation, SchoolClass } from '@/lib/types';
 
@@ -31,6 +33,10 @@ export default async function ChildrenPage({
   searchParams: Promise<{ class?: string }>;
 }) {
   const { class: classParam } = await searchParams;
+  const auth = await resolveServerAuth();
+  if (auth.state.kind !== 'authenticated') {
+    return <ReadFailureNotice kind={auth.state.kind === 'unavailable' ? 'unavailable' : 'login'} what="成长档案" retryHref="/children" />;
+  }
   let children: Child[] = [];
   let observations: Observation[] = [];
   let classes: SchoolClass[] = [];
@@ -42,8 +48,8 @@ export default async function ChildrenPage({
       listClasses(),
     ]);
   } catch (e) {
-    if (e instanceof AccountsError) throw e;
-    dbError = e instanceof Error ? e.message : '数据库连接失败';
+    if (e instanceof AccountsError) return <ReadFailureNotice kind={readFailureKind(e)} what="成长档案" retryHref="/children" />;
+    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
   }
 
   const activeClass =

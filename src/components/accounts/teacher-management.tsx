@@ -21,9 +21,15 @@ export type TeacherClass = Pick<SchoolClass, "id" | "name" | "stage" | "school_y
 type Props = { adminAccountId: string; initialTeachers: TeacherAccountSummary[]; initialClasses: TeacherClass[] };
 export type TeacherChange =
   | { kind: "create"; username: string; display_name: string; initial_password: string }
+  | { kind: "reset_password"; account_id: string; new_password: string }
   | { kind: "assign" | "remove"; account_id: string; class_id: string }
   | { kind: "status"; account_id: string; status: AccountStatus };
-export type PendingTeacherChange = Exclude<TeacherChange, { kind: "create" }> | { kind: "create"; username: string; display_name: string };
+/** Create and reset never keep a password across attempts; re-reading the directory cannot confirm either. */
+export type PendingTeacherChange =
+  | { kind: "create"; username: string; display_name: string }
+  | { kind: "reset_password"; account_id: string }
+  | { kind: "assign" | "remove"; account_id: string; class_id: string }
+  | { kind: "status"; account_id: string; status: AccountStatus };
 type Confirmation = { teacher: TeacherAccountSummary } & (
   | { kind: "status"; status: AccountStatus }
   | { kind: "remove"; class_id: string; class_name: string }
@@ -72,7 +78,10 @@ export async function persistTeacherChange(change: TeacherChange): Promise<{ tea
   } else {
     path += `/${encodeURIComponent(change.account_id)}`;
     if (change.kind === "status") { method = "PATCH"; payload = { account_id: change.account_id, status: change.status }; }
-    else {
+    else if (change.kind === "reset_password") {
+      path += "/password-reset";
+      payload = { account_id: change.account_id, new_password: change.new_password };
+    } else {
       path += "/assignments";
       if (change.kind === "remove") { method = "DELETE"; path += `/${encodeURIComponent(change.class_id)}`; }
       payload = { account_id: change.account_id, class_id: change.class_id };
@@ -86,24 +95,31 @@ export async function persistTeacherChange(change: TeacherChange): Promise<{ tea
   }
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw responseError(response, body);
-  const schema = change.kind === "status"
+  const schema = change.kind === "status" || change.kind === "reset_password"
     ? z.object({ teacher: teacherSchema, revoked_session_count: z.number().int().nonnegative() })
     : z.object({ teacher: teacherSchema });
   const parsed = schema.safeParse(body);
-  if (!parsed.success || !teacherChangeObserved(change, [parsed.data.teacher])) {
-    throw new TeacherChangeError("uncertain", "保存响应无法核对。请重新读取教师名单，勿重复提交。");
-  }
+  if (!parsed.success) throw new TeacherChangeError("uncertain", "保存响应无法核对。请重新读取教师名单，勿重复提交。");
+  // A reset is corroborated only by its own response; directory re-reads cannot prove a password change.
+  const observed = change.kind === "reset_password"
+    ? parsed.data.teacher.account_id === change.account_id
+    : teacherChangeObserved(change, [parsed.data.teacher]);
+  if (!observed) throw new TeacherChangeError("uncertain", "保存响应无法核对。请重新读取教师名单，勿重复提交。");
   return parsed.data;
 }
 
-/** An uncertain create keeps no password; rereading never submits the write again. */
+/** An uncertain create or reset keeps no password; rereading never submits the write again. */
 export function pendingTeacherChange(change: TeacherChange): PendingTeacherChange {
-  return change.kind === "create"
-    ? { kind: "create", username: normalizeUsername(change.username), display_name: change.display_name.trim() }
-    : change;
+  if (change.kind === "create") {
+    return { kind: "create", username: normalizeUsername(change.username), display_name: change.display_name.trim() };
+  }
+  if (change.kind === "reset_password") return { kind: "reset_password", account_id: change.account_id };
+  return change;
 }
 
 export function teacherChangeObserved(change: PendingTeacherChange, teachers: TeacherAccountSummary[]): boolean {
+  // The directory never carries password state, so a reset can never be confirmed from it.
+  if (change.kind === "reset_password") return false;
   const teacher = teachers.find((entry) => change.kind === "create"
     ? entry.username === normalizeUsername(change.username) && entry.display_name === change.display_name.trim()
     : entry.account_id === change.account_id);
@@ -143,6 +159,9 @@ export function TeacherManagement({ adminAccountId, initialTeachers, initialClas
   const [notice, setNotice] = useState<{ error: boolean; text: string } | null>(null);
   const [creating, setCreating] = useState(false);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [resetTarget, setResetTarget] = useState<TeacherAccountSummary | null>(null);
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetUncertainId, setResetUncertainId] = useState<string | null>(null);
   const canManage = !authLoading && principal?.role === "admin" && principal.account_status === "active" && principal.account_id === adminAccountId;
   const visible = canManage && !authBlocked && directory.identity === identity;
   const locked = busy || uncertain !== null || !visible;
@@ -150,6 +169,7 @@ export function TeacherManagement({ adminAccountId, initialTeachers, initialClas
   useEffect(() => {
     generation.current += 1;
     setConfirmation(null); setCreating(false); setNotice(null);
+    setResetTarget(null); setResetPassword(""); setResetUncertainId(null);
   }, [identity]);
 
   async function reload() {
@@ -162,8 +182,12 @@ export function TeacherManagement({ adminAccountId, initialTeachers, initialClas
       setDirectory({ ...next, identity }); setAuthBlocked(false);
       if (uncertain && !teacherChangeObserved(uncertain, next.teachers)) {
         setNotice({ error: true, text: "已重新读取，但当前名单尚不能确认上次变更。请稍后再次读取核对，勿重复提交。" });
-      } else {
+      } else if (uncertain) {
         setUncertain(null); setNotice({ error: false, text: "已重新读取并核对当前教师与任教资料。" });
+      } else if (resetUncertainId) {
+        setNotice({ error: true, text: "已重新读取教师与任教资料；教师名单无法证明密码是否已重置。请与教师核实新密码，或明确再次发起重置（会再次撤销全部会话）。" });
+      } else {
+        setNotice({ error: false, text: "已重新读取并核对当前教师与任教资料。" });
       }
     } catch (error: unknown) {
       if (requestGeneration !== generation.current) return;
@@ -202,6 +226,38 @@ export function TeacherManagement({ adminAccountId, initialTeachers, initialClas
     } finally { busyRef.current = false; setBusy(false); }
   }
 
+  async function saveReset() {
+    const target = resetTarget;
+    if (busyRef.current || !visible || !target || resetPassword.length < PASSWORD_MIN_LENGTH) return;
+    const submitted = resetPassword;
+    // The password lives only in this closure and is cleared from state before the request resolves.
+    setResetPassword("");
+    setResetTarget(null);
+    busyRef.current = true; setBusy(true); setNotice(null);
+    const requestGeneration = generation.current;
+    try {
+      const result = await persistTeacherChange({ kind: "reset_password", account_id: target.account_id, new_password: submitted });
+      if (requestGeneration !== generation.current) return;
+      setDirectory((previous) => ({ ...previous, teachers: previous.teachers.map((teacher) =>
+        teacher.account_id === result.teacher.account_id ? result.teacher : teacher) }));
+      setResetUncertainId(null);
+      setNotice({ error: false, text: `已重置「${result.teacher.display_name}」的登录密码，并撤销 ${result.revoked_session_count} 个登录会话。教师需用新密码重新登录；本页不会展示或保留密码。` });
+    } catch (error: unknown) {
+      if (requestGeneration !== generation.current) return;
+      if (error instanceof TeacherChangeError && error.kind === "auth") {
+        setAuthBlocked(true); setDirectory({ identity, teachers: [], classes: [] }); void revalidate();
+        setNotice({ error: true, text: error.message });
+      } else if (!(error instanceof TeacherChangeError) || error.kind === "uncertain") {
+        setResetUncertainId(target.account_id);
+        setNotice({ error: true, text: "重置结果待核对：响应不可用，无法确认密码是否已重置；教师名单也无法证明。请与教师核实，或明确再次发起重置（会再次撤销全部会话）。" });
+      } else {
+        setNotice({ error: true, text: error.message });
+      }
+    } finally {
+      busyRef.current = false; setBusy(false); setResetPassword("");
+    }
+  }
+
   function createTeacher(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -224,14 +280,14 @@ export function TeacherManagement({ adminAccountId, initialTeachers, initialClas
       <header className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold sm:text-3xl">教师管理</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">为教师建立账号，添加任教班级；任教调整逐条保存，成功后即生效。</p>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">为教师建立账号，添加任教班级，或重置登录密码；每次操作逐条保存，成功后即生效。</p>
         </div>
         <Button disabled={locked} className="min-h-11 self-start" onClick={() => setCreating(!creating)} aria-expanded={creating} aria-controls="create-teacher">
           <Plus aria-hidden="true" />{creating ? "收起新增表单" : "添加教师"}
         </Button>
       </header>
       {notice && directory.identity === identity ? <Alert variant={notice.error ? "destructive" : "default"} role={notice.error ? "alert" : "status"}>
-        <AlertTitle>{notice.error ? uncertain ? "结果待核对" : "操作暂未完成" : "资料已更新"}</AlertTitle>
+        <AlertTitle>{notice.error ? uncertain || resetUncertainId ? "结果待核对" : "操作暂未完成" : "资料已更新"}</AlertTitle>
         <AlertDescription className="[overflow-wrap:anywhere]">{notice.text}</AlertDescription>
       </Alert> : null}
       {busy ? <p role="status" className="text-sm text-primary">正在处理本次请求，请稍候…</p> : null}
@@ -258,12 +314,37 @@ export function TeacherManagement({ adminAccountId, initialTeachers, initialClas
         </div>
         {visible ? directory.teachers.length === 0 ? <p className="border-y py-8 text-sm leading-6 text-muted-foreground">还没有教师账号。添加教师后，再为其分配任教班级。</p>
           : <div className="divide-y border-y">{directory.teachers.map((teacher) => <TeacherRow key={teacher.account_id} teacher={teacher} classes={directory.classes} locked={locked}
+            resetUncertain={resetUncertainId === teacher.account_id}
+            onReset={() => { setResetPassword(""); setResetTarget(teacher); }}
             onAssign={(classId) => save({ kind: "assign", account_id: teacher.account_id, class_id: classId })}
             onConfirm={(action) => {
               returnFocus.current = document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
               setConfirmation({ teacher, ...action });
             }} />)}</div> : null}
       </section>
+      <AlertDialog open={visible && resetTarget !== null} onOpenChange={(open) => { if (!open && !busy) { setResetTarget(null); setResetPassword(""); } }}>
+        <AlertDialogContent className="[overflow-wrap:anywhere]">
+          <AlertDialogHeader>
+            <AlertDialogTitle>重置「{resetTarget?.display_name}」的登录密码？</AlertDialogTitle>
+            <AlertDialogDescription className="leading-6">
+              提交后立即撤销该教师的全部登录会话，教师需用新密码重新登录；任教关系与历史观察保留。
+              密码只用于本次提交，不显示、不写入浏览器存储。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="teacher-reset-password">为 {resetTarget?.username} 设置新密码</Label>
+            <Input id="teacher-reset-password" type="password" autoComplete="new-password" minLength={PASSWORD_MIN_LENGTH}
+              className="min-h-11" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} />
+            <p className="text-sm leading-6 text-muted-foreground">至少 {PASSWORD_MIN_LENGTH} 个字符；首尾空格不会被去除（与登录一致）。</p>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="min-h-11" disabled={busy}>取消</AlertDialogCancel>
+            <Button className="min-h-11" disabled={busy || resetPassword.length < PASSWORD_MIN_LENGTH} onClick={() => void saveReset()}>
+              {busy ? "正在重置…" : "确认重置密码"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <AlertDialog open={visible && confirmation !== null} onOpenChange={(open) => { if (!open && !busy) setConfirmation(null); }}>
         <AlertDialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto [overflow-wrap:anywhere]" onCloseAutoFocus={(event) => {
           event.preventDefault();
@@ -289,8 +370,9 @@ export function TeacherManagement({ adminAccountId, initialTeachers, initialClas
   );
 }
 
-function TeacherRow({ teacher, classes, locked, onAssign, onConfirm }: {
-  teacher: TeacherAccountSummary; classes: TeacherClass[]; locked: boolean;
+function TeacherRow({ teacher, classes, locked, resetUncertain, onReset, onAssign, onConfirm }: {
+  teacher: TeacherAccountSummary; classes: TeacherClass[]; locked: boolean; resetUncertain: boolean;
+  onReset: () => void;
   onAssign: (classId: string) => Promise<void>;
   onConfirm: (action: { kind: "status"; status: AccountStatus } | { kind: "remove"; class_id: string; class_name: string }) => void;
 }) {
@@ -302,7 +384,11 @@ function TeacherRow({ teacher, classes, locked, onAssign, onConfirm }: {
       <div className="min-w-0 space-y-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2"><h3 id={`teacher-${teacher.account_id}`} className="min-w-0 text-lg font-semibold [overflow-wrap:anywhere]">{teacher.display_name}</h3><Badge variant={teacher.status === "active" ? "secondary" : "outline"}>{teacher.status === "active" ? "已启用" : "已停用"}</Badge></div>
         <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">用户名：{teacher.username}</p>
-        <Button variant="outline" disabled={locked} className="min-h-11" aria-label={`${teacher.status === "active" ? "停用" : "启用"}教师${teacher.display_name}`} onClick={() => onConfirm({ kind: "status", status: teacher.status === "active" ? "disabled" : "active" })}>{teacher.status === "active" ? "停用账号" : "启用账号"}</Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" disabled={locked} className="min-h-11" aria-label={`重置教师${teacher.display_name}的密码`} onClick={onReset}>重置密码</Button>
+          <Button variant="outline" disabled={locked} className="min-h-11" aria-label={`${teacher.status === "active" ? "停用" : "启用"}教师${teacher.display_name}`} onClick={() => onConfirm({ kind: "status", status: teacher.status === "active" ? "disabled" : "active" })}>{teacher.status === "active" ? "停用账号" : "启用账号"}</Button>
+        </div>
+        {resetUncertain ? <p role="status" className="text-sm leading-6 text-amber-700 [overflow-wrap:anywhere]">上次密码重置结果待核对：教师名单无法证明是否已重置。请与教师核实，或明确再次重置。</p> : null}
       </div>
       <div className="min-w-0 space-y-4">
         {teacher.class_ids.length ? <ul className="space-y-2" aria-label={`${teacher.display_name}的任教班级`}>{teacher.class_ids.map((classId) => {

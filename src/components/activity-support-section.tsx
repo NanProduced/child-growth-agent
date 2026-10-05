@@ -17,6 +17,8 @@ type ActivitySupportSectionProps = {
   initialSupport: ActivitySupport | null;
   /** 已保存建议的来源观察已过期：提示需要更新，不冒充最新依据 */
   hasStaleSupport?: boolean;
+  /** 只读查看（管理员）：可完整阅读已有建议，隐藏生成/重生成/重试等教学写控件 */
+  readOnly?: boolean;
 };
 
 function ActivitySupportCard({ support }: { support: ActivitySupport['suggestions'][number] }) {
@@ -111,6 +113,7 @@ export function ActivitySupportSection({
   confirmedObservationCount,
   initialSupport,
   hasStaleSupport = false,
+  readOnly = false,
 }: ActivitySupportSectionProps) {
   const { loading: authLoading, configured, isTeacher } = useTeacher();
   const [support, setSupport] = useState<ActivitySupport | null>(initialSupport);
@@ -153,10 +156,12 @@ export function ActivitySupportSection({
             </Badge>
           </div>
           <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
-            从已确认观察和成长小结出发，给下一次活动一个可以试试的方向。
+            {readOnly
+              ? '教师从已确认观察和成长小结整理的建议，可在这里查看步骤、材料与依据。'
+              : '从已确认观察和成长小结出发，给下一次活动一个可以试试的方向。'}
           </p>
         </div>
-        {confirmedObservationCount > 0 ? (
+        {!readOnly && confirmedObservationCount > 0 ? (
           <Button
             type="button"
             variant={support ? 'outline' : 'default'}
@@ -177,9 +182,11 @@ export function ActivitySupportSection({
           <CardContent className="flex items-start gap-3 p-5 sm:p-6">
             <Leaf className="mt-0.5 size-5 shrink-0 text-emerald-600" aria-hidden="true" />
             <div>
-              <h3 className="font-medium text-slate-800">先确认一条观察</h3>
+              <h3 className="font-medium text-slate-800">{readOnly ? '还没有活动支持建议' : '先确认一条观察'}</h3>
               <p className="mt-1 text-sm leading-6 text-slate-600">
-                活动支持只会读取教师确认后的观察，不会把草稿或待补充内容当成事实。
+                {readOnly
+                  ? '活动支持由教师从已确认观察生成；生成后可以在这里查看完整建议与依据。'
+                  : '活动支持只会读取教师确认后的观察，不会把草稿或待补充内容当成事实。'}
               </p>
             </div>
           </CardContent>
@@ -193,9 +200,11 @@ export function ActivitySupportSection({
               <AlertTitle>最新建议暂未生成</AlertTitle>
               <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
                 <span>{error}，当前仍保留上一次建议。</span>
-                <Button type="button" variant="outline" size="sm" onClick={() => void handleGenerate()} disabled={busy || !teacherReady}>
-                  再试一次
-                </Button>
+                {readOnly ? null : (
+                  <Button type="button" variant="outline" size="sm" onClick={() => void handleGenerate()} disabled={busy || !teacherReady}>
+                    再试一次
+                  </Button>
+                )}
               </AlertDescription>
             </Alert>
           ) : null}
@@ -213,9 +222,11 @@ export function ActivitySupportSection({
           <AlertTitle>活动支持暂未生成</AlertTitle>
           <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
             <span>{error}</span>
-            <Button type="button" variant="outline" size="sm" onClick={() => void handleGenerate()} disabled={busy || !teacherReady}>
-              再试一次
-            </Button>
+            {readOnly ? null : (
+              <Button type="button" variant="outline" size="sm" onClick={() => void handleGenerate()} disabled={busy || !teacherReady}>
+                再试一次
+              </Button>
+            )}
           </AlertDescription>
         </Alert>
       ) : (
@@ -227,15 +238,19 @@ export function ActivitySupportSection({
                 {hasStaleSupport ? '活动支持建议需要更新' : '还没有活动支持建议'}
               </h3>
               <p className="mt-1 text-sm leading-6 text-slate-600">
-                {hasStaleSupport
-                  ? '已确认观察有更新，上一次建议基于较早的观察；可以重新生成，旧建议不会冒充最新依据。'
-                  : authLoading
-                    ? '正在确认教师身份…'
-                    : teacherReady
-                      ? '点击“生成活动支持”，从已确认观察中整理 2～3 个可试试的活动。'
-                      : configured
-                        ? '进入园所账号后，可以从已确认观察生成活动支持。'
-                        : '当前未配置教师口令，暂时不能生成活动支持。'}
+                {readOnly
+                  ? hasStaleSupport
+                    ? '已确认观察有更新，上一次建议基于较早的观察；请由教师重新生成后查看最新依据。'
+                    : '暂时还没有可查看的活动支持。生成活动支持由教师在成长档案中完成。'
+                  : hasStaleSupport
+                    ? '已确认观察有更新，上一次建议基于较早的观察；可以重新生成，旧建议不会冒充最新依据。'
+                    : authLoading
+                      ? '正在确认教师身份…'
+                      : teacherReady
+                        ? '点击“生成活动支持”，从已确认观察中整理 2～3 个可试试的活动。'
+                        : configured
+                          ? '进入园所账号后，可以从已确认观察生成活动支持。'
+                          : '当前未配置教师口令，暂时不能生成活动支持。'}
               </p>
             </div>
           </CardContent>

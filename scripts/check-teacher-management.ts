@@ -102,11 +102,19 @@ const page = loadOwned<typeof import("../src/app/admin/teachers/page")>("src/app
 let passed = 0;
 async function check(label: string, work: () => void | Promise<void>) {
   requests.length = 0; reads.length = 0; scopedClassCalls = 0;
-  try { await work(); } catch { throw new Error(`Failed: ${label}`); }
+  try { await work(); } catch (error: unknown) {
+    throw new Error(`Failed: ${label}: ${error instanceof Error ? error.message : String(error)}`);
+  }
   passed += 1;
 }
 async function changeRejects(kind: "auth" | "rejected" | "uncertain") {
   await assert.rejects(client.persistTeacherChange({ kind: "assign", account_id: teacher.account_id, class_id: "class /乙" }),
+    (error: unknown) => error instanceof client.TeacherChangeError && error.kind === kind);
+  assert.equal(requests.length, 1);
+}
+async function resetRejects(kind: "auth" | "rejected" | "uncertain") {
+  requests.length = 0;
+  await assert.rejects(client.persistTeacherChange({ kind: "reset_password", account_id: teacher.account_id, new_password: "  offline-reset  " }),
     (error: unknown) => error instanceof client.TeacherChangeError && error.kind === kind);
   assert.equal(requests.length, 1);
 }
@@ -233,6 +241,50 @@ async function main() {
     assert.ok(html.includes(teacher.display_name) && html.includes(classes[0].name));
     assert.ok(html.includes("撤销任教") && html.includes("停用账号") && html.includes("min-h-11"));
     assert.ok(html.includes("overflow-wrap:anywhere"));
+  });
+  await check("reset posts exact target and password bytes to the existing endpoint", async () => {
+    respond = async () => Response.json({ teacher, revoked_session_count: 2 });
+    const result = await client.persistTeacherChange({ kind: "reset_password", account_id: teacher.account_id, new_password: "  spaced reset pass  " });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].path, `/api/admin/teachers/${encodeURIComponent(teacher.account_id)}/password-reset`);
+    assert.equal(requests[0].init.method, "POST");
+    assert.deepEqual(JSON.parse(String(requests[0].init.body)), { account_id: teacher.account_id, new_password: "  spaced reset pass  " });
+    assert.equal(result.revoked_session_count, 2);
+    assert.ok(!JSON.stringify(result).includes("spaced reset pass"));
+  });
+  await check("reset response for the wrong target or missing count is uncertain", async () => {
+    for (const body of [
+      { teacher: { ...teacher, account_id: "wrong-target" }, revoked_session_count: 1 },
+      { teacher },
+      { teacher, revoked_session_count: -1 },
+      { teacher, revoked_session_count: 0.5 },
+    ]) {
+      respond = async () => Response.json(body);
+      await resetRejects("uncertain");
+    }
+  });
+  await check("lost reset response stays uncertain with exactly one attempt", async () => {
+    respond = async () => { throw new Error("offline transport interruption"); };
+    await resetRejects("uncertain");
+  });
+  for (const status of [401, 403, 409, 503]) {
+    await check(`${status} reset does not replay and maps to ${status === 401 || status === 403 ? "auth" : status === 503 ? "uncertain" : "rejected"}`, async () => {
+      respond = async () => Response.json({ error: "csrf_rejected", message: "UNTRUSTED_DETAIL" }, { status });
+      await resetRejects(status === 401 || status === 403 ? "auth" : status === 503 ? "uncertain" : "rejected");
+      assert.ok(!requests.some(({ init }) => JSON.parse(String(init.body)).new_password === undefined));
+    });
+  }
+  await check("pending reset keeps no password and directory can never confirm it", () => {
+    const pending = client.pendingTeacherChange({ kind: "reset_password", account_id: teacher.account_id, new_password: "offline-reset" });
+    assert.deepEqual(pending, { kind: "reset_password", account_id: teacher.account_id });
+    assert.ok(!JSON.stringify(pending).includes("offline-reset"));
+    assert.equal(client.teacherChangeObserved(pending, [teacher]), false);
+    assert.equal(client.teacherChangeObserved(pending, []), false);
+  });
+  await check("reset control is rendered for each teacher without exposing a password field", () => {
+    const html = renderToStaticMarkup(createElement(client.TeacherManagement, { adminAccountId: admin.account_id, initialTeachers: [teacher], initialClasses: classes }));
+    assert.ok(html.includes("重置密码"));
+    assert.ok(!html.includes("password-reset"));
   });
   await check("client identity mismatch hides the private directory", () => {
     uiAuth = { ...uiAuth, state: { kind: "authenticated", principal: { ...admin, account_id: "different-admin" } } };

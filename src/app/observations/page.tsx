@@ -3,12 +3,14 @@ import { AccountsError } from '@/lib/accounts/errors';
 import Link from 'next/link';
 import { ClipboardList, PenLine } from 'lucide-react';
 
+import { ReadFailureNotice, readFailureKind } from '@/components/read-failure-notice';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/components/status-badges';
 import { classLabel, excerpt, formatDateCn, schoolClassLabel } from '@/lib/format';
+import { resolveServerAuth } from '@/lib/accounts/access';
 import { scopedListChildren as listChildren, scopedListClasses as listClasses, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
 import type { Child, Observation, ObservationStatus, SchoolClass } from '@/lib/types';
 
@@ -51,6 +53,12 @@ export default async function ObservationsPage({
     ? (status as ObservationStatus)
     : 'all';
 
+  const auth = await resolveServerAuth();
+  if (auth.state.kind !== 'authenticated') {
+    return <ReadFailureNotice kind={auth.state.kind === 'unavailable' ? 'unavailable' : 'login'} what="观察记录" retryHref="/observations" />;
+  }
+  // UI projection only: administrators browse the whole school but hold no teaching write actions.
+  const isAdmin = auth.state.principal.role === 'admin';
   let observations: Observation[] = [];
   let children: Child[] = [];
   let classes: SchoolClass[] = [];
@@ -62,8 +70,8 @@ export default async function ObservationsPage({
       listClasses(),
     ]);
   } catch (e) {
-    if (e instanceof AccountsError) throw e;
-    dbError = e instanceof Error ? e.message : '数据库连接失败';
+    if (e instanceof AccountsError) return <ReadFailureNotice kind={readFailureKind(e)} what="观察记录" retryHref="/observations" />;
+    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
   }
 
   const activeClass =
@@ -103,12 +111,16 @@ export default async function ObservationsPage({
             先处理需要教师判断的记录，再回到已确认观察的证据时间线。
           </p>
         </div>
-        <Button asChild className="w-full sm:w-auto">
-          <Link href="/observations/new">
-            <PenLine className="size-4" />
-            开始记录
-          </Link>
-        </Button>
+        {isAdmin ? (
+          <p className="max-w-xs text-sm leading-6 text-slate-500">管理员查看全园观察记录（只读）；录入与确认由教师完成。</p>
+        ) : (
+          <Button asChild className="w-full sm:w-auto">
+            <Link href="/observations/new">
+              <PenLine className="size-4" />
+              开始记录
+            </Link>
+          </Button>
+        )}
       </div>
 
       <nav aria-label="观察记录状态筛选" className="flex flex-wrap gap-2">
@@ -164,13 +176,11 @@ export default async function ObservationsPage({
               </h2>
               <p className="mt-1 text-sm leading-6 text-slate-500">
                 {nothingAtAll
-                  ? '从一次具体行为开始，保存后再进入 AI 整理。'
-                  : '可以切换其他状态或班级，或开始记录一条新的观察。'}
+                  ? isAdmin ? '全园还没有观察记录；教师录入后会显示在这里。' : '从一次具体行为开始，保存后再进入 AI 整理。'
+                  : '可以切换其他状态或班级查看其他记录。'}
               </p>
             </div>
-            <Button asChild size="sm">
-              <Link href="/observations/new">开始记录</Link>
-            </Button>
+            {isAdmin ? null : <Button asChild size="sm"><Link href="/observations/new">开始记录</Link></Button>}
           </CardContent>
         </Card>
       ) : (

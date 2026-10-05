@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 
 import { DraftView } from '@/components/draft-view';
+import { ReadFailureNotice, readFailureKind } from '@/components/read-failure-notice';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AiBadge } from '@/components/status-badges';
 import { Badge } from '@/components/ui/badge';
@@ -20,7 +21,9 @@ import { Card, CardContent } from '@/components/ui/card';
 import { hasCurrentActivitySupport } from '@/lib/activity-support';
 import { buildGrowthProfileFallback } from '@/lib/growth-profile';
 import { ageText, classLabel, formatDateCn, formatDateTimeCn } from '@/lib/format';
+import { resolveServerAuth } from '@/lib/accounts/access';
 import { scopedListChildren as listChildren, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
+import type { ScopedObservation } from '@/lib/accounts/scoped-queries';
 import { activitySupportSchema } from '@/lib/validation';
 import type { ActivitySupport, Child, Observation, ObservationDraft } from '@/lib/types';
 
@@ -30,9 +33,9 @@ export const metadata: Metadata = {
   title: '成长回顾',
 };
 
-type ConfirmedObservation = Observation & { confirmed_content: ObservationDraft };
+type ConfirmedObservation = ScopedObservation & { confirmed_content: ObservationDraft };
 
-function isConfirmed(observation: Observation): observation is ConfirmedObservation {
+function isConfirmed(observation: ScopedObservation): observation is ConfirmedObservation {
   return observation.status === 'confirmed' && observation.confirmed_content !== null;
 }
 
@@ -43,8 +46,14 @@ export default async function ReportsPage({
 }) {
   const { child: childParam } = await searchParams;
 
+  const auth = await resolveServerAuth();
+  if (auth.state.kind !== 'authenticated') {
+    return <ReadFailureNotice kind={auth.state.kind === 'unavailable' ? 'unavailable' : 'login'} what="成长回顾" retryHref="/reports" />;
+  }
+  // UI projection only: administrators browse read-only and never receive teaching write entries.
+  const isAdmin = auth.state.principal.role === 'admin';
   let children: Child[] = [];
-  let observations: Observation[] = [];
+  let observations: ScopedObservation[] = [];
   let dbError: string | null = null;
   try {
     [children, observations] = await Promise.all([
@@ -52,11 +61,11 @@ export default async function ReportsPage({
       listObservations({ limit: 1000 }),
     ]);
   } catch (e) {
-    if (e instanceof AccountsError) throw e;
-    dbError = e instanceof Error ? e.message : '数据库连接失败';
+    if (e instanceof AccountsError) return <ReadFailureNotice kind={readFailureKind(e)} what="成长回顾" retryHref="/reports" />;
+    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
   }
 
-  const observationsByChild = new Map<string, Observation[]>();
+  const observationsByChild = new Map<string, ScopedObservation[]>();
   for (const observation of observations) {
     const childObservations = observationsByChild.get(observation.child_id) ?? [];
     childObservations.push(observation);
@@ -76,23 +85,27 @@ export default async function ReportsPage({
   const confirmed = selectedObservations.filter(isConfirmed).sort(
     (a, b) => b.observed_at.localeCompare(a.observed_at),
   );
-  // 空状态入口只做视图选择：先待确认，再待补充，再草稿；都没有则去记录
+  // 待办入口只在当前可写记录里选择：先待确认，再待补充，再草稿；
+  // 历史只读记录（can_write=false）不能成为“先确认/继续整理”的目标。
+  const actionable = selectedObservations.filter((observation) => observation.can_write);
   const pendingTarget =
-    selectedObservations.find((observation) => observation.status === 'ai_organized') ??
-    selectedObservations.find((observation) => observation.status === 'needs_input') ??
-    selectedObservations.find((observation) => observation.status === 'draft') ??
+    actionable.find((observation) => observation.status === 'ai_organized') ??
+    actionable.find((observation) => observation.status === 'needs_input') ??
+    actionable.find((observation) => observation.status === 'draft') ??
     null;
   const pendingEntry: { label: string; href: string } = pendingTarget
     ? {
         label: pendingTarget.status === 'ai_organized' ? '先确认一条观察' : '继续整理观察',
         href: `/observations/${pendingTarget.id}/review`,
       }
-    : {
-        label: '记录一次观察',
-        href: selected
-          ? `/observations/new?child_id=${encodeURIComponent(selected.id)}`
-          : '/observations/new',
-      };
+    : isAdmin
+      ? { label: '查看成长档案', href: selected ? `/children/${encodeURIComponent(selected.id)}` : '/children' }
+      : {
+          label: '记录一次观察',
+          href: selected
+            ? `/observations/new?child_id=${encodeURIComponent(selected.id)}`
+            : '/observations/new',
+        };
   const storedProfile = selected?.growth_profile ?? null;
   const profile = storedProfile ?? buildGrowthProfileFallback(confirmed);
   const isFallback = !storedProfile || storedProfile.is_fallback === true;
@@ -306,7 +319,7 @@ export default async function ReportsPage({
                     活动支持摘要
                   </h2>
                   <p className="mt-1 text-xs text-slate-500">
-                    从已确认观察整理，可在成长档案里重新生成
+                    {isAdmin ? '由教师从已确认观察整理生成' : '从已确认观察整理，可在成长档案里重新生成'}
                   </p>
                 </div>
                 {support ? (
@@ -337,13 +350,15 @@ export default async function ReportsPage({
                 ) : (
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <p className="max-w-xl text-sm leading-6 text-slate-600">
-                      还没有活动支持建议。进入成长档案后，可以从这些已确认观察生成 2～3 个可试试的活动。
+                      {isAdmin
+                        ? '还没有活动支持建议。教师可在成长档案里从这些已确认观察生成活动支持。'
+                        : '还没有活动支持建议。进入成长档案后，可以从这些已确认观察生成 2～3 个可试试的活动。'}
                     </p>
                     <Link
                       href={`/children/${selected.id}`}
                       className="inline-flex min-h-11 items-center gap-1 text-sm font-medium text-emerald-700 hover:text-emerald-800"
                     >
-                      去生成活动支持
+                      {isAdmin ? '查看成长档案' : '去生成活动支持'}
                       <ArrowUpRight className="size-4" aria-hidden="true" />
                     </Link>
                   </div>
