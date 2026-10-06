@@ -600,3 +600,46 @@ export const yayaAttachmentAppends = pgTable(
     ),
   ],
 );
+
+/* ============================ 芽芽运行服务（AGENT-APP1） ============================
+ * 权威 DDL 为 scripts/upgrade-yaya-runs-v1.sql；owner + conversation +
+ * client_request_id 绑定原请求；dependencies 按 run 累积，只增不覆盖。
+ */
+
+export const yayaRuns = pgTable(
+  "yaya_runs",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    owner_account_id: varchar("owner_account_id", { length: 36 })
+      .notNull()
+      .references(() => appAccounts.id, { onDelete: "cascade" }),
+    conversation_id: varchar("conversation_id", { length: 36 }).notNull(),
+    client_request_id: varchar("client_request_id", { length: 128 }).notNull(),
+    request_digest: varchar("request_digest", { length: 64 }).notNull(),
+    user_text: text("user_text").notNull(),
+    attachment_ids: jsonb("attachment_ids").notNull().default(sql`'[]'::jsonb`),
+    expected_conversation_revision: integer("expected_conversation_revision").notNull(),
+    session_id: varchar("session_id", { length: 36 }).notNull(),
+    owner_instance: varchar("owner_instance", { length: 64 }).notNull(),
+    state: varchar("state", { length: 16 }).notNull().default("active"),
+    outcome: jsonb("outcome"),
+    dependencies: jsonb("dependencies").notNull().default(sql`'[]'::jsonb`),
+    cancel_requested_at: timestamp("cancel_requested_at", { withTimezone: true }),
+    replaced_by: varchar("replaced_by", { length: 36 }),
+    deadline_at: timestamp("deadline_at", { withTimezone: true }).notNull(),
+    created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updated_at: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    terminal_at: timestamp("terminal_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("yaya_runs_owner_conversation_idx").on(t.owner_account_id, t.conversation_id, t.created_at.desc()),
+    index("yaya_runs_active_instance_idx")
+      .on(t.owner_instance)
+      .where(sql`state = 'active'`),
+    check("yaya_runs_state_check", sql`${t.state} IN ('active', 'terminal', 'interrupted')`),
+    check("yaya_runs_revision_check", sql`${t.expected_conversation_revision} >= 1`),
+    check("yaya_runs_digest_check", sql`${t.request_digest} ~ '^[0-9a-f]{64}$'`),
+    check("yaya_runs_attachments_check", sql`jsonb_typeof(${t.attachment_ids}) = 'array'`),
+    check("yaya_runs_dependencies_check", sql`jsonb_typeof(${t.dependencies}) = 'array'`),
+  ],
+);

@@ -1,0 +1,1802 @@
+/**
+ * YAYA-AGENT-APP1 正式验收：三条运行接口 + run 持久化 + 动态授权装配。
+ *
+ * 真实层：
+ * - 一次性隔离 PostgreSQL（Docker 容器，回环地址、自有库名/标签）+ 自有本地媒体根；
+ * - 真实 Next 服务（dev，127.0.0.1 随机端口）+ 真实 AUTH（登录/会话/CSRF）；
+ * - 真实 DATA/MEDIA/READ1 与真实 run 持久化（scripts/upgrade-yaya-runs-v1.sql）；
+ * - 模型替身是本地 HTTP 服务（StepFun 协议），真实 llm.ts 请求路径，0 真实 provider 出口。
+ * 独立进程层：检查进程直接读同一隔离库/媒体根，验证跨进程查询、跨进程取消与依赖重核。
+ *
+ * 运行：pnpm exec tsx scripts/yaya/check-agent-app1.ts
+ */
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Client } from 'pg';
+import sharp from 'sharp';
+
+import { hashPassword } from '../../src/lib/accounts/password';
+import type { Principal } from '../../src/lib/accounts/types';
+import {
+  computeCsrfToken,
+  createSessionToken,
+  hashSessionToken,
+  SESSION_COOKIE_NAME,
+} from '../../src/lib/accounts/session';
+import {
+  parseYayaRunWireLine,
+  safeYayaStopDetail,
+  validateYayaRunEventStream,
+  type YayaRunWireEvent,
+} from '../../src/lib/yaya/api-contract';
+import {
+  createYayaRunRuntimeState,
+  createYayaRunRuntimeStateFromRecord,
+  loadYayaRunProjectedContext,
+  revalidateYayaRunContext,
+} from '../../src/lib/yaya/agent/runtime/context';
+import { resolveYayaRunCurrentIdentity } from '../../src/lib/yaya/agent/runtime/identity';
+import {
+  assertYayaRunActive,
+  computeYayaRunRequestDigest,
+  loadYayaRun,
+} from '../../src/lib/yaya/agent/runtime/store';
+import { loadAttachmentContent } from '../../src/lib/media/content-service';
+import { mediaRuntimeOrThrow } from '../../src/lib/media/runtime';
+import { withTransaction } from '../../src/storage/database/pg-client';
+import {
+  assertCleanupComplete,
+  findListeningPids,
+  readLogTail,
+  restoreGeneratedArtifacts,
+  runCleanupSteps,
+  snapshotGeneratedArtifacts,
+  startIsolatedPostgres,
+  stopTrackedChildTree,
+  trackChildProcess,
+  waitForVerifiedService,
+  type IsolatedPostgres,
+  type TrackedChild,
+} from '../harness-safety';
+
+const RUN = `agent-app1-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+const LABEL_KEY = 'yaya.agent-app1';
+const ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const SCHOOL_ID = 'single-school';
+
+let passed = 0;
+const failures: string[] = [];
+function check(label: string, condition: unknown): void {
+  if (condition) {
+    passed += 1;
+    console.log(`ok - ${label}`);
+  } else {
+    failures.push(label);
+    console.error(`FAIL - ${label}`);
+  }
+}
+function stage(label: string): void {
+  console.error(`[stage] ${label}`);
+}
+
+/* --------------------------------- 迁移与种子 --------------------------------- */
+
+function readMigrationSlice(file: string, stopMarker: string): string {
+  const sql = fs.readFileSync(path.join(ROOT, 'scripts', file), 'utf8');
+  const index = sql.indexOf(stopMarker);
+  if (index < 0) throw new Error(`迁移切片标记未找到：${file} ← ${stopMarker}`);
+  return sql.slice(0, index);
+}
+
+async function runMigrations(database: Client): Promise<void> {
+  await database.query(readMigrationSlice('initialize-demo-db.sql', 'INSERT INTO children'));
+  await database.query(readMigrationSlice('upgrade-classes.sql', '-- 5) 演示班级'));
+  await database.query(
+    fs.readFileSync(path.join(ROOT, 'scripts', 'upgrade-guide-evidence-v1.sql'), 'utf8'),
+  );
+  await database.query(fs.readFileSync(path.join(ROOT, 'scripts', 'upgrade-auth-v1.sql'), 'utf8'));
+  await database.query(fs.readFileSync(path.join(ROOT, 'scripts', 'upgrade-yaya-v1.sql'), 'utf8'));
+  await database.query(fs.readFileSync(path.join(ROOT, 'scripts', 'upgrade-yaya-runs-v1.sql'), 'utf8'));
+}
+
+interface SeedFacts {
+  teacherA: { id: string; username: string; password: string };
+  teacherB: { id: string };
+  teacherC: { id: string };
+  admin: { id: string };
+  classA: string;
+  classB: string;
+  childA: string;
+  childB: string;
+  observationA: string;
+}
+
+async function seed(database: Client): Promise<SeedFacts> {
+  const teacherA = { id: randomUUID(), username: `app1-a-${RUN}`, password: `app1-pass-${RUN}` };
+  const teacherB = { id: randomUUID() };
+  const teacherC = { id: randomUUID() };
+  const admin = { id: randomUUID() };
+  const classA = randomUUID();
+  const classB = randomUUID();
+  const childA = randomUUID();
+  const childB = randomUUID();
+  const observationA = randomUUID();
+  await database.query(
+    "INSERT INTO app_accounts (id, username, display_name, password_hash, role, status) VALUES ($1,$2,'甲老师',$3,'teacher','active')",
+    [teacherA.id, teacherA.username, await hashPassword(teacherA.password)],
+  );
+  await database.query(
+    "INSERT INTO app_accounts (id, username, display_name, password_hash, role, status) VALUES ($1,$2,'乙老师','test-never-logged-in','teacher','active')",
+    [teacherB.id, `app1-b-${RUN}`],
+  );
+  await database.query(
+    "INSERT INTO app_accounts (id, username, display_name, password_hash, role, status) VALUES ($1,$2,'丙老师','test-never-logged-in','teacher','active')",
+    [teacherC.id, `app1-c-${RUN}`],
+  );
+  await database.query(
+    "INSERT INTO app_accounts (id, username, display_name, password_hash, role, status) VALUES ($1,$2,'管理员','test-never-logged-in','admin','active')",
+    [admin.id, `app1-admin-${RUN}`],
+  );
+  await database.query(
+    "INSERT INTO classes (id, name, stage, school_year, is_active) VALUES ($1,'松果班','middle','2026',true), ($2,'云杉班','middle','2026',true)",
+    [classA, classB],
+  );
+  await database.query(
+    'INSERT INTO teacher_class_assignments (account_id, class_id) VALUES ($1,$2), ($3,$4)',
+    [teacherA.id, classA, teacherB.id, classB],
+  );
+  await database.query(
+    "INSERT INTO children (id, name, gender, birth_date, class_name) VALUES ($1,'王一诺','女','2021-01-01','松果班'), ($2,'郑小舟','男','2021-02-02','云杉班')",
+    [childA, childB],
+  );
+  await database.query(
+    "INSERT INTO child_class_enrollments (child_id, class_id, start_date) VALUES ($1,$2,'2026-01-01'), ($3,$4,'2026-01-01')",
+    [childA, classA, childB, classB],
+  );
+  await database.query(
+    `INSERT INTO observations (id, child_id, class_id, observed_at, raw_text, context, status, confirmed_at)
+     VALUES ($1,$2,$3,'2026-03-02','王一诺今天在积木区搭了很久的高塔，还和同伴商量怎么放稳。','建构区','confirmed',now())`,
+    [observationA, childA, classA],
+  );
+  return {
+    teacherA,
+    teacherB,
+    teacherC,
+    admin,
+    classA,
+    classB,
+    childA,
+    childB,
+    observationA,
+  };
+}
+
+/* --------------------------------- 模型替身服务 --------------------------------- */
+
+interface StubStep {
+  content?: string;
+  status?: number;
+  hold?: Promise<void>;
+  delay_ms?: number;
+}
+
+interface StubScenario {
+  tag: string;
+  steps: StubStep[];
+  count: number;
+  bodies: string[];
+  waiters: { at: number; resolve: () => void }[];
+}
+
+interface ModelStub {
+  baseUrl: string;
+  register(tag: string, steps: StubStep[]): StubScenario;
+  requestCount(tag: string): number;
+  waitForRequest(tag: string, at: number, timeoutMs?: number): Promise<void>;
+  unexpected: string[];
+  total: number;
+  close(): Promise<void>;
+}
+
+function actionAnswer(content: string, refs: string[] = []): string {
+  return JSON.stringify({ action: 'answer', content, tool: '', params_json: '', source_refs: refs });
+}
+function actionRead(tool: string, params: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    action: 'read',
+    content: '',
+    tool,
+    params_json: JSON.stringify(params),
+    source_refs: [],
+  });
+}
+function actionPropose(tool: string, params: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    action: 'propose_write',
+    content: '',
+    tool,
+    params_json: JSON.stringify(params),
+    source_refs: [],
+  });
+}
+
+async function startModelStub(): Promise<ModelStub> {
+  const scenarios: StubScenario[] = [];
+  const unexpected: string[] = [];
+  let total = 0;
+  const server = http.createServer((request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(chunk as Buffer);
+      const bodyText = Buffer.concat(chunks).toString('utf8');
+      total += 1;
+      if (!(request.url ?? '').endsWith('/chat/completions')) {
+        response.statusCode = 404;
+        response.end('{}');
+        return;
+      }
+      const scenario = scenarios.find((entry) => bodyText.includes(entry.tag));
+      if (!scenario) {
+        unexpected.push(bodyText.slice(0, 400));
+        response.statusCode = 200;
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ choices: [{ message: { content: actionAnswer('未登记场景') } }] }));
+        return;
+      }
+      const index = scenario.count;
+      scenario.count += 1;
+      scenario.bodies.push(bodyText);
+      for (const waiter of [...scenario.waiters]) {
+        if (scenario.count >= waiter.at) {
+          waiter.resolve();
+          scenario.waiters.splice(scenario.waiters.indexOf(waiter), 1);
+        }
+      }
+      const step = scenario.steps[Math.min(index, scenario.steps.length - 1)] ?? {};
+      if (step.hold) await step.hold.catch(() => undefined);
+      if (step.delay_ms) await new Promise((resolve) => setTimeout(resolve, step.delay_ms));
+      response.setHeader('content-type', 'application/json');
+      if (step.status !== undefined && step.status !== 200) {
+        response.statusCode = step.status;
+        response.end(JSON.stringify({ error: { message: 'stub provider failure' } }));
+        return;
+      }
+      response.statusCode = 200;
+      response.end(
+        JSON.stringify({
+          choices: [{ message: { content: step.content ?? actionAnswer('替身回答') } }],
+        }),
+      );
+    })().catch(() => {
+      response.statusCode = 500;
+      response.end('{}');
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('无法启动模型替身');
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    register(tag, steps) {
+      const scenario: StubScenario = { tag, steps, count: 0, bodies: [], waiters: [] };
+      scenarios.push(scenario);
+      return scenario;
+    },
+    requestCount(tag) {
+      return scenarios.find((entry) => entry.tag === tag)?.count ?? -1;
+    },
+    waitForRequest(tag, at, timeoutMs = 30_000) {
+      const scenario = scenarios.find((entry) => entry.tag === tag);
+      if (!scenario) return Promise.reject(new Error(`未登记场景：${tag}`));
+      if (scenario.count >= at) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`等待 ${tag} 第 ${at} 次请求超时`)), timeoutMs);
+        scenario.waiters.push({
+          at,
+          resolve: () => {
+            clearTimeout(timer);
+            resolve();
+          },
+        });
+      });
+    },
+    unexpected,
+    get total() {
+      return total;
+    },
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+/* --------------------------------- HTTP 助手 --------------------------------- */
+
+async function login(base: string, username: string, password: string) {
+  const response = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { origin: base, 'content-type': 'application/json', 'x-cga-auth-request': '1' },
+    body: JSON.stringify({ username, password }),
+  });
+  const body = (await response.json()) as {
+    state?: { kind?: string };
+    csrf?: { token?: string };
+  };
+  const rawCookie = response.headers
+    .getSetCookie()
+    .find((entry) => entry.startsWith(`${SESSION_COOKIE_NAME}=`));
+  const cookie = rawCookie === undefined ? '' : rawCookie.split(';')[0] ?? '';
+  return { status: response.status, body, cookie, csrf: body.csrf?.token ?? '' };
+}
+
+async function directSession(
+  database: Client,
+  accountId: string,
+): Promise<{ cookie: string; csrf: string; token: string }> {
+  const token = createSessionToken();
+  await database.query(
+    "INSERT INTO app_sessions (account_id, token_hash, expires_at) VALUES ($1,$2,now()+interval '1 day')",
+    [accountId, token.tokenHash],
+  );
+  return {
+    cookie: `${SESSION_COOKIE_NAME}=${token.token}`,
+    csrf: computeCsrfToken(token.token),
+    token: token.token,
+  };
+}
+
+async function createConversation(
+  httpBase: string,
+  auth: { cookie: string; csrf: string },
+): Promise<{ status: number; conversation_id: string; revision: number }> {
+  const response = await fetch(`${httpBase}/api/yaya/conversations`, {
+    method: 'POST',
+    headers: { origin: httpBase, cookie: auth.cookie, 'x-csrf-token': auth.csrf },
+    body: JSON.stringify({ title: `[app1] ${randomUUID().slice(0, 8)}` }),
+  });
+  const body = (await response.json()) as {
+    conversation?: { conversation_id?: string; revision?: number };
+  };
+  return {
+    status: response.status,
+    conversation_id: body.conversation?.conversation_id ?? '',
+    revision: body.conversation?.revision ?? 0,
+  };
+}
+
+async function saveMessage(
+  httpBase: string,
+  auth: { cookie: string; csrf: string },
+  conversationId: string,
+  expectedRevision: number,
+  text: string,
+  childId: string,
+): Promise<{ status: number; revision: number }> {
+  const response = await fetch(
+    `${httpBase}/api/yaya/conversations/${conversationId}/messages`,
+    {
+      method: 'POST',
+      headers: { origin: httpBase, cookie: auth.cookie, 'x-csrf-token': auth.csrf },
+      body: JSON.stringify({
+        client_message_id: `app1-${randomUUID()}`,
+        role: 'user',
+        message_kind: 'text',
+        expected_conversation_revision: expectedRevision,
+        fragments: [
+          {
+            fragment_id: `f-${randomUUID().slice(0, 8)}`,
+            text,
+            sources: [{ kind: 'child', child_id: childId, current_class_id: null }],
+            independently_readable: true,
+            provenance: {
+              kind: 'child_fact',
+              ref_id: `observation:${childId}`,
+              label: '历史消息来源',
+              derived_from: null,
+            },
+          },
+        ],
+        attachment_ids: [],
+      }),
+    },
+  );
+  const body = (await response.json()) as { conversation?: { revision?: number } };
+  return { status: response.status, revision: body.conversation?.revision ?? 0 };
+}
+
+interface RunBodyInput {
+  conversation_id: string;
+  client_request_id: string;
+  user_text: string;
+  attachment_ids?: string[];
+  expected_conversation_revision: number;
+}
+
+function runBody(input: RunBodyInput): string {
+  return JSON.stringify({
+    conversation_id: input.conversation_id,
+    client_request_id: input.client_request_id,
+    user_text: input.user_text,
+    attachment_ids: input.attachment_ids ?? [],
+    expected_conversation_revision: input.expected_conversation_revision,
+  });
+}
+
+function postRun(
+  httpBase: string,
+  auth: { cookie: string; csrf: string },
+  conversationId: string,
+  body: string,
+): Promise<Response> {
+  return fetch(`${httpBase}/api/yaya/conversations/${conversationId}/runs`, {
+    method: 'POST',
+    headers: { origin: httpBase, cookie: auth.cookie, 'x-csrf-token': auth.csrf },
+    body,
+  });
+}
+
+function lookupRun(
+  httpBase: string,
+  auth: { cookie: string; csrf?: string },
+  conversationId: string,
+  clientRequestId: string,
+): Promise<Response> {
+  return fetch(
+    `${httpBase}/api/yaya/conversations/${conversationId}/runs?client_request_id=${encodeURIComponent(
+      clientRequestId,
+    )}`,
+    { headers: { origin: httpBase, cookie: auth.cookie } },
+  );
+}
+
+function cancelRun(
+  httpBase: string,
+  auth: { cookie: string; csrf: string },
+  runId: string,
+  body = '',
+): Promise<Response> {
+  return fetch(`${httpBase}/api/yaya/runs/${runId}/cancel`, {
+    method: 'POST',
+    headers: { origin: httpBase, cookie: auth.cookie, 'x-csrf-token': auth.csrf },
+    body,
+  });
+}
+
+interface NdjsonStream {
+  lines: string[];
+  runId: string;
+  firstLine: string;
+  readLine(): Promise<string | null>;
+  collect(): Promise<string[]>;
+}
+
+function openNdjson(response: Response): NdjsonStream {
+  assert.ok(response.body, '响应没有可读流');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const lines: string[] = [];
+  let done = false;
+  async function readLine(): Promise<string | null> {
+    for (;;) {
+      const newline = buffer.indexOf('\n');
+      if (newline >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (line.trim() !== '') lines.push(line);
+        return line;
+      }
+      if (done) {
+        if (buffer.trim() !== '') {
+          lines.push(buffer);
+          buffer = '';
+        }
+        return null;
+      }
+      const chunk = await reader.read();
+      if (chunk.done) {
+        done = true;
+      } else {
+        buffer += decoder.decode(chunk.value, { stream: true });
+      }
+    }
+  }
+  const stream: NdjsonStream = {
+    lines,
+    runId: '',
+    firstLine: '',
+    readLine,
+    async collect() {
+      for (;;) {
+        const line = await readLine();
+        if (line === null) return [...lines];
+      }
+    },
+  };
+  return stream;
+}
+
+async function readLineWithin(stream: NdjsonStream, timeoutMs: number): Promise<string | null> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      stream.readLine(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`等待流事件超时（${timeoutMs}ms）`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function parseLines(lines: string[]): {
+  allParsed: boolean;
+  events: YayaRunWireEvent[];
+  verdict: ReturnType<typeof validateYayaRunEventStream>;
+} {
+  const parsed = lines.map((line) => parseYayaRunWireLine(line));
+  const allParsed = parsed.every((entry) => entry.ok);
+  const events = parsed
+    .map((entry) => (entry.ok ? entry.value : null))
+    .filter((entry): entry is YayaRunWireEvent => entry !== null);
+  return { allParsed, events, verdict: validateYayaRunEventStream(events) };
+}
+
+/* --------------------------------- 主流程 --------------------------------- */
+
+async function pickFreePort(): Promise<number> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const port = 22000 + Math.floor(Math.random() * 8000);
+    const listeners = findListeningPids(port);
+    if (listeners.ok && listeners.pids.length === 0) return port;
+    if (!listeners.ok) throw new Error(`端口探测失败：${listeners.detail}`);
+  }
+  throw new Error('无法找到空闲端口');
+}
+
+interface ServerHandle {
+  tracked: TrackedChild;
+  base: string;
+  port: number;
+  logFile: string;
+}
+
+async function startNext(
+  label: string,
+  env: NodeJS.ProcessEnv,
+): Promise<ServerHandle> {
+  const port = await pickFreePort();
+  const base = `http://127.0.0.1:${port}`;
+  const logFile = path.join(os.tmpdir(), 'opencode', `yaya-${label}-${RUN}.log`);
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  fs.writeFileSync(logFile, '');
+  const child = spawn(
+    process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm',
+    ['exec', 'next', 'dev', '--hostname', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: ROOT,
+      env: { ...env, AUTH_TRUSTED_ORIGINS: base },
+      shell: process.platform === 'win32',
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  const tracked = trackChildProcess(child, { logFile });
+  child.stdout?.on('data', (chunk: Buffer) => fs.appendFileSync(logFile, chunk));
+  child.stderr?.on('data', (chunk: Buffer) => fs.appendFileSync(logFile, chunk));
+  stage(`${label}: next spawned pid=${child.pid} port=${port}`);
+  await waitForVerifiedService({
+    base,
+    port,
+    child: tracked,
+    timeoutMs: 300_000,
+    statusPath: '/api/auth/status',
+  });
+  stage(`${label}: next ready`);
+  return { tracked, base, port, logFile };
+}
+
+async function main(): Promise<void> {
+  const artifactSnapshot = snapshotGeneratedArtifacts(ROOT);
+  const cleanupIssues: string[] = [];
+  let isolated: IsolatedPostgres | null = null;
+  let database: Client | null = null;
+  let mediaRoot: string | null = null;
+  let stub: ModelStub | null = null;
+  let server1: ServerHandle | null = null;
+  let server2: ServerHandle | null = null;
+  const gates: Array<() => void> = [];
+
+  try {
+    isolated = await startIsolatedPostgres({
+      runId: RUN,
+      containerName: `yaya-agent-app1-${RUN}`,
+      dbName: 'yaya_agent_app1',
+      labelKey: LABEL_KEY,
+    });
+    const url = isolated.url;
+    database = new Client({ connectionString: url });
+    await database.connect();
+    await database.query("SET TIME ZONE 'UTC'");
+    await runMigrations(database);
+    const facts = await seed(database);
+    stage('migrated+seeded');
+
+    stub = await startModelStub();
+
+    stub.register('[app1:basic]', [{ content: actionAnswer('你好，可以聊聊保教工作。') }]);
+    stub.register('[app1:read]', [
+      { content: actionRead('list_children') },
+      { content: actionAnswer('已按当前范围列出可读幼儿。', ['children:current_scope']) },
+    ]);
+    stub.register('[app1:tworeads]', [
+      { content: actionRead('list_children') },
+      { content: actionRead('list_observations') },
+      { content: actionAnswer('综合早先读到的名单回答。', ['children:current_scope']) },
+    ]);
+    const raceGate = deferred();
+    gates.push(raceGate.resolve);
+    stub.register('[app1:race]', [{ hold: raceGate.promise }, { content: actionAnswer('竞赛完成。') }]);
+    const cancelGate = deferred();
+    gates.push(cancelGate.resolve);
+    stub.register('[app1:cancel]', [{ hold: cancelGate.promise }, { content: actionAnswer('取消后不应发布。') }]);
+    const revokeGate = deferred();
+    gates.push(revokeGate.resolve);
+    stub.register('[app1:revoke]', [
+      { content: actionRead('list_children') },
+      { hold: revokeGate.promise },
+      // 终答不引用任何来源：验证 source_refs=[] 不豁免已加载上下文的重核。
+      { content: actionAnswer('撤权后不应发布。') },
+    ]);
+    const sessionGate = deferred();
+    gates.push(sessionGate.resolve);
+    stub.register('[app1:session]', [
+      { hold: sessionGate.promise },
+      { content: actionAnswer('会话失效后不应发布。') },
+    ]);
+    const disableGate = deferred();
+    gates.push(disableGate.resolve);
+    stub.register('[app1:disable]', [
+      { hold: disableGate.promise },
+      { content: actionAnswer('账号停用后不应发布。') },
+    ]);
+    const replaceGate = deferred();
+    gates.push(replaceGate.resolve);
+    stub.register('[app1:replace]', [{ hold: replaceGate.promise }, { content: actionAnswer('被替换的迟到回答。') }]);
+    stub.register('[app1:gate]', [
+      { content: actionRead('list_children') },
+      { content: actionAnswer('基于名单的回答。', ['children:current_scope']) },
+    ]);
+    const historyScenario = stub.register('[app1:history]', [
+      { content: actionAnswer('结合历史消息回答。') },
+    ]);
+    stub.register('[app1:modelfail]', [{ status: 500 }]);
+    stub.register('[app1:unknownread]', [{ content: actionRead('delete_all_children') }]);
+    stub.register('[app1:sourcemismatch]', [
+      { content: actionAnswer('引用不存在的来源。', ['ghost:1']) },
+    ]);
+    stub.register('[app1:writeintent]', [
+      { content: actionPropose('create_observation', { child_id: facts.childA, raw_text: 'x' }) },
+    ]);
+    stub.register('[app1:admin]', [{ content: actionAnswer('管理员的一般问答。') }]);
+    const crossCancelGate = deferred();
+    gates.push(crossCancelGate.resolve);
+    stub.register('[app1:crosscancel]', [
+      { hold: crossCancelGate.promise },
+      { content: actionAnswer('跨进程取消后不应发布。') },
+    ]);
+    const lostGate = deferred();
+    gates.push(lostGate.resolve);
+    stub.register('[app1:lost]', [
+      { hold: lostGate.promise },
+      { content: actionAnswer('进程失联后不应发布。') },
+    ]);
+
+    mediaRoot = await mkdtemp(path.join(os.tmpdir(), 'yaya-agent-app1-media-'));
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      DATABASE_URL: url,
+      AUTH_SCHOOL_ID: SCHOOL_ID,
+      MEDIA_ENVIRONMENT: 'development',
+      MEDIA_STORAGE_MODE: 'local',
+      MEDIA_LOCAL_ROOT: mediaRoot,
+      NEXT_TELEMETRY_DISABLED: '1',
+      LLM_PROVIDER: 'stepfun',
+      STEPFUN_API_KEY: 'app1-stub-key',
+      STEPFUN_BASE_URL: stub.baseUrl,
+      STEPFUN_MODEL: 'app1-stub-model',
+      STEPFUN_TIMEOUT_MS: '30000',
+    };
+    // 检查进程自身也接同一隔离库/媒体根（跨进程数据访问与依赖重核）。
+    process.env.DATABASE_URL = url;
+    delete process.env.PGDATABASE_URL;
+    process.env.AUTH_SCHOOL_ID = SCHOOL_ID;
+    process.env.MEDIA_ENVIRONMENT = 'development';
+    process.env.MEDIA_STORAGE_MODE = 'local';
+    process.env.MEDIA_LOCAL_ROOT = mediaRoot;
+    process.env.AUTH_TRUSTED_ORIGINS = 'http://127.0.0.1:3000';
+
+    server1 = await startNext('s1', childEnv);
+    const base = server1.base;
+
+    /* ============================== 认证边界 ============================== */
+
+    const anonymousRun = await fetch(
+      `${base}/api/yaya/conversations/${randomUUID()}/runs`,
+      { method: 'POST', body: '{}' },
+    );
+    check('匿名发起被拒（HTTP 错误，非流）', anonymousRun.status === 401);
+    const anonymousLookup = await lookupRun(base, { cookie: '' }, randomUUID(), 'x');
+    check('匿名查询被拒', anonymousLookup.status === 401);
+    const anonymousCancel = await cancelRun(base, { cookie: '', csrf: '' }, randomUUID());
+    check('匿名取消被拒', anonymousCancel.status === 401);
+
+    const loginA = await login(base, facts.teacherA.username, facts.teacherA.password);
+    check('真实登录成功（AUTH 会话 + CSRF）', loginA.status === 200 && loginA.body.state?.kind === 'authenticated');
+    const authA = { cookie: loginA.cookie, csrf: loginA.csrf };
+    const loginToken = loginA.cookie.slice(`${SESSION_COOKIE_NAME}=`.length);
+    const sessionExpiryBefore = await database.query<{ expires_at: Date }>(
+      'SELECT expires_at FROM app_sessions WHERE token_hash = $1',
+      [hashSessionToken(loginToken)],
+    );
+    const authB = await directSession(database, facts.teacherB.id);
+    const authC = await directSession(database, facts.teacherC.id);
+    const authAdmin = await directSession(database, facts.admin.id);
+
+    const convA = await createConversation(base, authA);
+    check('真实会话创建（A）', convA.status === 201 && convA.revision === 1);
+    const convB = await createConversation(base, authB);
+    const convC = await createConversation(base, authC);
+    const convAdmin = await createConversation(base, authAdmin);
+    check('真实会话创建（B/C/管理员）', convB.status === 201 && convC.status === 201 && convAdmin.status === 201);
+
+    const crossRunBody = runBody({
+      conversation_id: convA.conversation_id,
+      client_request_id: `cross-${randomUUID()}`,
+      user_text: '[app1:basic] 越权',
+      expected_conversation_revision: convA.revision,
+    });
+    const crossB = await postRun(base, authB, convA.conversation_id, crossRunBody);
+    check('他人会话发起被拒（404，不泄漏存在性）', crossB.status === 404);
+    const crossAdmin = await postRun(base, authAdmin, convA.conversation_id, crossRunBody);
+    check('管理员对他人会话发起被拒', crossAdmin.status === 404);
+    const badCsrf = await fetch(`${base}/api/yaya/conversations/${convA.conversation_id}/runs`, {
+      method: 'POST',
+      headers: { origin: base, cookie: authA.cookie, 'x-csrf-token': 'wrong' },
+      body: crossRunBody,
+    });
+    check('错误 CSRF 发起被拒（403）', badCsrf.status === 403);
+    const forgedBody = JSON.stringify({
+      conversation_id: convA.conversation_id,
+      client_request_id: `forged-${randomUUID()}`,
+      user_text: 'hi',
+      attachment_ids: [],
+      expected_conversation_revision: convA.revision,
+      principal: { account_id: authB.token },
+    });
+    const forged = await postRun(base, authA, convA.conversation_id, forgedBody);
+    check('自报 Principal 的请求被拒（400）', forged.status === 400);
+
+    /* ============================== 一般问答 / 空任教 ============================== */
+
+    const basicId = `basic-${randomUUID()}`;
+    const basicResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: basicId,
+        user_text: '[app1:basic] 你好',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    check(
+      '发起响应为 NDJSON（200）',
+      basicResponse.status === 200 &&
+        (basicResponse.headers.get('content-type') ?? '').startsWith('application/x-ndjson'),
+    );
+    const basicStream = openNdjson(basicResponse);
+    const basicLines = await basicStream.collect();
+    const basicParsed = parseLines(basicLines);
+    check('全部行均为合法 API0 线事件', basicParsed.allParsed);
+    check(
+      '唯一 run_end 且与 answer 一致',
+      basicParsed.verdict.ok && basicParsed.verdict.outcome.kind === 'answered',
+    );
+    const basicRunId = basicParsed.verdict.ok ? basicParsed.verdict.run_id : '';
+    const usageEvent = basicParsed.events.find((event) => event.type === 'model_completed');
+    check(
+      'usage 未知记 null（不填 0）',
+      usageEvent !== undefined && usageEvent.type === 'model_completed' && usageEvent.usage === null,
+    );
+    check('模型替换请求 1 次', stub.requestCount('[app1:basic]') === 1);
+
+    const basicLookup = await lookupRun(base, authA, convA.conversation_id, basicId);
+    const basicLookupBody = (await basicLookup.json()) as {
+      status?: string;
+      run_id?: string;
+      outcome?: { kind?: string; content?: string };
+    };
+    check(
+      '查询返回 finished 且与流终态一致',
+      basicLookup.status === 200 &&
+        basicLookupBody.status === 'finished' &&
+        basicLookupBody.run_id === basicRunId &&
+        basicLookupBody.outcome?.kind === 'answered' &&
+        basicLookupBody.outcome?.content === '你好，可以聊聊保教工作。',
+    );
+    const beforeLookupCount = stub.total;
+    await lookupRun(base, authA, convA.conversation_id, basicId);
+    check('查询不调用模型', stub.total === beforeLookupCount);
+
+    const operationsProbe = await fetch(
+      `${base}/api/yaya/operations?operation_id=${randomUUID()}`,
+      { headers: { origin: base, cookie: authA.cookie } },
+    );
+    check('原 operation 查询不触发模型', stub.total === beforeLookupCount && operationsProbe.status < 500);
+
+    const unassignedId = `c-general-${randomUUID()}`;
+    const unassignedResponse = await postRun(
+      base,
+      authC,
+      convC.conversation_id,
+      runBody({
+        conversation_id: convC.conversation_id,
+        client_request_id: unassignedId,
+        user_text: '[app1:basic] 空任教也能一般问答',
+        expected_conversation_revision: convC.revision,
+      }),
+    );
+    const unassignedStream = openNdjson(unassignedResponse);
+    const unassignedParsed = parseLines(await unassignedStream.collect());
+    check(
+      '空任教账号一般问答可回答',
+      unassignedResponse.status === 200 && unassignedParsed.verdict.ok &&
+        unassignedParsed.verdict.outcome.kind === 'answered',
+    );
+
+    const adminId = `admin-${randomUUID()}`;
+    const adminResponse = await postRun(
+      base,
+      authAdmin,
+      convAdmin.conversation_id,
+      runBody({
+        conversation_id: convAdmin.conversation_id,
+        client_request_id: adminId,
+        user_text: '[app1:admin] 一般问答',
+        expected_conversation_revision: convAdmin.revision,
+      }),
+    );
+    const adminParsed = parseLines(await openNdjson(adminResponse).collect());
+    check(
+      '管理员一般问答可回答（非教学动作）',
+      adminParsed.verdict.ok && adminParsed.verdict.outcome.kind === 'answered',
+    );
+
+    /* ============================== 查询边界 ============================== */
+
+    const missingParam = await fetch(
+      `${base}/api/yaya/conversations/${convA.conversation_id}/runs`,
+      { headers: { origin: base, cookie: authA.cookie } },
+    );
+    check('查询缺少 client_request_id → 400', missingParam.status === 400);
+    const missingRun = await lookupRun(base, authA, convA.conversation_id, `nope-${randomUUID()}`);
+    check('查询不存在 → missing', ((await missingRun.json()) as { status?: string }).status === 'missing');
+    const otherConvLookup = await lookupRun(base, authB, convA.conversation_id, basicId);
+    check('查询他人会话 → 404', otherConvLookup.status === 404);
+    const sessionExpiryAfter = await database.query<{ expires_at: Date }>(
+      'SELECT expires_at FROM app_sessions WHERE token_hash = $1',
+      [hashSessionToken(loginToken)],
+    );
+    check(
+      '查询不续期会话（expires_at 不变）',
+      sessionExpiryBefore.rows[0] !== undefined &&
+        sessionExpiryAfter.rows[0] !== undefined &&
+        sessionExpiryBefore.rows[0].expires_at.getTime() === sessionExpiryAfter.rows[0].expires_at.getTime(),
+    );
+
+    /* ============================== 幂等与双连接竞争 ============================== */
+
+    const beforeReplayCount = stub.requestCount('[app1:basic]');
+    const replayResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: basicId,
+        user_text: '[app1:basic] 你好',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const replayParsed = parseLines(await openNdjson(replayResponse).collect());
+    check(
+      '同键同内容终态回放（同 run_id / 同终态 / 不再派发模型）',
+      replayResponse.status === 200 &&
+        replayParsed.verdict.ok &&
+        replayParsed.verdict.run_id === basicRunId &&
+        replayParsed.verdict.outcome.kind === 'answered' &&
+        replayParsed.verdict.outcome.content === '你好，可以聊聊保教工作。' &&
+        stub.requestCount('[app1:basic]') === beforeReplayCount,
+    );
+    const conflictResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: basicId,
+        user_text: '[app1:basic] 你好（改内容）',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const conflictBody = (await conflictResponse.json()) as { error?: string };
+    check(
+      '同键异内容 → 409 idempotency_conflict',
+      conflictResponse.status === 409 && conflictBody.error === 'idempotency_conflict',
+    );
+
+    const raceId = `race-${randomUUID()}`;
+    const raceBody = runBody({
+      conversation_id: convA.conversation_id,
+      client_request_id: raceId,
+      user_text: '[app1:race] 双连接',
+      expected_conversation_revision: convA.revision,
+    });
+    const raceAResponsePromise = postRun(base, authA, convA.conversation_id, raceBody);
+    await stub.waitForRequest('[app1:race]', 1);
+    const raceBResponse = await postRun(base, authA, convA.conversation_id, raceBody);
+    const raceBBody = (await raceBResponse.json()) as { error?: string };
+    check(
+      '双连接竞争：第二条不派发（409 operation_started）',
+      raceBResponse.status === 409 && raceBBody.error === 'operation_started',
+    );
+    raceGate.resolve();
+    const raceAResponse = await raceAResponsePromise;
+    const raceAParsed = parseLines(await openNdjson(raceAResponse).collect());
+    check(
+      '双连接竞争：第一条正常完成且模型只派发一次',
+      raceAResponse.status === 200 && raceAParsed.verdict.ok &&
+        raceAParsed.verdict.outcome.kind === 'answered' &&
+        stub.requestCount('[app1:race]') === 1,
+    );
+
+    /* ============================== 读取 / 来源协议 / run 依赖 ============================== */
+
+    const readId = `read-${randomUUID()}`;
+    const readResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: readId,
+        user_text: '[app1:read] 列出可读幼儿',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const readParsed = parseLines(await openNdjson(readResponse).collect());
+    check(
+      '真实 READ1 读取后回答并引用 citable_source',
+      readParsed.verdict.ok &&
+        readParsed.verdict.outcome.kind === 'answered' &&
+        readParsed.verdict.outcome.sources.some((source) => source.ref_id === 'children:current_scope'),
+    );
+    const readRunId = readParsed.verdict.ok ? readParsed.verdict.run_id : '';
+    const readRunRow = await loadYayaRun(readRunId);
+    const depRefIds = (readRunRow?.dependencies ?? []).map((entry) => entry.ref?.ref_id ?? '');
+    check(
+      'run 依赖累积 citable 与完整子依赖',
+      depRefIds.includes('children:current_scope') &&
+        depRefIds.includes(`child:${facts.childA}`),
+    );
+
+    const twoReadsId = `tworeads-${randomUUID()}`;
+    const twoReadsResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: twoReadsId,
+        user_text: '[app1:tworeads] 先列幼儿再列观察',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const twoReadsParsed = parseLines(await openNdjson(twoReadsResponse).collect());
+    const twoReadsRow = twoReadsParsed.verdict.ok ? await loadYayaRun(twoReadsParsed.verdict.run_id) : null;
+    const twoReadsDepIds = (twoReadsRow?.dependencies ?? []).map((entry) => entry.ref?.ref_id ?? '');
+    check(
+      '后续读取不覆盖早先依赖（两次读取依赖并存）',
+      twoReadsParsed.verdict.ok &&
+        twoReadsParsed.verdict.outcome.kind === 'answered' &&
+        twoReadsParsed.verdict.outcome.sources.some((source) => source.ref_id === 'children:current_scope') &&
+        twoReadsDepIds.includes('observations:current_scope') &&
+        twoReadsDepIds.includes('children:current_scope'),
+    );
+
+    /* ============================== 历史投影 ============================== */
+
+    const historyConv = await createConversation(base, authA);
+    const savedMessage = await saveMessage(
+      base,
+      authA,
+      historyConv.conversation_id,
+      historyConv.revision,
+      '历史：王一诺在积木区搭了高塔。',
+      facts.childA,
+    );
+    check('真实 DATA 保存历史消息（版本推进）', savedMessage.status === 201 && savedMessage.revision === 2);
+    const historyId = `history-${randomUUID()}`;
+    const historyResponse = await postRun(
+      base,
+      authA,
+      historyConv.conversation_id,
+      runBody({
+        conversation_id: historyConv.conversation_id,
+        client_request_id: historyId,
+        user_text: '[app1:history] 结合历史回答',
+        expected_conversation_revision: savedMessage.revision,
+      }),
+    );
+    const historyParsed = parseLines(await openNdjson(historyResponse).collect());
+    check(
+      '历史消息按当前投影进入模型上下文',
+      historyParsed.verdict.ok &&
+        historyParsed.verdict.outcome.kind === 'answered' &&
+        historyScenario.count === 1 &&
+        (historyScenario.bodies[0] ?? '').includes('历史：王一诺在积木区搭了高塔。'),
+    );
+    const historyRunId = historyParsed.verdict.ok ? historyParsed.verdict.run_id : '';
+    const historyRow = await loadYayaRun(historyRunId);
+    check(
+      '历史片段登记为 run 级依赖',
+      (historyRow?.dependencies ?? []).some((entry) => entry.message_id !== null),
+    );
+
+    /* ============================== 撤权 / run 替换 ============================== */
+
+    // 模型等待期间撤权：私有依赖已装载，撤权后不得发布回答。
+    const revokeId = `revoke-${randomUUID()}`;
+    const revokeResponsePromise = postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: revokeId,
+        user_text: '[app1:revoke] 撤权测试',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:revoke]', 2);
+    await database.query(
+      'UPDATE teacher_class_assignments SET removed_at = now() WHERE account_id = $1 AND class_id = $2',
+      [facts.teacherA.id, facts.classA],
+    );
+    revokeGate.resolve();
+    const revokeParsed = parseLines(await openNdjson(await revokeResponsePromise).collect());
+    check(
+      '模型等待期间撤权 → context_revoked 且不发布回答',
+      revokeParsed.verdict.ok &&
+        revokeParsed.verdict.outcome.kind === 'stopped' &&
+        revokeParsed.verdict.outcome.reason === 'context_revoked' &&
+        !revokeParsed.events.some((event) => event.type === 'answer'),
+    );
+    const revokeRunId = revokeParsed.verdict.ok ? revokeParsed.verdict.run_id : '';
+    const revokedPrincipal: Principal = {
+      account_id: facts.teacherA.id,
+      username: facts.teacherA.username,
+      display_name: '甲老师',
+      role: 'teacher',
+      account_status: 'active',
+      scope: { kind: 'classes', class_ids: [] },
+    };
+    const revokedRunRow = await loadYayaRun(revokeRunId);
+    const revokedVerdict = revokedRunRow
+      ? await revalidateYayaRunContext(
+          createYayaRunRuntimeStateFromRecord(revokedRunRow, {
+            headers: new Headers({ cookie: authA.cookie }),
+          }),
+          {
+            run_id: revokedRunRow.run_id,
+            identity: {
+              run_id: revokedRunRow.run_id,
+              identity_state: 'authenticated',
+              principal: revokedPrincipal,
+              session_valid: true,
+            },
+            sources: [],
+            image_ids: [],
+          },
+          { principal: revokedPrincipal },
+        )
+      : null;
+    check(
+      '独立进程重核：撤权后依赖被判 context_revoked',
+      revokedVerdict !== null && !revokedVerdict.ok && revokedVerdict.denied_refs.length > 0,
+    );
+    await database.query(
+      'UPDATE teacher_class_assignments SET removed_at = NULL WHERE account_id = $1 AND class_id = $2',
+      [facts.teacherA.id, facts.classA],
+    );
+
+    // run 替换：持久化 replaced_by 后，迟到结果不得发布、不得覆盖新运行。
+    const replaceId = `replace-${randomUUID()}`;
+    const replaceResponsePromise = postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: replaceId,
+        user_text: '[app1:replace] 替换测试',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:replace]', 1);
+    const activeReplace = await database.query<{ id: string }>(
+      "SELECT id FROM yaya_runs WHERE client_request_id = $1 AND state = 'active'",
+      [replaceId],
+    );
+    const replaceRunId = activeReplace.rows[0]?.id ?? '';
+    await database.query("UPDATE yaya_runs SET replaced_by = $2, updated_at = now() WHERE id = $1", [
+      replaceRunId,
+      randomUUID(),
+    ]);
+    replaceGate.resolve();
+    const replaceParsed = parseLines(await openNdjson(await replaceResponsePromise).collect());
+    check(
+      'run 替换 → 迟到结果不发布（stopped run_replaced）',
+      replaceParsed.verdict.ok &&
+        replaceParsed.verdict.outcome.kind === 'stopped' &&
+        replaceParsed.verdict.outcome.reason === 'run_replaced' &&
+        !replaceParsed.events.some((event) => event.type === 'answer'),
+    );
+    const replacedRow = await loadYayaRun(replaceRunId);
+    check(
+      '被替换 run 的终态落库为 stopped 且未被迟到回答覆盖',
+      replacedRow !== null &&
+        replacedRow.state === 'terminal' &&
+        (replacedRow.outcome as { kind?: string; reason?: string }).kind === 'stopped' &&
+        (replacedRow.outcome as { reason?: string }).reason === 'run_replaced',
+    );
+
+    // 终态投影：私域回答在撤权后查询为不可核验，恢复后重新可读。
+    const gateId = `gate-${randomUUID()}`;
+    const gateResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: gateId,
+        user_text: '[app1:gate] 投影测试',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const gateParsed = parseLines(await openNdjson(gateResponse).collect());
+    check('投影基线 run 正常回答', gateParsed.verdict.ok && gateParsed.verdict.outcome.kind === 'answered');
+    await database.query(
+      'UPDATE teacher_class_assignments SET removed_at = now() WHERE account_id = $1 AND class_id = $2',
+      [facts.teacherA.id, facts.classA],
+    );
+    const gatedLookup = await lookupRun(base, authA, convA.conversation_id, gateId);
+    const gatedBody = (await gatedLookup.json()) as { status?: string; reason?: string };
+    check(
+      '撤权后终态恢复不可核验（不返回旧私域内容）',
+      gatedBody.status === 'unverifiable' && gatedBody.reason === 'terminal_unreadable',
+    );
+    await database.query(
+      'UPDATE teacher_class_assignments SET removed_at = NULL WHERE account_id = $1 AND class_id = $2',
+      [facts.teacherA.id, facts.classA],
+    );
+    const restoredLookup = await lookupRun(base, authA, convA.conversation_id, gateId);
+    const restoredBody = (await restoredLookup.json()) as { status?: string; outcome?: { kind?: string } };
+    check(
+      '恢复授权后终态恢复重新可读',
+      restoredBody.status === 'finished' && restoredBody.outcome?.kind === 'answered',
+    );
+    const restoredConvoLookup = await lookupRun(base, authA, historyConv.conversation_id, historyId);
+    const restoredHistoryBody = (await restoredConvoLookup.json()) as { status?: string };
+    check('历史依赖 run 恢复授权后可读', restoredHistoryBody.status === 'finished');
+
+    /* ============================== 取消 ============================== */
+
+    const cancelId = `cancel-${randomUUID()}`;
+    const cancelResponsePromise = postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: cancelId,
+        user_text: '[app1:cancel] 取消测试',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:cancel]', 1);
+    // 事件在模型等待期间已逐条到达客户端：证明业务事件及时写出（无整体缓冲）。
+    const cancelResponse = await cancelResponsePromise;
+    const cancelStream = openNdjson(cancelResponse);
+    const cancelFirst = parseYayaRunWireLine((await readLineWithin(cancelStream, 10_000)) ?? '');
+    const cancelSecond = parseYayaRunWireLine((await readLineWithin(cancelStream, 10_000)) ?? '');
+    check(
+      '模型等待期间 run_started/model_attempted 已及时写出（逐条 flush）',
+      cancelFirst.ok &&
+        cancelFirst.value.type === 'run_started' &&
+        cancelSecond.ok &&
+        cancelSecond.value.type === 'model_attempted',
+    );
+    // 首响应丢失恢复：按原 client_request_id 查回进行中的运行，不重复派发。
+    const inProgressLookup = await lookupRun(base, authA, convA.conversation_id, cancelId);
+    const inProgressBody = (await inProgressLookup.json()) as { status?: string; run_id?: string };
+    check(
+      '运行中查询返回 in_progress + 原 run_id（首响应丢失恢复）',
+      inProgressBody.status === 'in_progress' && inProgressBody.run_id !== '',
+    );
+    const beforeInProgress = stub.requestCount('[app1:cancel]');
+    await lookupRun(base, authA, convA.conversation_id, cancelId);
+    check('运行中查询不派发模型', stub.requestCount('[app1:cancel]') === beforeInProgress);
+    const activeCancel = await database.query<{ id: string }>(
+      "SELECT id FROM yaya_runs WHERE client_request_id = $1 AND state = 'active'",
+      [cancelId],
+    );
+    const cancelRunId = activeCancel.rows[0]?.id ?? '';
+    check('取消前运行已持久化为活跃（先登记后派发）', cancelRunId !== '');
+    const cancelResponse2 = await cancelRun(base, authA, cancelRunId);
+    const cancelBody = (await cancelResponse2.json()) as Record<string, unknown>;
+    check(
+      '取消响应固定三布尔（不撤销已提交业务/不声称物理取消）',
+      cancelResponse2.status === 200 &&
+        cancelBody.status === 'cancel_requested' &&
+        cancelBody.stops_subsequent_dispatch === true &&
+        cancelBody.rolls_back_committed_business === false &&
+        cancelBody.upstream_http_cancel_verified === false,
+    );
+    cancelGate.resolve();
+    const cancelParsed = parseLines(await cancelStream.collect());
+    check(
+      '取消后流以 stopped(cancelled) 显式结束',
+      cancelParsed.verdict.ok &&
+        cancelParsed.verdict.outcome.kind === 'stopped' &&
+        cancelParsed.verdict.outcome.reason === 'cancelled' &&
+        !cancelParsed.events.some((event) => event.type === 'answer'),
+    );
+    const cancelledLookup = await lookupRun(base, authA, convA.conversation_id, cancelId);
+    const cancelledBody = (await cancelledLookup.json()) as { status?: string; outcome?: { kind?: string; reason?: string } };
+    check(
+      '取消后查询终态一致（finished + stopped cancelled）',
+      cancelledBody.status === 'finished' &&
+        cancelledBody.outcome?.kind === 'stopped' &&
+        cancelledBody.outcome?.reason === 'cancelled',
+    );
+    const cancelAgain = await cancelRun(base, authA, cancelRunId);
+    check('重复取消幂等（固定响应）', cancelAgain.status === 200);
+    const cancelBadBody = await cancelRun(base, authA, cancelRunId, JSON.stringify({ approved: true }));
+    check('取消请求体非空被拒（400）', cancelBadBody.status === 400);
+    const cancelOther = await cancelRun(base, authB, cancelRunId);
+    check('取消他人运行 → 404', cancelOther.status === 404);
+    const cancelUnknown = await cancelRun(base, authA, randomUUID());
+    check('取消不存在运行 → 404', cancelUnknown.status === 404);
+
+    /* ============================== 跨进程取消（检查进程直接持久化） ============================== */
+
+    const crossCancelId = `crosscancel-${randomUUID()}`;
+    const crossCancelPromise = postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: crossCancelId,
+        user_text: '[app1:crosscancel] 跨进程取消',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:crosscancel]', 1);
+    const crossCancelRows = await database.query<{ id: string; owner_instance: string; state: string }>(
+      'SELECT id, owner_instance, state FROM yaya_runs WHERE client_request_id = $1',
+      [crossCancelId],
+    );
+    const crossCancelRunId = crossCancelRows.rows[0]?.id ?? '';
+    const crossCancelOwner = crossCancelRows.rows[0]?.owner_instance ?? '';
+    check('跨进程可见活跃 run（持久化）', crossCancelRows.rows[0]?.state === 'active');
+    await database.query(
+      'UPDATE yaya_runs SET cancel_requested_at = now(), updated_at = now() WHERE id = $1',
+      [crossCancelRunId],
+    );
+    crossCancelGate.resolve();
+    const crossCancelParsed = parseLines(await openNdjson(await crossCancelPromise).collect());
+    check(
+      '检查进程持久化取消后，owner 进程在边界停止后续派发',
+      crossCancelParsed.verdict.ok &&
+        crossCancelParsed.verdict.outcome.kind === 'stopped' &&
+        crossCancelParsed.verdict.outcome.reason === 'cancelled',
+    );
+    const assertAfterCancel = await withTransaction(async (client) =>
+      assertYayaRunActive(client, crossCancelRunId, crossCancelOwner).then(
+        () => 'allowed',
+        () => 'rejected',
+      ),
+    );
+    check('TOOLS1 保存前钩子：已取消 run 拒绝保存', assertAfterCancel === 'rejected');
+    const basicRowForHook = await loadYayaRun(basicRunId);
+    const assertAfterTerminal = await withTransaction(async (client) =>
+      assertYayaRunActive(client, basicRunId, basicRowForHook?.owner_instance ?? '').then(
+        () => 'allowed',
+        () => 'rejected',
+      ),
+    );
+    check('TOOLS1 保存前钩子：终态 run 拒绝保存', assertAfterTerminal === 'rejected');
+
+    /* ============================== 会话失效 / 账号停用 / 身份服务失败 ============================== */
+
+    const authA2 = await directSession(database, facts.teacherA.id);
+    const sessionId = `session-${randomUUID()}`;
+    const sessionResponsePromise = postRun(
+      base,
+      authA2,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: sessionId,
+        user_text: '[app1:session] 会话失效',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:session]', 1);
+    await database.query(
+      "UPDATE app_sessions SET revoked_at = now(), revoked_reason = 'app1-test' WHERE token_hash = $1",
+      [hashSessionToken(authA2.token)],
+    );
+    sessionGate.resolve();
+    const sessionParsed = parseLines(await openNdjson(await sessionResponsePromise).collect());
+    check(
+      '模型等待期间会话失效 → session_invalid 且模型调用关闭',
+      sessionParsed.verdict.ok &&
+        sessionParsed.verdict.outcome.kind === 'stopped' &&
+        sessionParsed.verdict.outcome.reason === 'session_invalid' &&
+        !sessionParsed.events.some((event) => event.type === 'answer'),
+    );
+
+    const authA3 = await directSession(database, facts.teacherA.id);
+    const disableId = `disable-${randomUUID()}`;
+    const disableResponsePromise = postRun(
+      base,
+      authA3,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: disableId,
+        user_text: '[app1:disable] 账号停用',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:disable]', 1);
+    await database.query("UPDATE app_accounts SET status = 'disabled' WHERE id = $1", [facts.teacherA.id]);
+    disableGate.resolve();
+    const disableParsed = parseLines(await openNdjson(await disableResponsePromise).collect());
+    check(
+      '模型等待期间账号停用 → account_disabled 且模型调用关闭',
+      disableParsed.verdict.ok &&
+        disableParsed.verdict.outcome.kind === 'stopped' &&
+        disableParsed.verdict.outcome.reason === 'account_disabled' &&
+        !disableParsed.events.some((event) => event.type === 'answer'),
+    );
+    await database.query("UPDATE app_accounts SET status = 'active' WHERE id = $1", [facts.teacherA.id]);
+
+    // 身份服务失败：同一实现返回 unavailable（引擎按 identity_unavailable 停止全部模型调用）。
+    const healthyPool = (globalThis as { __pgPool?: { end: () => Promise<void> } }).__pgPool;
+    (globalThis as { __pgPool?: unknown }).__pgPool = undefined;
+    if (healthyPool) await healthyPool.end();
+    process.env.DATABASE_URL = 'postgresql://postgres:postgres@127.0.0.1:1/app1-unavailable';
+    const unavailableIdentity = await resolveYayaRunCurrentIdentity({
+      runId: basicRunId,
+      token: loginToken,
+    });
+    check(
+      '身份服务不可用 → resolveCurrentIdentity=unavailable（关闭模型调用）',
+      unavailableIdentity.identity_state === 'unavailable' && unavailableIdentity.principal === null,
+    );
+    process.env.DATABASE_URL = url;
+    const failedPool = (globalThis as { __pgPool?: { end: () => Promise<void> } }).__pgPool;
+    (globalThis as { __pgPool?: unknown }).__pgPool = undefined;
+    if (failedPool) await failedPool.end().catch(() => undefined);
+
+    /* ============================== 模型失败 / 非法动作 / 来源错配 / 写入口关闭 ============================== */
+
+    const failId = `fail-${randomUUID()}`;
+    const failResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: failId,
+        user_text: '[app1:modelfail] 模型失败',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    check('模型失败下响应头已发仍为 200（显式终态）', failResponse.status === 200);
+    const failParsed = parseLines(await openNdjson(failResponse).collect());
+    check(
+      '模型失败 → stopped(model_failed)，详情为协议文案（无内部异常/原始 JSON）',
+      failParsed.verdict.ok &&
+        failParsed.verdict.outcome.kind === 'stopped' &&
+        failParsed.verdict.outcome.reason === 'model_failed' &&
+        failParsed.verdict.outcome.detail === safeYayaStopDetail('model_failed') &&
+        failParsed.allParsed &&
+        !failParsed.events.some((event) => JSON.stringify(event).includes('stub provider failure')),
+    );
+
+    const unknownReadId = `unknownread-${randomUUID()}`;
+    const unknownReadResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: unknownReadId,
+        user_text: '[app1:unknownread] 未知工具',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const unknownReadParsed = parseLines(await openNdjson(unknownReadResponse).collect());
+    check(
+      '未知读取工具在触达依赖端前停止（unknown_read_tool）',
+      unknownReadParsed.verdict.ok &&
+        unknownReadParsed.verdict.outcome.kind === 'stopped' &&
+        unknownReadParsed.verdict.outcome.reason === 'unknown_read_tool' &&
+        !unknownReadParsed.events.some((event) => event.type === 'tool_result'),
+    );
+
+    const mismatchId = `mismatch-${randomUUID()}`;
+    const mismatchResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: mismatchId,
+        user_text: '[app1:sourcemismatch] 错来源',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const mismatchParsed = parseLines(await openNdjson(mismatchResponse).collect());
+    check(
+      '未知来源引用被拒（source_mismatch）',
+      mismatchParsed.verdict.ok &&
+        mismatchParsed.verdict.outcome.kind === 'stopped' &&
+        mismatchParsed.verdict.outcome.reason === 'source_mismatch' &&
+        !mismatchParsed.events.some((event) => event.type === 'answer'),
+    );
+
+    const writeId = `write-${randomUUID()}`;
+    const writeResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: writeId,
+        user_text: '[app1:writeintent] 帮我记一下',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const writeParsed = parseLines(await openNdjson(writeResponse).collect());
+    check(
+      'TOOLS1 未交付时写入 fail closed（unknown_write_tool / 无假提案/假回执）',
+      writeParsed.verdict.ok &&
+        writeParsed.verdict.outcome.kind === 'stopped' &&
+        (writeParsed.verdict.outcome.reason === 'unknown_write_tool' ||
+          writeParsed.verdict.outcome.reason === 'propose_failed') &&
+        !writeParsed.events.some(
+          (event) => event.type === 'proposal_prepared' || event.type === 'receipt',
+        ),
+    );
+
+    /* ============================== 图片授权 ============================== */
+
+    const png = await sharp({
+      create: { width: 96, height: 64, channels: 3, background: { r: 180, g: 90, b: 60 } },
+    })
+      .png()
+      .toBuffer();
+    const uploadForm = new FormData();
+    uploadForm.append('files', new File([new Uint8Array(png)], 'app1.png', { type: 'image/png' }));
+    const uploadResponse = await fetch(`${base}/api/yaya/uploads`, {
+      method: 'POST',
+      headers: { origin: base, cookie: authA.cookie, 'x-csrf-token': authA.csrf },
+      body: uploadForm,
+    });
+    const uploadBody = (await uploadResponse.json()) as {
+      uploads?: { ok?: boolean; attachment?: { attachment_id?: string } }[];
+    };
+    const attachmentA = uploadBody.uploads?.[0]?.attachment?.attachment_id ?? '';
+    check(
+      '真实上传（MEDIA sharp 管线）成功',
+      uploadResponse.status === 200 && attachmentA !== '',
+    );
+    const beforeImage = stub.total;
+    const imageId = `image-${randomUUID()}`;
+    const imageResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: imageId,
+        user_text: '',
+        attachment_ids: [attachmentA],
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const imageParsed = parseLines(await openNdjson(imageResponse).collect());
+    check(
+      '授权图片进入模型请求（StepFun 图片能力显式 unsupported，0 provider 请求）',
+      imageResponse.status === 200 &&
+        imageParsed.verdict.ok &&
+        imageParsed.verdict.outcome.kind === 'stopped' &&
+        imageParsed.verdict.outcome.reason === 'model_unsupported_capability' &&
+        stub.total === beforeImage,
+    );
+
+    const uploadB = new FormData();
+    uploadB.append('files', new File([new Uint8Array(png)], 'app1-b.png', { type: 'image/png' }));
+    const uploadBResponse = await fetch(`${base}/api/yaya/uploads`, {
+      method: 'POST',
+      headers: { origin: base, cookie: authB.cookie, 'x-csrf-token': authB.csrf },
+      body: uploadB,
+    });
+    const uploadBBody = (await uploadBResponse.json()) as {
+      uploads?: { attachment?: { attachment_id?: string } }[];
+    };
+    const attachmentB = uploadBBody.uploads?.[0]?.attachment?.attachment_id ?? '';
+    const foreignImage = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: `foreign-${randomUUID()}`,
+        user_text: '看图',
+        attachment_ids: [attachmentB],
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    check('引用他人附件在登记时被拒（409，不触达模型）', foreignImage.status === 409 && stub.total === beforeImage);
+
+    // 进程内：授权图片读的是 MEDIA 处理后的 model 变体字节，且不暴露对象键/URL。
+    const mediaRow = await database.query<{
+      model_key: string | null;
+      model_checksum: string | null;
+    }>('SELECT model_key, model_checksum FROM yaya_attachments WHERE id = $1', [attachmentA]);
+    const stored = row0(mediaRow.rows);
+    const mediaContent = await loadAttachmentContent(mediaRuntimeOrThrow(), {
+      attachment_id: attachmentA,
+      viewer: { account_id: facts.teacherA.id, role: 'teacher' },
+      loadRecordAccess: async () => null,
+      variant: 'model',
+    });
+    check(
+      '图片上下文只加载授权、处理后的字节（与 model 变体 checksum 一致）',
+      stored !== null &&
+        stored.model_checksum !== null &&
+        mediaContent.body.length > 0 &&
+        createHash('sha256').update(mediaContent.body).digest('hex') === stored.model_checksum,
+    );
+    check('图片字节不含对象键/签名 URL 字段', !JSON.stringify(mediaContent).includes('http'));
+
+    const imageRunId = imageParsed.verdict.ok ? imageParsed.verdict.run_id : '';
+    const imageRunRow = await loadYayaRun(imageRunId);
+    const imagePrincipal: Principal = {
+      account_id: facts.teacherA.id,
+      username: facts.teacherA.username,
+      display_name: '甲老师',
+      role: 'teacher',
+      account_status: 'active',
+      scope: { kind: 'classes', class_ids: [facts.classA] },
+    };
+    const imageContext = imageRunRow
+      ? await loadYayaRunProjectedContext(
+          createYayaRunRuntimeStateFromRecord(imageRunRow, {
+            headers: new Headers({ cookie: authA.cookie }),
+          }),
+          imagePrincipal,
+        )
+      : null;
+    const projectedImage = imageContext?.images[0];
+    check(
+      '正式上下文中图片是 image_interpretation 来源且字节与处理结果一致（不与教师原文混淆）',
+      projectedImage !== undefined &&
+        projectedImage.image_id === attachmentA &&
+        projectedImage.source.kind === 'image_interpretation' &&
+        projectedImage.source.derived_from === null &&
+        stored?.model_checksum !== null &&
+        stored?.model_checksum !== undefined &&
+        createHash('sha256')
+          .update(Buffer.from(projectedImage.data_base64, 'base64'))
+          .digest('hex') === stored.model_checksum &&
+        !('url' in projectedImage) &&
+        !('key' in projectedImage),
+    );
+
+    /* ============================== 中断恢复标记 ============================== */
+
+    await database.query(
+      "UPDATE yaya_runs SET state = 'interrupted', updated_at = now() WHERE id = $1",
+      [replaceRunId],
+    );
+    const interruptedLookup = await lookupRun(base, authA, convA.conversation_id, replaceId);
+    const interruptedBody = (await interruptedLookup.json()) as { status?: string; reason?: string };
+    check(
+      '中断恢复标记 → 查询不可核验（不冒充缺失/进行中）',
+      interruptedBody.status === 'unverifiable' && interruptedBody.reason === 'terminal_unreadable',
+    );
+
+    check('模型替身无未登记请求', stub.unexpected.length === 0);
+
+    /* ============================== 进程失联与跨进程查询 ============================== */
+
+    const lostId = `lost-${randomUUID()}`;
+    const lostPromise = postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: lostId,
+        user_text: '[app1:lost] 进程失联',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:lost]', 1);
+    const lostRows = await database.query<{ id: string }>(
+      "SELECT id FROM yaya_runs WHERE client_request_id = $1 AND state = 'active'",
+      [lostId],
+    );
+    const lostRunId = lostRows.rows[0]?.id ?? '';
+    check('失联前 run 已持久化为活跃', lostRunId !== '');
+    const stopReport = await stopTrackedChildTree(server1.tracked);
+    check('真实 Next 进程已核验终止（进程失联）', stopReport.ok);
+    void lostPromise.catch(() => undefined);
+
+    server2 = await startNext('s2', childEnv);
+    const base2 = server2.base;
+    const beforeLostQueries = stub.total;
+    const lostLookup = await lookupRun(base2, authA, convA.conversation_id, lostId);
+    const lostBody = (await lostLookup.json()) as { status?: string; reason?: string };
+    check(
+      '跨进程查询失联活跃 run → 不可核验（不自动重跑）',
+      lostBody.status === 'unverifiable' && lostBody.reason === 'owner_binding_failed',
+    );
+    const terminalLookup = await lookupRun(base2, authA, convA.conversation_id, basicId);
+    const terminalBody = (await terminalLookup.json()) as { status?: string; run_id?: string };
+    check(
+      '跨进程查询真实终态（finished）',
+      terminalBody.status === 'finished' && terminalBody.run_id === basicRunId,
+    );
+    check('跨进程查询不触发模型', stub.total === beforeLostQueries);
+
+    /* ============================== 清理 ============================== */
+    stage('checks-done');
+  } finally {
+    for (const resolve of gates) resolve();
+    await runCleanupSteps(
+      [
+        {
+          label: 'next-server-2',
+          run: async () => {
+            if (!server2) return;
+            const report = await stopTrackedChildTree(server2.tracked);
+            if (!report.ok) throw new Error(`${report.detail}\n${readLogTail(server2.tracked, 30)}`);
+          },
+        },
+        {
+          label: 'next-server-1',
+          run: async () => {
+            if (!server1) return;
+            const report = await stopTrackedChildTree(server1.tracked);
+            if (!report.ok) throw new Error(`${report.detail}\n${readLogTail(server1.tracked, 30)}`);
+          },
+        },
+        {
+          label: 'generated-artifacts',
+          run: () => {
+            const report = restoreGeneratedArtifacts(artifactSnapshot, ROOT);
+            if (report.issues.length > 0) throw new Error(report.issues.join('；'));
+          },
+        },
+        { label: 'model-stub', run: () => stub?.close() },
+        {
+          label: 'pg-pool',
+          run: async () => {
+            const pool = (globalThis as { __pgPool?: { end: () => Promise<void> } }).__pgPool;
+            if (!pool) return;
+            (globalThis as { __pgPool?: unknown }).__pgPool = undefined;
+            await pool.end();
+          },
+        },
+        { label: 'database', run: () => database?.end().then(() => undefined) },
+        {
+          label: 'media-root',
+          run: async () => {
+            if (mediaRoot) await rm(mediaRoot, { recursive: true, force: true });
+          },
+        },
+        {
+          label: 'container',
+          run: () => {
+            if (!isolated) return;
+            const report = isolated.teardown();
+            if (!report.ok) throw new Error(report.detail);
+          },
+        },
+        {
+          label: 'logs',
+          run: async () => {
+            for (const handle of [server1, server2]) {
+              if (handle) await rm(handle.logFile, { force: true }).catch(() => undefined);
+            }
+          },
+        },
+      ],
+      (label, detail) => cleanupIssues.push(`${label}: ${detail}`),
+    );
+    if (mediaRoot) {
+      const remaining = await readdir(mediaRoot).catch(() => [] as string[]);
+      if (remaining.length > 0) cleanupIssues.push(`media-root 残留 ${remaining.length} 项`);
+    }
+    assertCleanupComplete(cleanupIssues);
+  }
+
+  console.log(
+    JSON.stringify({
+      passed,
+      total: passed + failures.length,
+      failures,
+      run_id: RUN,
+      layers: {
+        server: 'real next dev (HTTP)',
+        database: 'one-off isolated postgres',
+        auth: 'real login/session/CSRF + direct sessions for auxiliary accounts',
+        media: 'real sharp pipeline + own local object root',
+        model: 'local StepFun-protocol stub (real llm.ts path, 0 real provider requests)',
+        cross_process: 'check process reads same DB; owner process killed for lost-run case',
+      },
+    }),
+  );
+  if (failures.length > 0) process.exit(1);
+}
+
+function row0<T>(rows: T[]): T | null {
+  return rows[0] ?? null;
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exit(1);
+});
