@@ -156,7 +156,7 @@ async function main(): Promise<void> {
       actor_account_id: OWNER_A,
     });
     const before = (await listFiles(CHECK_ROOT)).length;
-    const result = await recycleAttachment(deps, { attachment_id: image.attachment_id });
+    const result = await recycleAttachment(deps, { attachment_id: image.attachment_id, actor_account_id: OWNER_A });
     assert.equal(result.status, "referenced");
     assert.equal((await listFiles(CHECK_ROOT)).length, before, "引用存在时不得删对象");
     assert.equal(metadata.statusOf(image.attachment_id), "ready");
@@ -215,7 +215,7 @@ async function main(): Promise<void> {
         conversation_id: null,
       });
     };
-    const result = await recycleAttachment(deps, { attachment_id: image.attachment_id });
+    const result = await recycleAttachment(deps, { attachment_id: image.attachment_id, actor_account_id: OWNER_A });
     assert.equal(result.status, "referenced", "前置查询不能单独授权删除");
     assert.equal((await listFiles(CHECK_ROOT)).length, before, "竞态引用必须保护对象");
     assert.equal(metadata.statusOf(image.attachment_id), "ready");
@@ -247,11 +247,11 @@ async function main(): Promise<void> {
       ref_id: "proposal-a4",
       conversation_id: null,
     });
-    assert.equal((await recycleAttachment(deps, { attachment_id: image.attachment_id })).status, "referenced");
+    assert.equal((await recycleAttachment(deps, { attachment_id: image.attachment_id, actor_account_id: OWNER_A })).status, "referenced");
     const detached = metadata.detachConversationReferences("conversation-a4", OWNER_A);
     assert.equal(detached, 1);
     assert.equal(
-      (await recycleAttachment(deps, { attachment_id: image.attachment_id })).status,
+      (await recycleAttachment(deps, { attachment_id: image.attachment_id, actor_account_id: OWNER_A })).status,
       "referenced",
       "解除会话引用后观察/提案引用仍保护",
     );
@@ -262,7 +262,7 @@ async function main(): Promise<void> {
     const before = (await listFiles(CHECK_ROOT)).length;
     metadata.failNext("getReferenceFacts");
     await assert.rejects(
-      recycleAttachment(deps, { attachment_id: image.attachment_id }),
+      recycleAttachment(deps, { attachment_id: image.attachment_id, actor_account_id: OWNER_A }),
       (error: unknown) => {
         assert.ok(error instanceof MediaError && error.code === "reference_query_incomplete");
         return true;
@@ -276,7 +276,7 @@ async function main(): Promise<void> {
       conversation_id: null,
     });
     await assert.rejects(
-      recycleAttachment(deps, { attachment_id: image.attachment_id }),
+      recycleAttachment(deps, { attachment_id: image.attachment_id, actor_account_id: OWNER_A }),
       (error: unknown) => {
         assert.ok(error instanceof MediaError && error.code === "reference_query_incomplete");
         return true;
@@ -299,7 +299,7 @@ async function main(): Promise<void> {
     metadata.onNextReferenceFacts = () => {
       metadata.bumpAttachmentRevision(image.attachment_id);
     };
-    const result = await recycleAttachment(deps, { attachment_id: image.attachment_id });
+    const result = await recycleAttachment(deps, { attachment_id: image.attachment_id, actor_account_id: OWNER_A });
     assert.equal(result.status, "revision_conflict");
     assert.equal((await listFiles(CHECK_ROOT)).length, before, "revision 变化后不得继续删除");
     assert.equal(metadata.statusOf(image.attachment_id), "ready");
@@ -333,7 +333,7 @@ async function main(): Promise<void> {
         return true;
       },
     );
-    assert.equal((await recycleAttachment(deps, { attachment_id: image.attachment_id })).status, "deleted");
+    assert.equal((await recycleAttachment(deps, { attachment_id: image.attachment_id, actor_account_id: OWNER_A })).status, "deleted");
   });
 
   /* ========================== B. 上传未知结果 ========================== */
@@ -447,7 +447,7 @@ async function main(): Promise<void> {
     // 补偿删除返回 unknown 时必须如实报错，不宣称清理成功。
     const content = await pngBuffer(150, 150);
     const recycled = await uploadOne(deps, OWNER_A, content);
-    assert.equal((await recycleAttachment(deps, { attachment_id: recycled.attachment_id })).status, "deleted");
+    assert.equal((await recycleAttachment(deps, { attachment_id: recycled.attachment_id, actor_account_id: OWNER_A })).status, "deleted");
     const recordsBefore = metadata.countAttachments();
     const unknownStore = {
       putOnce: async (input: { key: string; content_type: string; body: Buffer }) => {

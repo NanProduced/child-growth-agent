@@ -93,7 +93,7 @@
 - `check-data-r1-media-db.ts`：R2 CAS 夹具补 `confirmed_at` 并传 `source_confirmed_at`；
   租约断言从 `already_deleting/already_deleted` 精确为 `not_ready + status`；
   引用/悬空断言精确为 `referenced`/`reference_incomplete`（断言实质保留，未删）。
-- 新增装置：`scripts/yaya/check-integration-media-db.ts`（61 项）、
+- 新增装置：`scripts/yaya/check-integration-media-db.ts`（61 项；P1 后 88 项）、
   `scripts/yaya/check-integration-http.ts`（17 项）。
 
 ## 4. 新增反例 RED→GREEN 与最终实测
@@ -113,9 +113,9 @@ A/B/C/D 全部场景（含失败注入、双连接交错、悬空引用、审计
 
 | 层 | 内容 | 结果 |
 |---|---|---|
-| 真实一次性 PostgreSQL（Docker，ID+标签核验） | DATA repository、锁序、CAS、审计、零写入 | 61/61 |
-| 真实 sharp | PNG 解码/再编码、三派生对象 | 61/61 |
-| 自有本地对象存储（真实本地 I/O） | 写一次、checksum 回读、精确删除/未知删除 | 61/61 |
+| 真实一次性 PostgreSQL（Docker，ID+标签核验） | DATA repository、锁序、CAS、审计、零写入 | 88/88 |
+| 真实 sharp | PNG 解码/再编码、三派生对象 | 88/88 |
+| 自有本地对象存储（真实本地 I/O） | 写一次、checksum 回读、精确删除/未知删除 | 88/88 |
 | 真实 Next HTTP（dev，127.0.0.1 随机端口） | 登录/CSRF、multipart 上传、元数据/字节读取、越权拒绝、幂等重传 | 17/17 |
 | Agent 模型 | 进程内替身（真实 DATA 观察/授权事实 + 真实对象字节） | 场景 1/2/3 GREEN |
 | 真实 provider/搜索/S3/托管库 | — | **NOT_RUN**（模型守门 0 命中） |
@@ -131,7 +131,7 @@ A/B/C/D 全部场景（含失败注入、双连接交错、悬空引用、审计
 | `check-data-r1-db.ts` | 58/58 |
 | `check-data-r1-media-db.ts` | 67/67（56+11 R2，含本次装置兼容更新） |
 | `check-media.ts` / `check-media-r1.ts` | 28/28 / 25/25 |
-| `check-integration-media-db.ts`（新增） | 61/61 |
+| `check-integration-media-db.ts`（新增） | 88/88 |
 | `check-integration-http.ts`（新增） | 17/17 |
 | `check-agent-engine` / `prompt` / `llm` | 29/29 / 10/10 / 7/7 |
 | `check-tech0` / `check-runtime-tech0.cjs` | SDK 表面 OK / PoC 38 项 OK |
@@ -224,3 +224,51 @@ const lease = await metadata.beginDeletionLease({ attachment_id, expected_revisi
 真实模型质量与 provider 请求、真实 S3/桶、托管数据库、浏览器聊天/UI、生产安全与部署、
 真实搜索、真实 AUTH/DATA/MEDIA 在 AGENT 引擎中的正式装配（第二波）。
 本轮不声称真实模型行为、真实桶或部署可用。
+
+## 9. P1 复审收口：统一回收操作者守门（2026-10-06 追加）
+
+主评审在候选 `24b0588` 上复现的唯一 P1：`recycleAttachment` 仅在 `actor_account_id`
+已提供时核 owner。ready 路径有适配器兜底（`ready_missing_actor_code=invalid_request`），
+但 `deleting`/`deleting+unknown`/`deleted` 分支先行返回或提前 `finishDeletion`，
+绕过运行时校验；无合法操作者时 `deleting+unknown` 会删除 3 个对象并落 `deleted`
+（`unknown_recovery_status=deleted, deleted_object_calls=3, objects_before=3,
+objects_after=0, database_status=deleted`）。
+
+### 9.1 共享根因修复
+
+- `src/lib/media/retention-service.ts`：`RecycleInput.actor_account_id` 改为必填；
+  入口先做运行期校验（缺失/空/空白/非字符串 → `invalid_request`，先于任何状态分支），
+  再做 owner 比对（错 owner → `not_owner`，覆盖 ready/deleting/deleting+unknown/deleted）；
+  `beginDeletionLease` 恒传 actor。旧租约/revision/“已删除”状态不作为身份豁免；
+  不从请求体自报、不按附件 owner 自动补齐、不默认系统身份。
+- 合法 owner 语义保持不变：未知恢复、revision 冲突不重复落账、引用/引用不完整保护、
+  对象 I/O 在事务外、精确删除。
+- 调用方兼容：`check-media.ts`、`check-media-r1.ts` 共 18 处补显式 owner（均为 OWNER_A）；
+  `check-integration-media-db.ts` 原调用已带 actor，新增反例经类型旁路验证运行期守门。
+
+### 9.2 反例 RED→GREEN（真实 DATA 适配器 + 隔离 PG + 删除计数替身）
+
+新增 E 段 27 项：ready/deleting/deleting+unknown/deleted 各测缺 actor、空白 actor、
+错 owner（均须零对象删除、状态/revision 不变）与合法 owner 行为（ready 回收、
+进行中 lease_busy、unknown 恢复、deleted 幂等、引用/不完整保护、revision 冲突不重复落账）。
+
+- RED（`24b0588` 产品代码 + 新反例）：**78/88**，10 项失败，全部为守门缺失：
+  ready 空白 actor 误报 not_owner；deleting 缺/空白 actor 不拒；
+  deleting+unknown 缺/空白 actor 直接删除并落账（零删除/不变两项同失败），
+  且对象已被非操作者删掉导致后续合法 owner 恢复失败；deleted 缺/空白 actor 不拒。
+- GREEN（本 P1 修复）：**88/88**，原 61 项断言全部保留。
+
+### 9.3 P1 回归复跑
+
+`check-media` 28/28、`check-media-r1` 25/25、`check-integration-http` 17/17、
+`check-agent-engine` 29/29、`check-agent-prompt` 10/10、`check-agent-llm` 7/7、
+`check-contract` 68/68、`check-preflight` 15/15、`pnpm validate`、`pnpm next build` 均通过。
+
+### 9.4 文件清单（P1）
+
+- `src/lib/media/retention-service.ts`（入口守门与必填类型）
+- `scripts/yaya/check-media.ts`、`scripts/yaya/check-media-r1.ts`（调用方补 owner）
+- `scripts/yaya/check-integration-media-db.ts`（E 段 27 项反例）
+- 本文件（P1 说明与计数更新）
+
+本轮仅关闭此 P1；新 SHA 仍为待主评审候选，不自行宣布获批。

@@ -37,7 +37,7 @@ import { MediaError } from "../../src/lib/media/errors";
 import { MemoryAttachmentMetadata } from "../../src/lib/media/metadata-memory";
 import { LocalMediaObjectStore } from "../../src/lib/media/object-store-local";
 import { sha256Hex } from "../../src/lib/media/object-store";
-import { recycleAttachment } from "../../src/lib/media/retention-service";
+import { recycleAttachment, type RecycleResult } from "../../src/lib/media/retention-service";
 import {
   bindMediaRuntime,
   mediaRuntimeOrThrow,
@@ -1210,6 +1210,254 @@ async function main(): Promise<void> {
     const raceFinalRevision = await metadata.getObservationAttachmentRevision(raceObsId);
     check("C 竞争后修订只递增一次", raceFinalRevision === 1);
     stage("c-done");
+
+    /* ============================ E. 回收操作者守门（P1） ============================ */
+    // 类型之外仍须运行时校验：缺/空白/错 owner 一律拒绝，且零对象删除、零落账；
+    // 删除态/历史租约不得成为身份豁免。ready/deleting/deleting+unknown/deleted 全分支。
+    type LooseRecycle = (
+      recycleDeps: MediaServiceDeps,
+      input: { attachment_id: string; actor_account_id?: string },
+    ) => Promise<RecycleResult>;
+    const recycleLoose = recycleAttachment as unknown as LooseRecycle;
+    const counting = { deletions: 0 };
+    const countingStore: MediaServiceDeps["store"] = {
+      putOnce: (input) => store.putOnce(input),
+      get: (key) => store.get(key),
+      delete: async (key) => {
+        counting.deletions += 1;
+        return store.delete(key);
+      },
+    };
+    const countingDeps: MediaServiceDeps = {
+      metadata,
+      store: countingStore,
+      environment: "development",
+    };
+
+    const freshRecycleTarget = async (label: string): Promise<string> => {
+      const uploaded = await uploadImages(deps, {
+        owner_account_id: teacherAId,
+        files: [
+          {
+            filename: label,
+            declared_content_type: null,
+            body: await pngBuffer(53, 53),
+            client_upload_id: null,
+          },
+        ],
+      });
+      return requireUploaded(uploaded.uploads[0], label).attachment_id;
+    };
+
+    const assertNoActorDeletesNothing = async (
+      state: string,
+      attachmentId: string,
+    ): Promise<void> => {
+      const beforeRecord = await metadata.get(attachmentId);
+      assert.ok(beforeRecord !== null);
+      const beforeDeletions = counting.deletions;
+      await expectMediaCode(
+        async () => recycleLoose(countingDeps, { attachment_id: attachmentId }),
+        "invalid_request",
+        `E ${state} 缺 actor 拒绝`,
+      );
+      await expectMediaCode(
+        async () =>
+          recycleLoose(countingDeps, { attachment_id: attachmentId, actor_account_id: "   " }),
+        "invalid_request",
+        `E ${state} 空白 actor 拒绝`,
+      );
+      await expectMediaCode(
+        async () =>
+          recycleLoose(countingDeps, {
+            attachment_id: attachmentId,
+            actor_account_id: teacherBId,
+          }),
+        "not_owner",
+        `E ${state} 错 owner 拒绝`,
+      );
+      check(`E ${state} 非法操作者零对象删除`, counting.deletions === beforeDeletions);
+      const afterRecord = await metadata.get(attachmentId);
+      check(
+        `E ${state} 非法操作者数据库状态/revision 不变`,
+        afterRecord !== null &&
+          afterRecord.status === beforeRecord.status &&
+          afterRecord.revision === beforeRecord.revision,
+      );
+    };
+
+    // ready
+    const readyGateId = await freshRecycleTarget("e-ready.png");
+    await assertNoActorDeletesNothing("ready", readyGateId);
+    const readyLegal = await recycleAttachment(countingDeps, {
+      attachment_id: readyGateId,
+      actor_account_id: teacherAId,
+    });
+    check(
+      "E ready 合法 owner 回收成功（三个精确对象）",
+      readyLegal.status === "deleted" &&
+        readyLegal.objects.every((entry) => entry.outcome === "deleted") &&
+        (await metadata.get(readyGateId))?.status === "deleted",
+    );
+
+    // deleting（租约进行中，已提交）
+    const busyId = await freshRecycleTarget("e-busy.png");
+    const busyRecord = await metadata.get(busyId);
+    assert.ok(busyRecord !== null);
+    const busyLease = await metadata.beginDeletionLease({
+      attachment_id: busyId,
+      expected_revision: busyRecord.revision,
+      actor_account_id: teacherAId,
+    });
+    check("E deleting 前置：合法 owner 取得进行中租约", busyLease.outcome === "acquired");
+    assert.ok(busyLease.outcome === "acquired");
+    await assertNoActorDeletesNothing("deleting", busyId);
+    const busyDeletionsBefore = counting.deletions;
+    const busyLegal = await recycleAttachment(countingDeps, {
+      attachment_id: busyId,
+      actor_account_id: teacherAId,
+    });
+    check(
+      "E deleting 合法 owner 返回 lease_busy 且零删除",
+      busyLegal.status === "lease_busy" && counting.deletions === busyDeletionsBefore,
+    );
+    const busyAfterLegal = await metadata.get(busyId);
+    check(
+      "E deleting 进行中状态与 revision 不变",
+      busyAfterLegal?.status === "deleting" &&
+        busyAfterLegal.delete_result === null &&
+        busyAfterLegal.revision === busyLease.record.revision,
+    );
+    // 收尾：合法 owner 的未知恢复路径继续可用（先落 unknown 再恢复）
+    await metadata.failDeletion({
+      attachment_id: busyId,
+      expected_revision: busyLease.record.revision,
+    });
+    const busyRecovered = await recycleAttachment(countingDeps, {
+      attachment_id: busyId,
+      actor_account_id: teacherAId,
+    });
+    check("E deleting→unknown 合法 owner 恢复正常", busyRecovered.status === "deleted");
+    // deleting + unknown
+    const unknownGateId = await freshRecycleTarget("e-unknown.png");
+    const unknownRecord = await metadata.get(unknownGateId);
+    assert.ok(unknownRecord !== null);
+    const unknownLease = await metadata.beginDeletionLease({
+      attachment_id: unknownGateId,
+      expected_revision: unknownRecord.revision,
+      actor_account_id: teacherAId,
+    });
+    assert.ok(unknownLease.outcome === "acquired");
+    const unknownRevision = unknownLease.outcome === "acquired" ? unknownLease.record.revision : 0;
+    await metadata.failDeletion({
+      attachment_id: unknownGateId,
+      expected_revision: unknownRevision,
+    });
+    await assertNoActorDeletesNothing("deleting+unknown", unknownGateId);
+    const unknownLegal = await recycleAttachment(countingDeps, {
+      attachment_id: unknownGateId,
+      actor_account_id: teacherAId,
+    });
+    check(
+      "E deleting+unknown 合法 owner 恢复并落 deleted",
+      unknownLegal.status === "deleted" &&
+        unknownLegal.objects.some((entry) => entry.outcome === "deleted") &&
+        (await metadata.get(unknownGateId))?.status === "deleted",
+    );
+
+    // deleted（删除态不是身份豁免）
+    const deletedGateId = await freshRecycleTarget("e-deleted.png");
+    await recycleAttachment(deps, {
+      attachment_id: deletedGateId,
+      actor_account_id: teacherAId,
+    });
+    const deletedGateBefore = await metadata.get(deletedGateId);
+    const deletionsBeforeDeleted = counting.deletions;
+    await expectMediaCode(
+      async () => recycleLoose(countingDeps, { attachment_id: deletedGateId }),
+      "invalid_request",
+      "E deleted 缺 actor 拒绝（删除态不豁免）",
+    );
+    await expectMediaCode(
+      async () =>
+        recycleLoose(countingDeps, { attachment_id: deletedGateId, actor_account_id: "  " }),
+      "invalid_request",
+      "E deleted 空白 actor 拒绝（删除态不豁免）",
+    );
+    await expectMediaCode(
+      async () =>
+        recycleLoose(countingDeps, {
+          attachment_id: deletedGateId,
+          actor_account_id: teacherBId,
+        }),
+      "not_owner",
+      "E deleted 错 owner 拒绝（删除态不豁免）",
+    );
+    const deletedGateAfter = await metadata.get(deletedGateId);
+    check(
+      "E deleted 非法操作者零删除且落账不变",
+      counting.deletions === deletionsBeforeDeleted &&
+        deletedGateAfter?.status === deletedGateBefore?.status &&
+        deletedGateAfter?.revision === deletedGateBefore?.revision,
+    );
+    const deletedLegal = await recycleAttachment(countingDeps, {
+      attachment_id: deletedGateId,
+      actor_account_id: teacherAId,
+    });
+    check(
+      "E deleted 合法 owner 幂等返回 already_deleted",
+      deletedLegal.status === "already_deleted",
+    );
+
+    // revision 冲突不重复落账（未知恢复中他人先落账）
+    const raceRecoveryId = await freshRecycleTarget("e-race.png");
+    const raceRecoveryRecord = await metadata.get(raceRecoveryId);
+    assert.ok(raceRecoveryRecord !== null);
+    const raceLease = await metadata.beginDeletionLease({
+      attachment_id: raceRecoveryId,
+      expected_revision: raceRecoveryRecord.revision,
+      actor_account_id: teacherAId,
+    });
+    assert.ok(raceLease.outcome === "acquired");
+    const raceRevision =
+      raceLease.outcome === "acquired" ? raceLease.record.revision : raceRecoveryRecord.revision;
+    await metadata.failDeletion({
+      attachment_id: raceRecoveryId,
+      expected_revision: raceRevision,
+    });
+    let raced = false;
+    const racingStore: MediaServiceDeps["store"] = {
+      putOnce: (input) => store.putOnce(input),
+      get: (key) => store.get(key),
+      delete: async (key) => {
+        const outcome = await store.delete(key);
+        if (!raced) {
+          raced = true;
+          const current = await metadata.get(raceRecoveryId);
+          assert.ok(current !== null);
+          await metadata.failDeletion({
+            attachment_id: raceRecoveryId,
+            expected_revision: current.revision,
+          });
+        }
+        return outcome;
+      },
+    };
+    const racedResult = await recycleAttachment(
+      { metadata, store: racingStore, environment: "development" },
+      { attachment_id: raceRecoveryId, actor_account_id: teacherAId },
+    );
+    const raceRow = await database.query<{ status: string; delete_result: string | null }>(
+      "SELECT status, delete_result FROM yaya_attachments WHERE id = $1",
+      [raceRecoveryId],
+    );
+    check(
+      "E 未知恢复中 revision 冲突不重复落账",
+      racedResult.status === "revision_conflict" &&
+        raceRow.rows[0]?.status === "deleting" &&
+        raceRow.rows[0]?.delete_result === "unknown",
+    );
+    stage("e-done");
 
     /* ============================ Agent：DATA 事实 + 重核不重送 ============================ */
     const agentImage = await uploadImages(deps, {

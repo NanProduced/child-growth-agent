@@ -16,7 +16,20 @@ import type { MediaServiceDeps } from "./runtime";
  *   可凭当前 revision 重试删除并 commit；
  * - 对象删除在数据库事务外，仅删除记录中的三个精确对象 key，绝不按前缀清空；
  * - 落账失败不假成功：对象可能已删但记录保持 deleting（可核验），如实报错。
+ *
+ * P1 操作者守门（YAYA-CORE-INTEGRATE1-P1）：
+ * - 入口统一要求非空可信操作者，覆盖 ready / deleting / deleting+unknown / deleted
+ *   全部分支；类型必填之外仍在运行期校验；
+ * - 操作者必须与附件 owner 一致才可继续；旧租约、revision 或“已删除”状态
+ *   都不能替代当前操作者证明；
+ * - 操作者来自可信调用上下文（请求/执行装配），不从请求体自报、不按 owner
+ *   自动补齐、不默认系统身份；无合法操作者时零对象删除、零落账。
  */
+export interface RecycleInput {
+  attachment_id: string;
+  /** 可信调用上下文中的回收操作者（必填）；运行期仍校验非空与 owner 一致 */
+  actor_account_id: string;
+}
 
 export interface RecycleObjectOutcome {
   variant: MediaVariant;
@@ -122,14 +135,19 @@ async function finishDeletion(
 
 export async function recycleAttachment(
   deps: MediaServiceDeps,
-  input: { attachment_id: string; actor_account_id?: string },
+  input: RecycleInput,
 ): Promise<RecycleResult> {
+  // 运行期统一守门（类型之外）：空/空白/缺失操作者一律拒绝，先于任何状态分支；
+  // 不按附件 owner 自动补齐，也不能把已删除/历史租约当作身份豁免。
+  if (typeof input.actor_account_id !== "string" || input.actor_account_id.trim() === "") {
+    throw new MediaError(
+      "invalid_request",
+      "回收缺少可信操作者身份，已拒绝；请通过已认证入口发起。",
+    );
+  }
   const record = await deps.metadata.get(input.attachment_id);
   if (record === null) return { status: "not_found", objects: [] };
-  if (
-    input.actor_account_id !== undefined &&
-    record.owner_account_id !== input.actor_account_id
-  ) {
+  if (record.owner_account_id !== input.actor_account_id) {
     throw new MediaError("not_owner", "只能回收自己上传的图片。");
   }
   if (record.status === "deleted") return { status: "already_deleted", objects: [] };
@@ -151,7 +169,7 @@ export async function recycleAttachment(
   const lease = await deps.metadata.beginDeletionLease({
     attachment_id: input.attachment_id,
     expected_revision: record.revision,
-    ...(input.actor_account_id === undefined ? {} : { actor_account_id: input.actor_account_id }),
+    actor_account_id: input.actor_account_id,
   });
   switch (lease.outcome) {
     case "referenced":

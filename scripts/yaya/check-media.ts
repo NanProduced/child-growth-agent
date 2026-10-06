@@ -469,7 +469,7 @@ async function main(): Promise<void> {
   await check("补偿只清本轮对象、不按前缀清空（回收后重新上传的兜底身份）", async () => {
     const content = await distinctPng(11);
     const recycled = await uploadOne(deps, OWNER_A, content);
-    assert.equal((await recycleAttachment(deps, { attachment_id: recycled.attachment_id })).status, "deleted");
+    assert.equal((await recycleAttachment(deps, { attachment_id: recycled.attachment_id, actor_account_id: OWNER_A })).status, "deleted");
     const foreignKey = buildObjectKey({
       environment: "development",
       owner_account_id: OWNER_A,
@@ -839,7 +839,7 @@ async function main(): Promise<void> {
         return true;
       },
     );
-    const done = await recycleAttachment(deps, { attachment_id: leaseImage.attachment_id });
+    const done = await recycleAttachment(deps, { attachment_id: leaseImage.attachment_id, actor_account_id: OWNER_A });
     assert.equal(done.status, "deleted", "未知删除可凭可核验状态完成回收");
   });
 
@@ -880,7 +880,7 @@ async function main(): Promise<void> {
       ref_id: "proposal-1",
       conversation_id: null,
     });
-    const protectedResult = await recycleAttachment(deps, { attachment_id: shared.attachment_id });
+    const protectedResult = await recycleAttachment(deps, { attachment_id: shared.attachment_id, actor_account_id: OWNER_A });
     assert.equal(protectedResult.status, "referenced");
     // DATA deleteConversation 的“只解除自己会话消息引用”语义（owner 校验）由 DATA 拥有；
     // 此处用替身镜像该步骤，验证解除后其余引用继续保护图片。
@@ -909,7 +909,7 @@ async function main(): Promise<void> {
     for (const objectPath of objectPaths) {
       assert.ok((await listFiles(CHECK_ROOT)).includes(objectPath));
     }
-    const result = await recycleAttachment(deps, { attachment_id: disposable.attachment_id });
+    const result = await recycleAttachment(deps, { attachment_id: disposable.attachment_id, actor_account_id: OWNER_A });
     assert.equal(result.status, "deleted");
     assert.deepEqual(
       result.objects.map((entry) => entry.outcome).sort(),
@@ -927,7 +927,7 @@ async function main(): Promise<void> {
     const before = (await listFiles(CHECK_ROOT)).length;
     metadata.failNext("getReferenceFacts");
     await assert.rejects(
-      recycleAttachment(deps, { attachment_id: disposable.attachment_id }),
+      recycleAttachment(deps, { attachment_id: disposable.attachment_id, actor_account_id: OWNER_A }),
       (error: unknown) => {
         assert.ok(error instanceof MediaError && error.code === "reference_query_incomplete");
         return true;
@@ -947,7 +947,7 @@ async function main(): Promise<void> {
         key.endsWith("/thumbnail") ? ("unknown" as const) : store.delete(key),
     };
     const flakyDeps: MediaServiceDeps = { metadata, store: flakyStore, environment: "development" };
-    const result = await recycleAttachment(flakyDeps, { attachment_id: disposable.attachment_id });
+    const result = await recycleAttachment(flakyDeps, { attachment_id: disposable.attachment_id, actor_account_id: OWNER_A });
     assert.equal(result.status, "deletion_unknown");
     const record = await metadata.get(disposable.attachment_id);
     assert.equal(record?.status, "deleting", "未知结果不得伪装成功或恢复 ready");
@@ -966,7 +966,7 @@ async function main(): Promise<void> {
         return true;
       },
     );
-    const retry = await recycleAttachment(deps, { attachment_id: disposable.attachment_id });
+    const retry = await recycleAttachment(deps, { attachment_id: disposable.attachment_id, actor_account_id: OWNER_A });
     assert.equal(retry.status, "deleted");
     const finalRecord = await metadata.get(disposable.attachment_id);
     assert.equal(finalRecord?.status, "deleted");
@@ -981,14 +981,14 @@ async function main(): Promise<void> {
       expected_revision: record.revision,
     });
     assert.equal(lease.outcome, "acquired");
-    const second = await recycleAttachment(deps, { attachment_id: disposable.attachment_id });
+    const second = await recycleAttachment(deps, { attachment_id: disposable.attachment_id, actor_account_id: OWNER_A });
     assert.equal(second.status, "lease_busy");
     if (lease.outcome === "acquired") {
       await metadata.failDeletion({
         attachment_id: disposable.attachment_id,
         expected_revision: lease.record.revision,
       });
-      const resumed = await recycleAttachment(deps, { attachment_id: disposable.attachment_id });
+      const resumed = await recycleAttachment(deps, { attachment_id: disposable.attachment_id, actor_account_id: OWNER_A });
       assert.equal(resumed.status, "deleted", "未知租约可按可核验状态恢复并完成回收");
     }
   });
