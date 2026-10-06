@@ -363,6 +363,17 @@ function createDoubles(
   return { state, deps, calls };
 }
 
+/** 在第 index 次重核等待期间翻转依赖事实；重核本身仍返回 ok */
+function flipDuringRevalidate(flipIndex: number, flip: () => void): RevalidateResponder {
+  return async (_input, index) => {
+    if (index === flipIndex) {
+      await delay(5);
+      flip();
+    }
+    return { ok: true };
+  };
+}
+
 function expectOutcome<T extends YayaRunOutcome['kind']>(
   result: YayaRunResult,
   kind: T,
@@ -1454,6 +1465,198 @@ async function main(): Promise<void> {
       green: 'engine message carries required/type JSON Schema; validation unchanged',
     });
     counters.engine_model += d.calls.model.length + bad.calls.model.length;
+  });
+
+  await check('engine/run-replaced-during-pre-dispatch-revalidation', async () => {
+    let replaced = false;
+    const d = createDoubles({
+      identity: () => identityOf(replaced ? 'run-2' : 'run-1'),
+      revalidate: flipDuringRevalidate(1, () => {
+        replaced = true;
+      }),
+      model: () => modelReply(actionJson('answer', { content: '不应发布' })),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '你好' });
+    assert.equal(stoppedReason(result), 'run_replaced');
+    assert.equal(d.calls.model.length, 0, '重核期间 run 被替换后不得派发模型');
+    redGreen.push({
+      name: 'run-replaced-pre-dispatch-revalidation',
+      red: 'naive model_calls=1 then run_replaced',
+      green: `engine model=${d.calls.model.length}, stopped run_replaced`,
+    });
+  });
+
+  await check('engine/run-replaced-during-publish-revalidation', async () => {
+    let replaced = false;
+    const d = createDoubles({
+      identity: () => identityOf(replaced ? 'run-2' : 'run-1'),
+      revalidate: flipDuringRevalidate(2, () => {
+        replaced = true;
+      }),
+      model: () => modelReply(actionJson('answer', { content: '不应发布', source_refs: ['obs-1'] })),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '小满怎么样' });
+    assert.equal(stoppedReason(result), 'run_replaced');
+    assert.equal(result.events.some((event) => event.type === 'answer'), false);
+    assert.equal(d.calls.model.length, 1);
+    redGreen.push({
+      name: 'run-replaced-publish-revalidation',
+      red: 'naive answered, answer_emitted=true',
+      green: 'engine run_replaced, answer=0',
+    });
+    counters.engine_model += d.calls.model.length;
+  });
+
+  await check('engine/session-invalid-during-publish-revalidation', async () => {
+    let revoked = false;
+    const d = createDoubles({
+      identity: () => identityOf('run-1', revoked ? { session_valid: false } : {}),
+      revalidate: flipDuringRevalidate(2, () => {
+        revoked = true;
+      }),
+      model: () => modelReply(actionJson('answer', { content: '不应发布' })),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '你好' });
+    assert.equal(stoppedReason(result), 'session_invalid');
+    assert.equal(result.events.some((event) => event.type === 'answer'), false);
+    redGreen.push({
+      name: 'session-invalid-publish-revalidation',
+      red: 'naive answered, answer_emitted=true',
+      green: 'engine session_invalid, answer=0',
+    });
+    counters.engine_model += d.calls.model.length;
+  });
+
+  await check('engine/identity-unavailable-during-publish-revalidation', async () => {
+    let down = false;
+    const d = createDoubles({
+      identity: () =>
+        down
+          ? identityOf('run-1', { identity_state: 'unavailable', principal: null })
+          : identityOf('run-1'),
+      revalidate: flipDuringRevalidate(2, () => {
+        down = true;
+      }),
+      model: () => modelReply(actionJson('answer', { content: '不应发布' })),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '你好' });
+    assert.equal(stoppedReason(result), 'identity_unavailable');
+    assert.equal(result.events.some((event) => event.type === 'answer'), false);
+    redGreen.push({
+      name: 'identity-unavailable-publish-revalidation',
+      red: 'naive answered, answer_emitted=true',
+      green: 'engine identity_unavailable, answer=0',
+    });
+    counters.engine_model += d.calls.model.length;
+  });
+
+  await check('engine/run-replaced-during-read-dispatch-revalidation', async () => {
+    let replaced = false;
+    const d = createDoubles({
+      identity: () => identityOf(replaced ? 'run-2' : 'run-1'),
+      revalidate: flipDuringRevalidate(3, () => {
+        replaced = true;
+      }),
+      model: () =>
+        modelReply(actionJson('read', { tool: 'list_class_children', params_json: '{}' })),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '列出孩子' });
+    assert.equal(stoppedReason(result), 'run_replaced');
+    assert.equal(d.calls.read.length, 0, '重核期间 run 被替换后不得派发 read');
+    redGreen.push({
+      name: 'run-replaced-read-dispatch-revalidation',
+      red: 'naive read_calls=1 then run_replaced',
+      green: `engine read=${d.calls.read.length}, stopped run_replaced`,
+    });
+    counters.engine_model += d.calls.model.length;
+  });
+
+  await check('engine/run-replaced-during-read-consume-revalidation', async () => {
+    let replaced = false;
+    const d = createDoubles({
+      identity: () => identityOf(replaced ? 'run-2' : 'run-1'),
+      revalidate: flipDuringRevalidate(4, () => {
+        replaced = true;
+      }),
+      model: (_request, index) =>
+        modelReply(
+          index === 0
+            ? actionJson('read', { tool: 'list_class_children', params_json: '{}' })
+            : actionJson('answer', { content: '不应发布' }),
+        ),
+      read: () => ({
+        ok: true,
+        data: { children: [{ id: 'c1' }] },
+        source: sourceRef('child_fact', 'obs-1', '观察 obs-1'),
+      }),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '列出孩子' });
+    assert.equal(stoppedReason(result), 'run_replaced');
+    assert.equal(result.events.some((event) => event.type === 'tool_result'), false);
+    assert.equal(result.events.some((event) => event.type === 'answer'), false);
+    assert.equal(d.calls.model.length, 1);
+    redGreen.push({
+      name: 'run-replaced-read-consume-revalidation',
+      red: 'naive consumes tool_result then stops',
+      green: 'engine drops result before consume',
+    });
+    counters.engine_model += d.calls.model.length;
+    counters.engine_read += d.calls.read.length;
+  });
+
+  await check('engine/session-invalid-during-proposal-dispatch-revalidation', async () => {
+    let revoked = false;
+    const d = createDoubles({
+      identity: () => identityOf('run-1', revoked ? { session_valid: false } : {}),
+      revalidate: flipDuringRevalidate(3, () => {
+        revoked = true;
+      }),
+      model: () =>
+        modelReply(
+          actionJson('propose_write', {
+            tool: 'create_observation',
+            params_json: JSON.stringify({ child_id: 'child-1', raw_text: '原文' }),
+          }),
+        ),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '记一下' });
+    assert.equal(stoppedReason(result), 'session_invalid');
+    assert.equal(d.calls.propose.length, 0, '重核期间会话失效后不得派发提案');
+    redGreen.push({
+      name: 'session-invalid-proposal-dispatch-revalidation',
+      red: 'naive propose_calls=1 then session_invalid',
+      green: `engine propose=${d.calls.propose.length}, stopped session_invalid`,
+    });
+    counters.engine_model += d.calls.model.length;
+  });
+
+  await check('engine/session-invalid-during-proposal-publish-revalidation', async () => {
+    let revoked = false;
+    const d = createDoubles({
+      identity: () => identityOf('run-1', revoked ? { session_valid: false } : {}),
+      revalidate: flipDuringRevalidate(4, () => {
+        revoked = true;
+      }),
+      model: () =>
+        modelReply(
+          actionJson('propose_write', {
+            tool: 'create_observation',
+            params_json: JSON.stringify({ child_id: 'child-1', raw_text: '原文' }),
+          }),
+        ),
+      propose: () => ({ ok: true, proposals: [proposalFor('p1')] }),
+    });
+    const result = await runYayaAgent(d.deps, { run_id: 'run-1', user_text: '记一下' });
+    assert.equal(stoppedReason(result), 'session_invalid');
+    assert.equal(result.events.some((event) => event.type === 'proposal_prepared'), false);
+    assert.equal(d.calls.propose.length, 1);
+    redGreen.push({
+      name: 'session-invalid-proposal-publish-revalidation',
+      red: 'naive proposal published then stops',
+      green: 'engine stops before proposal_prepared',
+    });
+    counters.engine_model += d.calls.model.length;
+    counters.engine_propose += d.calls.propose.length;
   });
 
   console.log(

@@ -219,13 +219,15 @@ async function guardRun(
  * 已装载上下文的当前授权重核（共享边界，单点实现）：
  * - 逐项交给依赖端复用 AUTH/DATA/MEDIA 当前事实判定，不做账号/范围数组快照比较；
  * - 依赖端不可用或返回不可用结果一律保守停止，不继续消费旧私域数据；
+ * - 重核等待本身是一个 await 窗口：返回前再次核验 run/取消/deadline/身份，
+ *   并返回核验后的当前身份，绝不把重核开始前的过时 identity 交给调用方；
  * - 有效未分配账号的一般问答没有私域依赖，依赖端返回 ok 即照常继续。
  */
 async function revalidateContextOrStop(
   state: EngineState,
   deps: YayaAgentDependencies,
   identity: YayaCurrentIdentity,
-): Promise<void> {
+): Promise<YayaCurrentIdentity> {
   checkDeadline(state);
   let verdict: unknown;
   try {
@@ -256,16 +258,18 @@ async function revalidateContextOrStop(
         : '当前授权已变化',
     );
   }
+  // 重核等待期间 run/会话/账号/身份服务可能已变化；返回前重新核验，
+  // 失败即保守停止，成功则返回核验后的当前身份。
+  return guardRun(state, deps);
 }
 
-/** 运行/身份守门 + 已装载上下文重核；派发与消费前的统一入口 */
+/** 运行/身份守门 + 已装载上下文重核；派发与消费前的统一入口，返回核验后的当前身份 */
 async function enforceRunAndContext(
   state: EngineState,
   deps: YayaAgentDependencies,
 ): Promise<YayaCurrentIdentity> {
   const identity = await guardRun(state, deps);
-  await revalidateContextOrStop(state, deps, identity);
-  return identity;
+  return revalidateContextOrStop(state, deps, identity);
 }
 
 function parseAction(content: string): YayaAgentAction {
