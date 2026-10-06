@@ -25,6 +25,7 @@ export type SeedObservationKey =
   | "a1_h1"
   | "a1_h2"
   | "a1_h3"
+  | "a1_h4"
   | "a2_photo"
   | "a3_empty"
   | "b1_plain"
@@ -82,6 +83,7 @@ export interface AcceptanceSeedManifest {
     behavior_item_id: string;
     sustained_item_id: string;
     health_reference_item_id: string;
+    social_behavior_item_id: string;
   };
   conversations: {
     teacher_a_scenario: { conversation_id: string; restricted_title: string };
@@ -137,6 +139,8 @@ export interface AcceptanceSeedHandle {
   verification: AcceptanceVerification;
   credentials_path: string;
   object_root: string;
+  /** 本轮容器 ID（精确残留核验用；不是凭证） */
+  container_id: string;
   /** 仅程序内使用（浏览器 runner 需要把 DATABASE_URL 交给被测服务）；CLI 不打印 */
   database_url: string;
   teardown: () => Promise<void>;

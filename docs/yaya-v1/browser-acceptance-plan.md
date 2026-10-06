@@ -43,7 +43,7 @@ const seed = await createAcceptanceSeed(); // 创建隔离 PG 容器 + 对象目
 | 5 | 准备记录 | `/observations/new`、`POST /api/observations` | UI + HTTP+DB | READY（表单页存在；聊天准备记录 NOT_RUN） | 录入原文并保存 | 保存成功、状态为草稿 | `status=draft`；`raw_text` 与提交逐字一致；`class_context_snapshot` 来自分班事实；`guide_evidence=NULL` |
 | 6 | 人工核对 | `/observations/[id]/review` | UI + HTTP+DB | READY | 打开 `b5_ai_organized` 或新整理记录 | 展示 AI 草稿、可补充/跳过追问、可关联指南 | `raw_text` 不被改写；`ai_draft` 与 `confirmed_content` 分列；`agent_context.follow_up` 可含待回答轮次（`b4_needs_input`） |
 | 7 | 归档 | `/observations/[id]/review`、`POST /api/observations/[id]/confirm` | UI + HTTP+DB | READY | 教师确认归档（可带指南决定） | 归档成功、只读 | `status=confirmed`、`confirmed_at` 写入；指南决定与归档同一事务（全有或全无）；管理员无确认权限（403） |
-| 8 | 证据册引用 | `/children/[id]/evidence` | UI + 读模型 | READY | 打开 `class_a_same_name` 证据册 | 行为/持续性/保健参考三类条目 | `item.moe.health.physical.1.3-4.2`（行为）`confirmed_observed`；`item.moe.health.physical.2.3-4.1`（持续性）带期间纪要；`item.moe.health.physical.1.3-4.1`（保健参考）不参与行为统计 |
+| 8 | 证据册引用 | `/children/[id]/evidence` | UI + 读模型 | READY | 打开 `class_a_same_name` 证据册 | 行为/持续性/保健参考三类条目 | 行为 `item.moe.health.physical.1.3-4.2`（宿主 `a1_h1`，坐直站直）`confirmed_observed`；持续性 `item.moe.health.physical.2.3-4.1`（宿主 `a1_h2`，两日情绪稳定 + 期间纪要）；保健参考 `item.moe.health.physical.1.3-4.1`（宿主 `a1_h4`，身高体重，不参与行为统计）；郑小舟社会行为 `item.moe.social.interpersonal.1.3-4.1`（宿主 `c1_new`） |
 | 9 | 班级同期聚合 | `/classes/[id]/evidence` | UI + 读模型 | READY | 打开松果班概览（当前学期） | 名单与三类人数、行为占比 | 名单=当前在班 3 人（转走的郑小舟不在）；行为条目 `reliable` 且占比 1/3；保健参考条目占比为 null（不显示正常 0%） |
 | 10 | 下钻 | `/classes/[id]/evidence` 展开 → 儿童证据册 | UI + 读模型 | READY | 从班级条目下钻到幼儿 | 与个人证据册一致 | 下钻名单状态与 `loadChildEvidenceBook` 一致；受限/不可用有明确提示 |
 
@@ -65,7 +65,7 @@ const seed = await createAcceptanceSeed(); // 创建隔离 PG 容器 + 对象目
 | 不可用 | UI + 读模型 | READY | `fault_unreadable`（容器不可读） | 打开证据册 | 条目 `unavailable`；不显示为正常 0；故障隔离班整体 `partial` |
 | 同名幼儿 | UI + 读模型 | READY | 两名 `王一诺`（松果班/白桦班） | 班级列表与证据册区分 | 按 id/班级区分；同名不合并、不串证据 |
 | 共用照片各自事实 | UI + 读模型 | READY | `media.shared_photo` + `a2_photo`/`b2_photo` | 两名幼儿观察中的图片 | 同一 `attachment_id` 两条观察引用；两条 `raw_text` 不同；教师A 对两班记录均可读 |
-| 指南三类型条目 | UI + 读模型 | READY | `guide_items.*` | 证据册筛选/核对 | 行为/持续性/保健参考三类状态与统计口径见主链路 8；保健参考不参与行为统计 |
+| 指南三类型条目 | UI + 读模型 | READY | `guide_items.*` | 证据册筛选/核对 | 行为/持续性/保健参考三类状态与统计口径见主链路 8；条目文字与观察事实一一对应（坐直站直/两日情绪稳定/身高体重/同伴游戏），保健参考不参与行为统计；故意不匹配只在故障夹具 |
 | 真实模型问答 | 真实模型 | **NOT_RUN**（无预算，禁止无预算请求） | — | — | 需单独授权与预算，不得用替身冒充 |
 | 公开检索 | 真实模型/搜索 | **NOT_RUN**（未配置出口） | — | — | 搜索/网页出口 0 请求 |
 
@@ -84,7 +84,7 @@ const seed = await createAcceptanceSeed(); // 创建隔离 PG 容器 + 对象目
 | `children.class_a_shared_photo` / `class_b_shared_photo` | 陈小满 / 周小满 | 共用一张照片、事实不同 |
 | `children.class_b_draft` / `class_b_needs_input` / `class_b_ai_organized` | 孙小芽 / 李小禾 / 吴小溪 | 四种观察状态覆盖 |
 | `children.fault_unreadable` / `fault_partial` | `[故障夹具]` 两名幼儿 | `unavailable` / `partial` 降级展示 |
-| `observations.*` | 14 条观察（含原文、日期、班级） | 逐条 DB 事实断言 |
+| `observations.*` | 15 条观察（含原文、日期、班级；`a1_h1..h4` 为三类指南证据宿主与持续性依据） | 逐条 DB 事实断言 |
 | `conversations.teacher_a_scenario` | full / historical / hidden 三种片段 + 受限标题 | 消息投影与标题回退 |
 | `conversations.teacher_b_private` | 教师B 私有会话 | 账号私有边界 |
 | `media.shared_photo` | 合成照片附件（ready、synthetic） | 多引用与逐引用授权 |

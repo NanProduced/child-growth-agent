@@ -17,14 +17,14 @@ import { createAcceptanceSeed } from "./scripts/yaya/acceptance/seed";
 
 const seed = await createAcceptanceSeed();       // 创建 + 身份核验 + 播种 + 事实回读
 seed.manifest;                                    // 数据清单（班级/幼儿/观察/会话/附件/故障夹具 id）
-seed.verification;                                // 49 项事实回读结果（失败即抛错并清理）
+seed.verification;                                // 62 项事实回读结果（失败即抛错并清理）
 seed.database_url;                                // 交给被测服务；CLI 不打印
 seed.object_root;                                 // MEDIA_LOCAL_ROOT
 seed.credentials_path;                            // 账号口令（tmp、0600、teardown 删除）
 await seed.teardown();                            // 容器（ID+标签核验）+ 对象目录 + 凭证目录，逐项核验删除
 ```
 
-- 自检：`pnpm exec tsx scripts/yaya/acceptance/run.ts`（连续两轮完整种子 + 两轮失败注入 + 残留扫描）。
+- 自检：`pnpm exec tsx scripts/yaya/acceptance/run.ts`（连续两轮完整种子 + 三轮失败注入 + 所有权探针 + 精确残留判定）。
 - 只允许自有一次性隔离 PG 与自有对象目录：`createAcceptanceSeed()` 不接受任何数据库 URL 参数；
   进程内若已存在 `globalThis.__pgPool` 直接拒绝，防止混用其他数据库。
 - 迁移：`initialize-demo-db.sql`（按 AGENTS 约定截取 `INSERT INTO children` 之前的纯结构）+ `upgrade-classes.sql`
@@ -43,11 +43,24 @@ await seed.teardown();                            // 容器（ID+标签核验）
 | 班级 | 松果班/白桦班/云杉班（small，当前学年）+ `[故障夹具] 隔离班` |
 | 幼儿 | 同名「王一诺」×2（两班）；共用照片「陈小满/周小满」；可信空数据「赵小树」；转班「郑小舟」（松果班→云杉班）；draft/needs_input/ai_organized 各一名；`[故障夹具]` 两名 |
 | 观察 | 14 条：draft/needs_input/ai_organized/confirmed 全覆盖；全部 `is_demo` + 原文 `[合成]` 标记 |
-| 指南证据 | 行为 `item.moe.health.physical.1.3-4.2`（confirmed_performance）、持续性 `item.moe.health.physical.2.3-4.1`（带期间纪要）、保健参考 `item.moe.health.physical.1.3-4.1`（不参与行为统计），均由产品 decisions 路径写入，依据逐条可核验 |
+| 指南证据 | 行为 `item.moe.health.physical.1.3-4.2`、持续性 `item.moe.health.physical.2.3-4.1`、保健参考 `item.moe.health.physical.1.3-4.1`、社会行为 `item.moe.social.interpersonal.1.3-4.1`；均由产品 decisions 路径写入，依据逐条可核验，条目与事实语义对照见下表 |
 | 媒体 | 1 张 sharp 合成照片（ready、`metadata.synthetic=true`），被两名幼儿两条观察各自引用；对象目录仅 3 个派生对象 |
 | 会话 | 教师A 场景会话（full / historical_read_only / hidden 三种片段 + 受限标题）；教师B 私有会话 |
 | 故障夹具（单独登记，与正常种子分开） | 容器不可读（→ unavailable）、依据与原文不一致（→ partial）、`saved_detail_unavailable` 回执（原操作查询） |
 | 日期派生 | 观察日期全部由当前学期（显式校历）与已保存分班事实派生：转班前观察落在旧归属区间、转班后落在新归属区间；无硬编码“今天”的旧日期 |
+
+### 2.1 正常种子：指南条目 ↔ 事实对照（返修 E）
+
+| 类型 | item_id | 条目文字（节选） | 宿主观察（manifest 键） | 依据片段 | 语义关键词 |
+|---|---|---|---|---|---|
+| 行为 | `item.moe.health.physical.1.3-4.2` | 在提醒下能自然坐直、站直 | `a1_h1` | 「在老师提醒后能自然坐直、站直」 | 坐直/站直 |
+| 持续性 | `item.moe.health.physical.2.3-4.1` | 情绪比较稳定，很少因一点小事哭闹不止 | `a1_h2`（依据 `a1_h2`+`a1_h3` 跨两日） | 「情绪比较稳定，和同伴商量着轮流玩」「情绪依然比较稳定」 | 情绪 |
+| 保健参考 | `item.moe.health.physical.1.3-4.1` | 身高和体重适宜 | `a1_h4` | 「身高 102 厘米、体重 17 公斤」 | 身高/体重 |
+| 社会行为 | `item.moe.social.interpersonal.1.3-4.1` | 愿意和小朋友一起游戏 | `c1_new` | 「愿意和小朋友一起游戏」 | 小朋友 |
+
+- 结构可核验（`checkBasis`）不等于语义自洽：回读新增逐项对照检查（条目文字包含预期短语、依据片段含语义关键词、
+  片段逐字落在对应观察原文中）；**故意不匹配的只保留在故障夹具**（`fault_partial`）。
+- 观察草稿的领域/子领域也随事实调整（坐直站直→动作发展；情绪→身心状况；身高体重→身心状况；同伴游戏→社会/人际交往）。
 
 ## 3. 场景矩阵
 
@@ -63,34 +76,49 @@ await seed.teardown();                            // 容器（ID+标签核验）
 {
   "ok": true,
   "runs": [
-    { "run": 1, "seed_id": "qaseed1-muw877n3-1c75a877", "semester_id": "2026-2027-1", "checks_passed": 49,
-      "object_root_removed": true, "credentials_removed": true },
-    { "run": 2, "seed_id": "qaseed1-muw87bja-888b525d", "semester_id": "2026-2027-1", "checks_passed": 49,
-      "object_root_removed": true, "credentials_removed": true }
+    { "run": 1, "seed_id": "qaseed1-muw9vkcn-73372945", "semester_id": "2026-2027-1", "checks_passed": 62,
+      "container_absent": true, "object_root_removed": true, "credentials_removed": true, "label_residual": 0 },
+    { "run": 2, "seed_id": "qaseed1-muw9vovd-7a021178", "semester_id": "2026-2027-1", "checks_passed": 62,
+      "container_absent": true, "object_root_removed": true, "credentials_removed": true, "label_residual": 0 }
   ],
   "failure_paths": [
     { "stage": "after_resources", "cleanup_ok": true },
     { "stage": "after_schema", "cleanup_ok": true },
     { "stage": "after_seed", "cleanup_ok": true }
   ],
-  "residual_containers": 0,
-  "residual_temp_dirs": 0
+  "ownership_probe": {
+    "foreign_same_prefix_preserved": true,
+    "unregistered_path_rejected": true,
+    "registered_dir_removed_and_retry_ok": true,
+    "wrong_seed_id_rejected": true,
+    "forced_delete_failure_then_retry": true
+  },
+  "observed_other_namespace_resources": { "containers": [], "temp_dirs": [] }
 }
 ```
 
-- 每轮 49 项回读全部通过，覆盖：库身份、账号/角色/任教、撤权历史、分班与转班、日期派生（观察落在分班事实内）、
-  四种状态、合成标记、指南依据逐条可核验、三类条目读模型、可信空数据/partial/unavailable、
+- 每轮 62 项回读全部通过，覆盖：库身份、账号/角色/任教、撤权历史、分班与转班、日期派生（观察落在分班事实内）、
+  四种状态、合成标记、指南依据逐条可核验、条目与事实语义对照（4 组）、三类条目读模型、可信空数据/partial/unavailable、
   班级聚合（行为占比、保健参考不显示占比、名单正确）、媒体三对象与 checksum、两幼儿共用照片各自事实、
   消息投影（full/historical_read_only/hidden）、受限标题、账号私有、故障夹具 `saved_detail_unavailable`。
 - 两轮种子 id/容器/对象目录互不相同；每轮验证“库内恰好 4 个本轮账号且无演示数据”，证明彼此隔离与可重复。
-- 失败路径（资源创建后、schema 后、种子后注入）均 `cleanup_ok=true`；结束时无带标签残留容器、无 `yaya-qa-seed1-*` 临时目录。
+- 失败路径（资源创建后、schema 后、种子后注入）均 `cleanup_ok=true`。
+- 残留判定只针对本轮：每轮按登记的精确容器 ID、`label=yaya.qa-seed1=<seed_id>` 与精确目录核实；
+  命名空间内其他合法实例只展示在 `observed_other_namespace_resources`，不计入失败、不清理。
+- 所有权探针 5/5：同前缀异 run 目录保留、未登记路径拒绝、登记目录删除与重试、错误 seed_id 拒绝、
+  强制删除失败后恢复重试收敛。
 - 质量门：`pnpm ts-check`、`pnpm exec eslint scripts/yaya/acceptance --quiet` 通过。
 
 ## 5. 清理与凭证
 
-- 正常与失败路径统一走 `runCleanupSteps` + `assertCleanupComplete`：关闭连接池 → 容器（ID+运行标签核验后删除）
-  → 对象目录 → 凭证目录，任一项未核实成功即失败退出，不把“已调用清理”当成功。
-- 口令/连接串只写 `credentials_path`（本轮 tmp、0600、非仓库）；不打印、不进截图/trace/HAR；teardown 后实测目录不存在。
+- 正常与失败路径统一走 `runCleanupSteps`：关闭连接池 → 容器（ID+运行标签核验后删除）→ 对象目录 → 凭证目录；
+  任一步失败都会作为 issue 上报（不把“已调用清理”当成功），且其余步骤继续执行。
+- teardown 只有全部资源删除并核实后才进入完成态；失败保留可重试清理与失败信息，再次调用会重新执行全部步骤
+  （已删除资源经核实不存在视为成功）；并发 teardown 共享同一次进行中的清理。
+- 准备阶段失败携带结构化清理结果（`AcceptanceResourceError.cleanup_ok/cleanup_issues`），入口层不重算为“已清理”。
+- 临时目录所有权 = 创建时登记的本轮精确绝对路径 + seed_id + 用途；仅名字前缀相同的其他实例目录不会被使用或删除。
+- 口令/连接串只写 `credentials_path`（本轮 tmp、非仓库、尽力设置 0600——Windows 未验证 ACL 隔离）；
+  不打印、不进截图/trace/HAR；teardown 后实测目录不存在。
 
 ## 6. NOT_RUN 与已知边界
 

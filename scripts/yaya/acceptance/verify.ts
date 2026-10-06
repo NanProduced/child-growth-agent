@@ -11,6 +11,7 @@ import path from "node:path";
 import type { QueryResultRow } from "pg";
 
 import { buildPrincipal } from "../../../src/lib/accounts/repository";
+import { listGuideItems } from "../../../src/lib/guide/catalog";
 import type { EvidenceObservation } from "../../../src/lib/guide/runtime";
 import { checkBasis, parseGuideEvidence } from "../../../src/lib/guide/runtime";
 import {
@@ -31,7 +32,12 @@ import { sha256Hex } from "../../../src/lib/media/object-store";
 import type { AcceptanceResources } from "./resources";
 import { ACCEPTANCE_SCHOOL_ID } from "./resources";
 import { syntheticSharedPhoto } from "./media";
-import type { AcceptanceSeedManifest, AcceptanceVerification, VerificationCheck } from "./types";
+import type {
+  AcceptanceSeedManifest,
+  AcceptanceVerification,
+  SeedObservationKey,
+  VerificationCheck,
+} from "./types";
 import { FAULT_MARK, SYNTHETIC_MARK } from "./types";
 
 export type { AcceptanceVerification, VerificationCheck } from "./types";
@@ -205,45 +211,131 @@ export async function verifyAcceptanceSeed(
     JSON.stringify(demoFlags),
   );
 
-  /* ---------- 指南证据容器（正常种子） ---------- */
+  /* ---------- 指南证据容器（正常种子）：结构 + 条目与事实语义对照 ---------- */
   const childObservationMap = async (childId: string): Promise<Map<string, EvidenceObservation>> => {
     const list = await listObservationsForChildren([childId]);
     return new Map(list.map((observation) => [observation.id, observation]));
   };
   const a1Map = await childObservationMap(manifest.children.class_a_same_name.id);
-  const h1 = a1Map.get(manifest.observations.a1_h1.id);
-  const h3 = a1Map.get(manifest.observations.a1_h3.id);
-  const h1Parsed = h1 ? parseGuideEvidence(h1.guide_evidence) : { kind: "none" as const };
-  const expectOk = h1Parsed.kind === "ok" ? h1Parsed : null;
+  const c1Map = await childObservationMap(manifest.children.class_c_transfer.id);
+  const containerOf = (map: Map<string, EvidenceObservation>, key: SeedObservationKey) => {
+    const observation = map.get(manifest.observations[key].id);
+    return observation ? parseGuideEvidence(observation.guide_evidence) : { kind: "none" as const };
+  };
+  const a1H1 = containerOf(a1Map, "a1_h1");
+  const a1H2 = containerOf(a1Map, "a1_h2");
+  const a1H4 = containerOf(a1Map, "a1_h4");
+  const c1New = containerOf(c1Map, "c1_new");
   expect(
-    "指南：a1_h1 容器可解析且含 2 条关联",
-    expectOk !== null && expectOk.links.length === 2,
-    `kind=${h1Parsed.kind}`,
+    "指南：行为/持续性/保健参考/社会行为四类正常关联各 1 条",
+    a1H1.kind === "ok" &&
+      a1H1.links.length === 1 &&
+      a1H2.kind === "ok" &&
+      a1H2.links.length === 1 &&
+      a1H4.kind === "ok" &&
+      a1H4.links.length === 1 &&
+      c1New.kind === "ok" &&
+      c1New.links.length === 1,
+    JSON.stringify({ h1: a1H1.kind, h2: a1H2.kind, h4: a1H4.kind, c1: c1New.kind }),
   );
-  if (expectOk && h1) {
+  const normalContainers = [
+    { key: "a1_h1" as const, childId: manifest.children.class_a_same_name.id, map: a1Map, parsed: a1H1 },
+    { key: "a1_h2" as const, childId: manifest.children.class_a_same_name.id, map: a1Map, parsed: a1H2 },
+    { key: "a1_h4" as const, childId: manifest.children.class_a_same_name.id, map: a1Map, parsed: a1H4 },
+    { key: "c1_new" as const, childId: manifest.children.class_c_transfer.id, map: c1Map, parsed: c1New },
+  ];
+  expect(
+    "指南：全部正常关联目录版本为当前版本",
+    normalContainers.every(
+      (entry) =>
+        entry.parsed.kind === "ok" &&
+        entry.parsed.links.every((link) => link.catalog_version === "moe-3-6-2012.v1"),
+    ),
+  );
+  expect(
+    "指南：全部正常关联依据逐条可核验（来源存在/同儿童/已确认/版本一致/片段可核对）",
+    normalContainers.every(
+      (entry) =>
+        entry.parsed.kind === "ok" &&
+        entry.parsed.links.every(
+          (link) =>
+            link.basis.length > 0 &&
+            link.basis.every((basis) => checkBasis(basis, entry.childId, entry.map).valid),
+        ),
+    ),
+  );
+  // 条目与事实对照：条目文字、依据片段、原始事实必须指向同一语义关键词（不引入 LLM 评价）
+  const guideItemsById = new Map((await listGuideItems()).map((item) => [item.id, item]));
+  const semanticCases = [
+    {
+      label: "行为类（坐直站直）",
+      item_id: manifest.guide_items.behavior_item_id,
+      containerKey: "a1_h1" as const,
+      phrase: "坐直、站直",
+      keyword: "坐直",
+      basisCount: 1,
+    },
+    {
+      label: "持续性（情绪稳定）",
+      item_id: manifest.guide_items.sustained_item_id,
+      containerKey: "a1_h2" as const,
+      phrase: "情绪比较稳定",
+      keyword: "情绪",
+      basisCount: 2,
+    },
+    {
+      label: "保健参考（身高体重）",
+      item_id: manifest.guide_items.health_reference_item_id,
+      containerKey: "a1_h4" as const,
+      phrase: "身高和体重适宜",
+      keyword: "身高",
+      basisCount: 1,
+    },
+    {
+      label: "社会行为（愿意和同伴游戏）",
+      item_id: manifest.guide_items.social_behavior_item_id,
+      containerKey: "c1_new" as const,
+      phrase: "愿意和小朋友一起游戏",
+      keyword: "小朋友",
+      basisCount: 1,
+    },
+  ];
+  const rawTextById = new Map(
+    Object.values(manifest.observations).map((observation) => [observation.id, observation.raw_text]),
+  );
+  for (const entry of semanticCases) {
+    const item = guideItemsById.get(entry.item_id);
+    const parsed = containerOf(entry.containerKey === "c1_new" ? c1Map : a1Map, entry.containerKey);
+    const link = parsed.kind === "ok" ? parsed.links[0] : undefined;
+    const itemText = item?.text ?? "";
+    const basis = link?.basis ?? [];
     expect(
-      "指南：a1_h1 两条关联目录版本为当前版本",
-      expectOk.links.every((link) => link.catalog_version === "moe-3-6-2012.v1"),
-    );
-    const validChecks = expectOk.links.map((link) =>
-      link.basis.map((basis) => checkBasis(basis, manifest.children.class_a_same_name.id, a1Map)),
+      `指南对照：${entry.label} 条目文字包含「${entry.phrase}」`,
+      itemText.includes(entry.phrase),
+      itemText,
     );
     expect(
-      "指南：a1_h1 全部依据逐条可核验（来源存在/同儿童/已确认/版本一致/片段可核对）",
-      validChecks.every((list) => list.length > 0 && list.every((entry) => entry.valid)),
-      JSON.stringify(validChecks),
+      `指南对照：${entry.label} 关联条目 id 与声明一致`,
+      link?.item_id === entry.item_id,
+      String(link?.item_id),
+    );
+    expect(
+      `指南对照：${entry.label} 依据 ${entry.basisCount} 条且片段与条目语义关键词一致`,
+      basis.length === entry.basisCount &&
+        basis.every((entryBasis) => entryBasis.quote.includes(entry.keyword)) &&
+        basis.every((entryBasis) => rawTextById.get(entryBasis.observation_id)?.includes(entryBasis.quote) === true),
+      JSON.stringify(basis.map((entryBasis) => entryBasis.quote)),
     );
   }
-  const h3Parsed = h3 ? parseGuideEvidence(h3.guide_evidence) : { kind: "none" as const };
-  expect("指南：a1_h3 保健参考关联存在且依据有效", h3Parsed.kind === "ok" && h3Parsed.links.length === 1);
-  if (h3Parsed.kind === "ok" && h3) {
-    expect(
-      "指南：a1_h3 依据可核验",
-      h3Parsed.links[0]?.basis.every((basis) =>
-        checkBasis(basis, manifest.children.class_a_same_name.id, a1Map).valid,
-      ) === true,
-    );
-  }
+  const sustainedNote = a1H2.kind === "ok" ? a1H2.links[0]?.sustained_note : null;
+  expect(
+    "指南对照：持续性纪要覆盖两日依据且描述情绪稳定",
+    sustainedNote !== null &&
+      sustainedNote.description.includes("情绪") &&
+      sustainedNote.period_start <= manifest.observations.a1_h2.observed_at &&
+      sustainedNote.period_end >= manifest.observations.a1_h3.observed_at,
+    JSON.stringify(sustainedNote ?? null),
+  );
 
   /* ---------- 读模型：个人证据册 ---------- */
   const a1Book = await loadChildEvidenceBook(manifest.children.class_a_same_name.id, {
@@ -282,6 +374,18 @@ export async function verifyAcceptanceSeed(
           link.sustained_note !== null &&
           link.sustained_note.description.length >= 10,
       ) === true,
+    );
+  }
+  const transferBook = await loadChildEvidenceBook(manifest.children.class_c_transfer.id, {
+    scope: "current_semester",
+  });
+  expect("读模型：郑小舟（云杉班）证据册可读取", transferBook.ok === true);
+  if (transferBook.ok) {
+    const social = flattenChildItems(transferBook.value).get(manifest.guide_items.social_behavior_item_id);
+    expect(
+      "读模型：社会行为条目为 confirmed_observed 且 reliable",
+      social?.status === "confirmed_observed" && social.reliability === "reliable",
+      JSON.stringify({ status: social?.status, reliability: social?.reliability }),
     );
   }
   const emptyBook = await loadChildEvidenceBook(manifest.children.class_a_trusted_empty.id, {

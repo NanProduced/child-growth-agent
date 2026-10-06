@@ -50,13 +50,10 @@ import type { MediaServiceDeps } from "../../../src/lib/media/runtime";
 import { yayaDataRepository } from "../../../src/lib/yaya/data";
 import type { YayaMessageSourceRef } from "../../../src/lib/yaya/types";
 import type { YayaStoredFragment } from "../../../src/lib/yaya/storage-types";
-import {
-  assertCleanupComplete,
-  runCleanupSteps,
-  type CleanupStep,
-} from "../../harness-safety";
+import { runCleanupSteps, type CleanupStep } from "../../harness-safety";
 import {
   ACCEPTANCE_SCHOOL_ID,
+  AcceptanceResourceError,
   acceptanceCleanupSteps,
   prepareAcceptanceResources,
   verifyAcceptanceResources,
@@ -208,13 +205,30 @@ export async function createAcceptanceSeed(
 
     const verification = await verifyAcceptanceSeed(resources, manifest);
 
-    let tornDown = false;
-    const teardown = async (): Promise<void> => {
-      if (tornDown) return;
-      tornDown = true;
+    // teardown 语义：只有全部资源删除并核实后才进入完成态；失败保留可重试清理与失败信息。
+    // 并发调用共享同一次进行中的清理；成功后幂等返回。
+    let teardownComplete = false;
+    let teardownInFlight: Promise<void> | null = null;
+    const runTeardown = async (): Promise<void> => {
       const issues: string[] = [];
       await runCleanupSteps(cleanupSteps, (label, detail) => issues.push(`${label}: ${detail}`));
-      assertCleanupComplete(issues);
+      if (issues.length > 0) {
+        throw new AcceptanceSeedError(
+          `本轮资源清理未完成（可再次调用 teardown 重试）：${issues.join("；")}`,
+          false,
+          issues,
+        );
+      }
+      teardownComplete = true;
+    };
+    const teardown = (): Promise<void> => {
+      if (teardownComplete) return Promise.resolve();
+      if (!teardownInFlight) {
+        teardownInFlight = runTeardown().finally(() => {
+          teardownInFlight = null;
+        });
+      }
+      return teardownInFlight;
     };
 
     return {
@@ -223,12 +237,15 @@ export async function createAcceptanceSeed(
       verification,
       credentials_path: resources.credentials_path,
       object_root: resources.object_root,
+      container_id: resources.container_id,
       database_url: resources.database_url,
       teardown,
     };
   } catch (error) {
     const issues: string[] = [];
     await runCleanupSteps(cleanupSteps, (label, detail) => issues.push(`${label}: ${detail}`));
+    // 准备阶段失败时 resources 尚未返回：必须继承其结构化清理结果，不能重算为“已清理”。
+    if (error instanceof AcceptanceResourceError) issues.push(...error.cleanup_issues);
     cleanupIssues.push(...issues);
     const message = error instanceof Error ? error.message : String(error);
     throw new AcceptanceSeedError(message, issues.length === 0, issues);
@@ -415,9 +432,10 @@ async function seedAll(
 
   /* ---- 观察（createObservation/updateObservationAiDraft/confirmObservation） ---- */
   const rawTexts: Record<SeedObservationKey, string> = {
-    a1_h1: `${SYNTHETIC_MARK} 王一诺在户外活动时连续双脚交替跳上台阶，落地时能保持平衡，前后跳了十余次。`,
-    a1_h2: `${SYNTHETIC_MARK} 王一诺在下午的体能活动中连续拍球 20 次，中途没有停下，完成后再去喝水。`,
-    a1_h3: `${SYNTHETIC_MARK} 王一诺在本周晨检时测量身高 102 厘米、体重 17 公斤，能独立站直配合测量。`,
+    a1_h1: `${SYNTHETIC_MARK} 集体活动时，王一诺在老师提醒后能自然坐直、站直，保持了大约两分钟。`,
+    a1_h2: `${SYNTHETIC_MARK} 区域活动时，王一诺情绪比较稳定，和同伴商量着轮流玩，没有因一点小事哭闹。`,
+    a1_h3: `${SYNTHETIC_MARK} 午睡起床后，王一诺情绪依然比较稳定，自己穿好鞋子后安静等待，没有因一点小事哭闹。`,
+    a1_h4: `${SYNTHETIC_MARK} 王一诺在本周晨检时测量身高 102 厘米、体重 17 公斤，能独立站直配合测量。`,
     a2_photo: `${SYNTHETIC_MARK} 陈小满用红色和黄色积木搭出一座小桥，还给桥面留出了通道。`,
     a3_empty: `${SYNTHETIC_MARK} 赵小树在阅读区安静翻看绘本，偶尔指着画面微笑。`,
     b1_plain: `${SYNTHETIC_MARK} 王一诺（白桦班）主动把掉落的画笔捡起来放回笔筒。`,
@@ -426,14 +444,15 @@ async function seedAll(
     b4_needs_input: `${SYNTHETIC_MARK} 李小禾在美工区站着看同伴画画。`,
     b5_ai_organized: `${SYNTHETIC_MARK} 吴小溪把不同形状的磁力片按颜色分类。`,
     c1_old: `${SYNTHETIC_MARK} 郑小舟在班级种植角给绿萝浇水，并说“它长大啦”。`,
-    c1_new: `${SYNTHETIC_MARK} 郑小舟在云杉班主动向新同伴介绍玩具的玩法。`,
+    c1_new: `${SYNTHETIC_MARK} 郑小舟在云杉班主动邀请新同伴一起玩玩具，愿意和小朋友一起游戏。`,
     fault_unreadable: `${FAULT_MARK}${SYNTHETIC_MARK} 该观察用于验证指南证据容器不可读时的降级展示。`,
     fault_partial: `${FAULT_MARK}${SYNTHETIC_MARK} 该观察的关联依据与原文不一致，用于验证部分不可核验。`,
   };
   const observationDates: Record<SeedObservationKey, string> = {
     a1_h1: deriveDate(3),
     a1_h2: deriveDate(6),
-    a1_h3: deriveDate(4),
+    a1_h3: deriveDate(9),
+    a1_h4: deriveDate(4),
     a2_photo: deriveDate(5),
     a3_empty: deriveDate(4),
     b1_plain: deriveDate(2),
@@ -450,6 +469,7 @@ async function seedAll(
     a1_h1: { child: "class_a_same_name", klass: "class_a" },
     a1_h2: { child: "class_a_same_name", klass: "class_a" },
     a1_h3: { child: "class_a_same_name", klass: "class_a" },
+    a1_h4: { child: "class_a_same_name", klass: "class_a" },
     a2_photo: { child: "class_a_shared_photo", klass: "class_a" },
     a3_empty: { child: "class_a_trusted_empty", klass: "class_a" },
     b1_plain: { child: "class_b_same_name", klass: "class_b" },
@@ -462,21 +482,33 @@ async function seedAll(
     fault_unreadable: { child: "fault_unreadable", klass: "class_fault" },
     fault_partial: { child: "fault_partial", klass: "class_fault" },
   };
-  const draftFor = (quote: string, objective: string): ObservationDraft => ({
-    domain: "健康",
-    sub_domain: "动作发展",
-    objective_description: objective,
-    highlights: [quote],
-    support_suggestions: [`${SYNTHETIC_MARK} 提供更多自由活动与鼓励`],
-    highlight_quote: quote,
-    teacher_note: `${SYNTHETIC_MARK} 验收夹具`,
-  });
+  const draftMeta: Partial<Record<SeedObservationKey, { domain: string; sub_domain: string }>> = {
+    a1_h1: { domain: "健康", sub_domain: "动作发展" },
+    a1_h2: { domain: "健康", sub_domain: "身心状况" },
+    a1_h3: { domain: "健康", sub_domain: "身心状况" },
+    a1_h4: { domain: "健康", sub_domain: "身心状况" },
+    c1_new: { domain: "社会", sub_domain: "人际交往" },
+  };
+  const draftFor = (key: SeedObservationKey, quote: string, objective: string): ObservationDraft => {
+    const meta = draftMeta[key] ?? { domain: "健康", sub_domain: "动作发展" };
+    return {
+      domain: meta.domain,
+      sub_domain: meta.sub_domain,
+      objective_description: objective,
+      highlights: [quote],
+      support_suggestions: [`${SYNTHETIC_MARK} 提供更多自由活动与鼓励`],
+      highlight_quote: quote,
+      teacher_note: `${SYNTHETIC_MARK} 验收夹具`,
+    };
+  };
+  // 正常种子：原文事实与所关联条目语义一一对应（故意不匹配只出现在故障夹具）
   const quotes: Record<string, string> = {
-    a1_h1: "连续双脚交替跳上台阶",
-    a1_h2: "连续拍球 20 次",
-    a1_h3: "身高 102 厘米、体重 17 公斤",
+    a1_h1: "在老师提醒后能自然坐直、站直",
+    a1_h2: "情绪比较稳定，和同伴商量着轮流玩",
+    a1_h3: "情绪依然比较稳定",
+    a1_h4: "身高 102 厘米、体重 17 公斤",
     b1_plain: "主动把掉落的画笔捡起来",
-    c1_new: "主动向新同伴介绍玩具的玩法",
+    c1_new: "愿意和小朋友一起游戏",
   };
 
   const observations = {} as Record<SeedObservationKey, SeedObservationRef>;
@@ -555,7 +587,7 @@ async function seedAll(
       observations[key].status = waiting.status;
       return;
     }
-    const draft = draftFor(quotes[key] ?? SYNTHETIC_MARK, `${SYNTHETIC_MARK} 合成整理目标`);
+    const draft = draftFor(key, quotes[key] ?? SYNTHETIC_MARK, `${SYNTHETIC_MARK} 合成整理目标`);
     const organized = await updateObservationAiDraft(created.id, draft, "qa-seed1-fixture-model");
     createdObs[key] = organized;
     observations[key].status = organized.status;
@@ -576,6 +608,7 @@ async function seedAll(
   await createAndMaybeConfirm("a1_h1", "confirmed");
   await createAndMaybeConfirm("a1_h2", "confirmed");
   await createAndMaybeConfirm("a1_h3", "confirmed");
+  await createAndMaybeConfirm("a1_h4", "confirmed");
   await createAndMaybeConfirm("a2_photo", "confirmed");
   await createAndMaybeConfirm("a3_empty", "confirmed");
   await createAndMaybeConfirm("b1_plain", "confirmed");
@@ -602,12 +635,21 @@ async function seedAll(
   const behaviorItem = pickItem("behavior", "3-4");
   const sustainedItem = pickItem("sustained", "3-4");
   const healthItem = pickItem("health_reference", "3-4");
+  const socialItem = allItems.find(
+    (item) =>
+      item.age_band === "3-4" &&
+      item.domain_id.includes("social") &&
+      item.product_rules.evidence_type === "behavior",
+  );
+  assert(socialItem, "指南目录缺少社会领域 3-4 岁行为类条目");
   const basisOf = (key: SeedObservationKey, quote: string) => ({
     observation_id: createdObs[key].id,
     quote,
     quote_source: "raw_text" as const,
     quote_field: null,
   });
+  // 条目与事实对照：坐直站直 → 行为条目；两日情绪稳定 → 持续性条目（含期间纪要）；
+  // 晨检身高体重 → 保健参考条目；愿意和同伴游戏 → 社会领域行为条目。
   await applyGuideEvidenceMutation(createdObs.a1_h1.id, {
     action: "confirm",
     expected_guide_revision: 0,
@@ -617,32 +659,38 @@ async function seedAll(
         support: "single_event",
         basis: [basisOf("a1_h1", quotes.a1_h1)],
         adult_help_used: false,
-        teacher_note: `${SYNTHETIC_MARK} 行为类正式依据（夹具）`,
-      },
-      {
-        item_id: sustainedItem.id,
-        support: "sustained",
-        basis: [basisOf("a1_h1", quotes.a1_h1), basisOf("a1_h2", quotes.a1_h2)],
-        sustained_note: {
-          period_start: observationDates.a1_h1,
-          period_end: observationDates.a1_h2,
-          description: `${SYNTHETIC_MARK} 连续一周观察到稳定的动作表现（合成验收纪要）`,
-        },
-        adult_help_used: false,
-        teacher_note: `${SYNTHETIC_MARK} 持续性表现（夹具）`,
+        teacher_note: `${SYNTHETIC_MARK} 坐直站直对应行为类条目（夹具）`,
       },
     ],
   });
-  await applyGuideEvidenceMutation(createdObs.a1_h3.id, {
+  await applyGuideEvidenceMutation(createdObs.a1_h2.id, {
+    action: "confirm",
+    expected_guide_revision: 0,
+    decisions: [
+      {
+        item_id: sustainedItem.id,
+        support: "sustained",
+        basis: [basisOf("a1_h2", quotes.a1_h2), basisOf("a1_h3", quotes.a1_h3)],
+        sustained_note: {
+          period_start: observationDates.a1_h2,
+          period_end: observationDates.a1_h3,
+          description: `${SYNTHETIC_MARK} 跨两日观察到王一诺情绪比较稳定、很少因小事哭闹（合成验收纪要）`,
+        },
+        adult_help_used: false,
+        teacher_note: `${SYNTHETIC_MARK} 情绪稳定持续性表现（夹具）`,
+      },
+    ],
+  });
+  await applyGuideEvidenceMutation(createdObs.a1_h4.id, {
     action: "confirm",
     expected_guide_revision: 0,
     decisions: [
       {
         item_id: healthItem.id,
         support: "single_event",
-        basis: [basisOf("a1_h3", quotes.a1_h3)],
+        basis: [basisOf("a1_h4", quotes.a1_h4)],
         adult_help_used: false,
-        teacher_note: `${SYNTHETIC_MARK} 保健参考类（夹具，不参与行为统计）`,
+        teacher_note: `${SYNTHETIC_MARK} 身高体重对应保健参考类（夹具，不参与行为统计）`,
       },
     ],
   });
@@ -651,20 +699,22 @@ async function seedAll(
     expected_guide_revision: 0,
     decisions: [
       {
-        item_id: behaviorItem.id,
+        item_id: socialItem.id,
         support: "single_event",
         basis: [basisOf("c1_new", quotes.c1_new)],
         adult_help_used: false,
-        teacher_note: `${SYNTHETIC_MARK} 转班后班级聚合（夹具）`,
+        teacher_note: `${SYNTHETIC_MARK} 愿意和同伴游戏对应社会领域条目（夹具）`,
       },
     ],
   });
-  const h1AfterMutation = await getObservation(createdObs.a1_h1.id);
-  const parsedH1 = h1AfterMutation ? parseGuideEvidence(h1AfterMutation.guide_evidence) : { kind: "none" as const };
-  assert(parsedH1.kind === "ok" && parsedH1.links.length === 2, "指南证据写入后应可读取（行为 + 持续性）");
-  const h3AfterMutation = await getObservation(createdObs.a1_h3.id);
-  const parsedH3 = h3AfterMutation ? parseGuideEvidence(h3AfterMutation.guide_evidence) : { kind: "none" as const };
-  assert(parsedH3.kind === "ok" && parsedH3.links.length === 1, "指南证据写入后应可读取（保健参考）");
+  const linkCountOf = async (key: SeedObservationKey): Promise<number> => {
+    const current = await getObservation(createdObs[key].id);
+    const parsed = current ? parseGuideEvidence(current.guide_evidence) : { kind: "none" as const };
+    return parsed.kind === "ok" ? parsed.links.length : -1;
+  };
+  assert((await linkCountOf("a1_h1")) === 1, "指南证据写入后应可读取（行为类）");
+  assert((await linkCountOf("a1_h2")) === 1, "指南证据写入后应可读取（持续性）");
+  assert((await linkCountOf("a1_h4")) === 1, "指南证据写入后应可读取（保健参考）");
 
   /* ---- 媒体：两名幼儿共用一张合成照片，各自事实不同 ---- */
   const image = await syntheticSharedPhoto();
@@ -979,6 +1029,7 @@ async function seedAll(
       behavior_item_id: behaviorItem.id,
       sustained_item_id: sustainedItem.id,
       health_reference_item_id: healthItem.id,
+      social_behavior_item_id: socialItem.id,
     },
     conversations: {
       teacher_a_scenario: {

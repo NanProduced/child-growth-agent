@@ -12,8 +12,8 @@ PostgreSQL 容器**（`scripts/harness-safety.ts`，blob 不变）与 **os.tmpdi
 | `resources.ts` | 隔离 PG 容器 + 对象/凭证目录 + 身份核验 + 精确清理步骤 |
 | `media.ts` | sharp 合成照片（几何图形，无真实幼儿影像） |
 | `seed.ts` | `createAcceptanceSeed()`：账号/班级/幼儿/分班/观察/指南证据/媒体/会话消息/故障夹具 |
-| `verify.ts` | 49 项事实回读（产品读模型 + repository + 表级 SQL） |
-| `run.ts` | 自检：两轮完整种子 + 两轮失败注入 + 残留扫描 |
+| `verify.ts` | 62 项事实回读（产品读模型 + repository + 表级 SQL + 条目/事实语义对照） |
+| `run.ts` | 自检：两轮完整种子 + 三轮失败注入 + 所有权/重试探针 + 精确残留判定 |
 
 ## 用法
 
@@ -24,7 +24,7 @@ const seed = await createAcceptanceSeed();
 try {
   // 被测服务：DATABASE_URL=seed.database_url
   //          MEDIA_LOCAL_ROOT=seed.object_root
-  // 账号口令：seed.credentials_path（tmp、0600；不打印、不进截图）
+  // 账号口令：seed.credentials_path（tmp；不打印、不进截图）
   // 数据标识：seed.manifest
 } finally {
   await seed.teardown();
@@ -37,15 +37,20 @@ try {
 pnpm exec tsx scripts/yaya/acceptance/run.ts
 ```
 
-输出 JSON：两轮 seed_id、回读通过数、失败注入清理结果、残留容器/临时目录数；不打印数据库 URL 与口令。
+输出 JSON：两轮 seed_id、回读通过数、失败注入清理结果、所有权探针、精确残留判定、命名空间内其他实例（仅展示）；
+不打印数据库 URL 与口令。
 
 ## 安全边界
 
 1. 容器身份 = docker run stdout 容器 ID + 运行标签双重核验；删除前再核验，失败不删也不报成功。
-2. 目录必须位于 `os.tmpdir()` 且名字带 `yaya-qa-seed1-` 前缀；越界目录拒绝使用/删除。
+2. 临时目录所有权 = 创建时登记的**本轮精确绝对路径 + seed_id + 用途**（进程内登记表）；
+   仅名字前缀相同的其他实例目录不会被使用或删除；未登记路径一律拒绝。
 3. 进程内已存在 `globalThis.__pgPool` 时直接拒绝运行，避免混用其他数据库连接池。
-4. 失败路径同样执行全部清理步骤，任一未核实成功即非零退出。
-5. 凭证只落本轮 tmp 目录（0600），teardown 删除并核验不存在。
+4. teardown 只有全部资源删除并核实后才进入完成态；失败保留可重试清理与失败信息，重试重新执行全部步骤；
+   准备阶段失败以 `AcceptanceResourceError` 携带结构化清理结果，不重算为“已清理”。
+5. 残留判定只针对本轮登记的精确容器 ID / `label=yaya.qa-seed1=<seed_id>` / 精确目录；
+   命名空间内其他合法实例只展示、不计失败、不清理。
+6. 凭证只落本轮 tmp 目录（尽力 0600；Windows 未验证 ACL 隔离），teardown 删除并核验不存在。
 
 ## 数据与场景
 
