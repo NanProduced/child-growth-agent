@@ -47,21 +47,6 @@ function clientQuery(client: TransactionClient): RowQuery {
   };
 }
 
-async function loadCurrentAccount(runQuery: RowQuery, accountId: string) {
-  const account = await runQuery<AccountRow>(
-    'SELECT id, username, display_name, role, status FROM app_accounts WHERE id = $1',
-    [accountId],
-  );
-  const row = account[0];
-  if (row === undefined) return null;
-  const assignments = await runQuery<{ class_id: string }>(
-    `SELECT class_id FROM teacher_class_assignments
-      WHERE account_id = $1 AND removed_at IS NULL ORDER BY class_id`,
-    [accountId],
-  );
-  return { ...row, class_ids: assignments.map((entry) => entry.class_id) };
-}
-
 function replacedMarker(run: { run_id: string; replaced_by: string | null }): string {
   return run.replaced_by ?? `${run.run_id}#closed`;
 }
@@ -77,30 +62,19 @@ export interface YayaRunBoundaryFacts {
 
 /**
  * 以给定行查询重核当前身份（不缓存任何 Principal）。
- * 返回的 identity.run_id 与原 run 不一致即表示会话/账号绑定或运行状态已不允许继续。
+ * - `forShare=true`：按 AUTH 同序（先账号、再会话）取共享行锁，使并发撤会话/停用账号
+ *   与最后的 run 裁决互斥；锁等待完成后由调用方继续重读事实。
+ * - 返回的 identity.run_id 与原 run 不一致即表示会话/账号绑定或运行状态已不允许继续。
  */
 async function resolveBoundaryIdentity(
   runQuery: RowQuery,
   token: string,
   run: YayaRunBoundaryFacts,
+  forShare: boolean,
 ): Promise<YayaCurrentIdentity> {
   const config = loadAccountsConfig();
   if (config === null) {
     return { run_id: run.run_id, identity_state: 'unavailable', principal: null, session_valid: false };
-  }
-  let session: SessionRow | null;
-  try {
-    const rows = await runQuery<SessionRow>(
-      `SELECT id, account_id, revoked_at IS NULL AND expires_at > clock_timestamp() AS valid
-         FROM app_sessions WHERE token_hash = $1`,
-      [hashSessionToken(token)],
-    );
-    session = rows[0] ?? null;
-  } catch {
-    return { run_id: run.run_id, identity_state: 'unavailable', principal: null, session_valid: false };
-  }
-  if (session === null) {
-    return { run_id: run.run_id, identity_state: 'unauthenticated', principal: null, session_valid: false };
   }
   if (run.state !== 'active' || run.replaced_by !== null) {
     return {
@@ -109,6 +83,34 @@ async function resolveBoundaryIdentity(
       principal: null,
       session_valid: false,
     };
+  }
+  const lockSuffix = forShare ? ' FOR SHARE' : '';
+  let account: AccountRow | null;
+  try {
+    const rows = await runQuery<AccountRow>(
+      `SELECT id, username, display_name, role, status FROM app_accounts WHERE id = $1${lockSuffix}`,
+      [run.owner_account_id],
+    );
+    account = rows[0] ?? null;
+  } catch {
+    return { run_id: run.run_id, identity_state: 'unavailable', principal: null, session_valid: false };
+  }
+  if (account === null) {
+    return { run_id: run.run_id, identity_state: 'unauthenticated', principal: null, session_valid: false };
+  }
+  let session: SessionRow | null;
+  try {
+    const rows = await runQuery<SessionRow>(
+      `SELECT id, account_id, revoked_at IS NULL AND expires_at > clock_timestamp() AS valid
+         FROM app_sessions WHERE token_hash = $1${lockSuffix}`,
+      [hashSessionToken(token)],
+    );
+    session = rows[0] ?? null;
+  } catch {
+    return { run_id: run.run_id, identity_state: 'unavailable', principal: null, session_valid: false };
+  }
+  if (session === null) {
+    return { run_id: run.run_id, identity_state: 'unauthenticated', principal: null, session_valid: false };
   }
   if (session.id !== run.session_id) {
     // 原请求不能由新 session 接续。
@@ -119,19 +121,26 @@ async function resolveBoundaryIdentity(
       session_valid: false,
     };
   }
-  let account: Awaited<ReturnType<typeof loadCurrentAccount>>;
+  if (session.account_id !== account.id) {
+    return { run_id: run.run_id, identity_state: 'unauthenticated', principal: null, session_valid: false };
+  }
+  let assignments: { class_id: string }[];
   try {
-    account = await loadCurrentAccount(runQuery, session.account_id);
+    assignments = await runQuery<{ class_id: string }>(
+      `SELECT class_id FROM teacher_class_assignments
+        WHERE account_id = $1 AND removed_at IS NULL ORDER BY class_id`,
+      [account.id],
+    );
   } catch {
     return { run_id: run.run_id, identity_state: 'unavailable', principal: null, session_valid: false };
-  }
-  if (account === null) {
-    return { run_id: run.run_id, identity_state: 'unauthenticated', principal: null, session_valid: false };
   }
   return {
     run_id: run.run_id,
     identity_state: 'authenticated',
-    principal: buildPrincipal(account, config.schoolId),
+    principal: buildPrincipal(
+      { ...account, class_ids: assignments.map((entry) => entry.class_id) },
+      config.schoolId,
+    ),
     session_valid: session.valid === true,
   };
 }
@@ -161,7 +170,7 @@ export async function resolveYayaRunCurrentIdentity(input: {
   if (run.cancel_requested_at !== null && run.state === 'active') {
     abortYayaRunProcess(run.run_id);
   }
-  return resolveBoundaryIdentity(poolQuery, input.token, run);
+  return resolveBoundaryIdentity(poolQuery, input.token, run, false);
 }
 
 export interface YayaRunBoundaryStop {
@@ -175,6 +184,32 @@ function boundaryStop(reason: YayaAgentStopReason): YayaRunBoundaryStop {
 }
 
 /**
+ * 最后保存边界的身份阶段（与终态 UPDATE 同一事务、同一 client）：
+ * 账号/会话取共享行锁，使并发撤会话/停用账号与本次裁决互斥；返回当前身份。
+ */
+export async function resolveYayaRunBoundaryIdentity(
+  client: TransactionClient,
+  input: { run: YayaRunBoundaryFacts; token: string },
+): Promise<YayaCurrentIdentity> {
+  return resolveBoundaryIdentity(clientQuery(client), input.token, input.run, true);
+}
+
+/** 身份结论 → 应落账的停止终态候选；null 表示身份允许继续 */
+export function boundaryStopForIdentity(
+  identity: YayaCurrentIdentity,
+  run: YayaRunBoundaryFacts,
+): YayaRunBoundaryStop | null {
+  if (identity.identity_state === 'unavailable') return boundaryStop('identity_unavailable');
+  if (identity.identity_state !== 'authenticated' || identity.principal === null) {
+    return boundaryStop('unauthenticated');
+  }
+  if (!identity.session_valid) return boundaryStop('session_invalid');
+  if (identity.principal.account_status !== 'active') return boundaryStop('account_disabled');
+  if (identity.run_id !== run.run_id) return boundaryStop('run_replaced');
+  return null;
+}
+
+/**
  * 最后保存边界的身份重核（与终态 UPDATE 同一事务、同一 client）：
  * 返回 null 表示身份/会话/账号/运行绑定均允许落账；否则返回应落账的停止终态候选。
  */
@@ -182,15 +217,8 @@ export async function verifyYayaRunBoundaryIdentity(
   client: TransactionClient,
   input: { run: YayaRunBoundaryFacts; token: string },
 ): Promise<YayaRunBoundaryStop | null> {
-  const identity = await resolveBoundaryIdentity(clientQuery(client), input.token, input.run);
-  if (identity.identity_state === 'unavailable') return boundaryStop('identity_unavailable');
-  if (identity.identity_state !== 'authenticated' || identity.principal === null) {
-    return boundaryStop('unauthenticated');
-  }
-  if (!identity.session_valid) return boundaryStop('session_invalid');
-  if (identity.principal.account_status !== 'active') return boundaryStop('account_disabled');
-  if (identity.run_id !== input.run.run_id) return boundaryStop('run_replaced');
-  return null;
+  const identity = await resolveYayaRunBoundaryIdentity(client, input);
+  return boundaryStopForIdentity(identity, input.run);
 }
 
 /** 本进程是否是该 run 的活跃派发者（查询五态判定用；与注册表一致，不冒充恢复存储） */

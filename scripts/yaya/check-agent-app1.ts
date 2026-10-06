@@ -191,6 +191,8 @@ interface StubStep {
   status?: number;
   hold?: Promise<void>;
   delay_ms?: number;
+  /** 响应前准备（在调用方进程执行，可做真实数据库/锁交错） */
+  prepare?: () => Promise<void>;
 }
 
 interface StubScenario {
@@ -266,6 +268,7 @@ async function startModelStub(): Promise<ModelStub> {
         }
       }
       const step = scenario.steps[Math.min(index, scenario.steps.length - 1)] ?? {};
+      if (step.prepare) await step.prepare();
       if (step.hold) await step.hold.catch(() => undefined);
       if (step.delay_ms) await new Promise((resolve) => setTimeout(resolve, step.delay_ms));
       response.setHeader('content-type', 'application/json');
@@ -280,7 +283,8 @@ async function startModelStub(): Promise<ModelStub> {
           choices: [{ message: { content: step.content ?? actionAnswer('替身回答') } }],
         }),
       );
-    })().catch(() => {
+    })().catch((error: unknown) => {
+      console.error('stub handler error:', error);
       response.statusCode = 500;
       response.end('{}');
     });
@@ -632,6 +636,8 @@ async function main(): Promise<void> {
   let stub: ModelStub | null = null;
   let server1: ServerHandle | null = null;
   let server2: ServerHandle | null = null;
+  let r2Racer: Client | null = null;
+  let r2Lock: Client | null = null;
   const gates: Array<() => void> = [];
 
   try {
@@ -2204,24 +2210,50 @@ async function main(): Promise<void> {
       { principal: principalFull },
     );
     check('R1-C 恢复片段后重新通过（对照）', restoredFragment.ok);
+    // 真实调用链在重核前会重新解析当前身份/任教范围；用当前数据库事实构造 principal。
+    const freshPrincipalA = async (): Promise<Principal> => {
+      const db = database;
+      if (db === null) throw new Error('database unavailable');
+      const rows = await db.query<{ class_id: string }>(
+        `SELECT class_id FROM teacher_class_assignments
+          WHERE account_id = $1 AND removed_at IS NULL ORDER BY class_id`,
+        [facts.teacherA.id],
+      );
+      return {
+        ...principalFull,
+        scope: { kind: 'classes', class_ids: rows.rows.map((entry) => entry.class_id) },
+      };
+    };
     await database.query(
       'UPDATE teacher_class_assignments SET removed_at = now() WHERE account_id = $1 AND class_id = $2',
       [facts.teacherA.id, facts.classA],
     );
+    const revokedPrincipalNow = await freshPrincipalA();
     const revokedHistory = await revalidateYayaRunContext(
       historyRuntime,
-      { run_id: historyReg.run.run_id, identity: historyIdentity, sources: [], image_ids: [] },
-      { principal: principalFull },
+      {
+        run_id: historyReg.run.run_id,
+        identity: { ...historyIdentity, principal: revokedPrincipalNow },
+        sources: [],
+        image_ids: [],
+      },
+      { principal: revokedPrincipalNow },
     );
     check('R1-C 历史片段来源撤权保守拒绝', !revokedHistory.ok);
     await database.query(
       'UPDATE teacher_class_assignments SET removed_at = NULL WHERE account_id = $1 AND class_id = $2',
       [facts.teacherA.id, facts.classA],
     );
+    const reauthorizedPrincipalNow = await freshPrincipalA();
     const reauthorizedHistory = await revalidateYayaRunContext(
       historyRuntime,
-      { run_id: historyReg.run.run_id, identity: historyIdentity, sources: [], image_ids: [] },
-      { principal: principalFull },
+      {
+        run_id: historyReg.run.run_id,
+        identity: { ...historyIdentity, principal: reauthorizedPrincipalNow },
+        sources: [],
+        image_ids: [],
+      },
+      { principal: reauthorizedPrincipalNow },
     );
     check('R1-C 恢复授权后重新通过（对照）', reauthorizedHistory.ok);
     void recordedFragmentId;
@@ -2358,6 +2390,239 @@ async function main(): Promise<void> {
     );
     await database.query(`UPDATE yaya_runs SET attachment_ids = '[]'::jsonb WHERE id = $1`, [depCorruptRunId]);
 
+    /* ============================== R2：最后保存边界的锁等待与严格解析 ============================== */
+
+    r2Racer = new Client({ connectionString: url });
+    r2Lock = new Client({ connectionString: url });
+    await r2Racer.connect();
+    await r2Lock.connect();
+    const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+    // P1-B：事务在到期前开始，锁等待跨过期限后必须按实际时刻判到期。
+    const r2DeadlineRun = await makeBoundaryRun();
+    await database.query(
+      "UPDATE yaya_runs SET deadline_at = clock_timestamp() + interval '2 seconds' WHERE id = $1",
+      [r2DeadlineRun.run_id],
+    );
+    await r2Racer.query('BEGIN');
+    await r2Racer.query('SELECT id FROM yaya_runs WHERE id = $1 FOR UPDATE', [r2DeadlineRun.run_id]);
+    let r2DeadlineSettled = false;
+    const r2DeadlineFinalize = finalizeYayaRun(
+      r2DeadlineRun.run_id,
+      'app1-check-boundary',
+      candidateAnswered,
+      {
+        verify: (client) =>
+          verifyYayaRunBoundaryIdentity(client, { run: r2DeadlineRun, token: boundarySession.token }),
+      },
+    ).finally(() => {
+      r2DeadlineSettled = true;
+    });
+    await sleepMs(400);
+    check('R2-B 终态保存被 run 行锁挡住（受控交错）', !r2DeadlineSettled);
+    let r2DeadlineExpired = false;
+    for (let attempt = 0; attempt < 160; attempt += 1) {
+      const expired = await database.query<{ expired: boolean }>(
+        'SELECT deadline_at < clock_timestamp() AS expired FROM yaya_runs WHERE id = $1',
+        [r2DeadlineRun.run_id],
+      );
+      if (expired.rows[0]?.expired === true) {
+        r2DeadlineExpired = true;
+        break;
+      }
+      await sleepMs(25);
+    }
+    await r2Racer.query('COMMIT');
+    const r2DeadlineStored = await r2DeadlineFinalize;
+    const r2DeadlineRow = await database.query<{ after_deadline: boolean }>(
+      'SELECT terminal_at > deadline_at AS after_deadline FROM yaya_runs WHERE id = $1',
+      [r2DeadlineRun.run_id],
+    );
+    check('R2-B 锁等待期间 deadline 已到期', r2DeadlineExpired);
+    check(
+      'R2-B 到期后成功候选不落账（记 stopped deadline）',
+      outcomeOf(r2DeadlineStored).kind === 'stopped' && outcomeOf(r2DeadlineStored).reason === 'deadline',
+    );
+    check(
+      'R2-B 落账时间反映实际裁决时刻（晚于 deadline）',
+      r2DeadlineRow.rows[0]?.after_deadline === true,
+    );
+
+    // P1-B：已过期的 active run，保存 hook 必须拒绝。
+    const r2ExpiredHookRun = await makeBoundaryRun();
+    await database.query("UPDATE yaya_runs SET deadline_at = clock_timestamp() - interval '1 second' WHERE id = $1", [
+      r2ExpiredHookRun.run_id,
+    ]);
+    const r2ExpiredHook = await withTransaction((client) =>
+      assertYayaRunActive(client, r2ExpiredHookRun.run_id, 'app1-check-boundary').then(
+        () => 'allowed',
+        () => 'rejected',
+      ),
+    );
+    check('R2-B 已过期 active run 保存 hook 拒绝（锁后判期限）', r2ExpiredHook === 'rejected');
+
+    // P1-A：身份阶段持账号/会话共享锁；撤销在 run 锁等待期间提交时被串行化到原终态之后。
+    const r2SessionRun = await makeBoundaryRun();
+    await r2Racer.query('BEGIN');
+    await r2Racer.query('SELECT id FROM yaya_runs WHERE id = $1 FOR UPDATE', [r2SessionRun.run_id]);
+    let r2SessionSettled = false;
+    const r2SessionFinalize = finalizeYayaRun(
+      r2SessionRun.run_id,
+      'app1-check-boundary',
+      candidateAnswered,
+      {
+        verify: (client) =>
+          verifyYayaRunBoundaryIdentity(client, { run: r2SessionRun, token: boundarySession.token }),
+      },
+    ).finally(() => {
+      r2SessionSettled = true;
+    });
+    await sleepMs(400);
+    check('R2-A 身份阶段完成后被 run 行锁挡住（受控交错）', !r2SessionSettled);
+    let revokeDone = false;
+    const revokePromise = database
+      .query("UPDATE app_sessions SET revoked_at = clock_timestamp() WHERE id = $1", [boundarySessionId])
+      .then(() => {
+        revokeDone = true;
+      });
+    await sleepMs(500);
+    check('R2-A 锁等待期间会话撤销被保存边界锁住（正确串行化）', !revokeDone);
+    await r2Racer.query('COMMIT');
+    const r2SessionStored = await r2SessionFinalize;
+    await revokePromise;
+    const r2RevokedAfter = await database.query<{ revoked: boolean }>(
+      'SELECT revoked_at IS NOT NULL AS revoked FROM app_sessions WHERE id = $1',
+      [boundarySessionId],
+    );
+    check(
+      'R2-A 串行化后原终态落账成功（撤销线性化在后）',
+      outcomeOf(r2SessionStored).kind === 'answered',
+    );
+    check('R2-A 终态提交后撤销才生效', r2RevokedAfter.rows[0]?.revoked === true);
+    await database.query('UPDATE app_sessions SET revoked_at = NULL WHERE id = $1', [boundarySessionId]);
+
+    // P1-A（真实 startYayaRun）：完整投影读取后，终态保存等待 run 锁期间幼儿转班，
+    // 保存边界必须在锁等待后重核已装载来源并拒绝发布旧私域回答。
+    await moveChildA(facts.classA);
+    const r2FinalLockId = `finallock-${randomUUID()}`;
+    const r2FinalLocked = deferred();
+    const r2FinalRelease = deferred();
+    stub.register('[app1:finallock]', [
+      { content: actionRead('get_observation', { observation_id: facts.observationA }) },
+      {
+        prepare: async () => {
+          const db = database;
+          if (db === null) throw new Error('database unavailable');
+          const rows = await db.query<{ id: string }>(
+            'SELECT id FROM yaya_runs WHERE client_request_id = $1',
+            [r2FinalLockId],
+          );
+          const serviceRunId = rows.rows[0]?.id;
+          if (!serviceRunId) throw new Error('finallock run not found');
+          await r2Lock!.query('BEGIN');
+          await r2Lock!.query('SELECT id FROM yaya_runs WHERE id = $1 FOR UPDATE', [serviceRunId]);
+          r2FinalLocked.resolve();
+          void (async () => {
+            await r2FinalRelease.promise;
+            await r2Lock!.query('COMMIT').catch(() => undefined);
+          })();
+        },
+        content: actionAnswer('不应发布旧私域内容。', [`observation:${facts.observationA}`]),
+      },
+    ]);
+    const r2FinalLockPromise = postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: r2FinalLockId,
+        user_text: '[app1:finallock] 最后保存边界',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await r2FinalLocked.promise;
+    await stub.waitForRequest('[app1:finallock]', 2);
+    // run 行锁持有期间：服务端的终态保存必须停在 active，不得先行落账。
+    await sleepMs(800);
+    const r2FinalStateWhileLocked = await database.query<{ state: string }>(
+      'SELECT state FROM yaya_runs WHERE client_request_id = $1',
+      [r2FinalLockId],
+    );
+    check(
+      'R2-A 锁持有期间终局未落账（仍 active）',
+      r2FinalStateWhileLocked.rows[0]?.state === 'active',
+    );
+    await moveChildA(facts.classB);
+    r2FinalRelease.resolve();
+    const r2FinalParsed = parseLines(await openNdjson(await r2FinalLockPromise).collect());
+    check(
+      'R2-A 锁等待期间来源降级 → 拒绝发布旧私域回答（context_revoked）',
+      r2FinalParsed.verdict.ok &&
+        r2FinalParsed.verdict.outcome.kind === 'stopped' &&
+        r2FinalParsed.verdict.outcome.reason === 'context_revoked' &&
+        !r2FinalParsed.events.some((event) => event.type === 'answer'),
+    );
+    await moveChildA(facts.classA);
+
+    // P2-C：非法 ref 与合法 message/fragment（或 image）选择器并存时不得豁免。
+    const mixedSelector = parseStoredDependencies([
+      {
+        ref: { kind: 'alien', ref_id: 'observation:unknown', label: null, derived_from: null },
+        tool: 'get_observation',
+        image_id: null,
+        message_id: 'some-message',
+        fragment_id: 'some-fragment',
+        projection: 'full',
+      },
+    ]);
+    check(
+      'R2-C 未知 ref 与合法 message/fragment 并存 → 整组损坏',
+      mixedSelector.corrupt === true && mixedSelector.dependencies.length === 0,
+    );
+    const mixedImage = parseStoredDependencies([
+      {
+        ref: { kind: 'alien', ref_id: 'observation:unknown', label: null, derived_from: null },
+        tool: null,
+        image_id: 'image-1',
+        message_id: null,
+        fragment_id: null,
+        projection: 'any',
+      },
+    ]);
+    check(
+      'R2-C 未知 ref 与合法 image 选择器并存 → 整组损坏',
+      mixedImage.corrupt === true && mixedImage.dependencies.length === 0,
+    );
+    const nullRefImage = parseStoredDependencies([
+      {
+        ref: null,
+        tool: null,
+        image_id: 'image-1',
+        message_id: null,
+        fragment_id: null,
+        projection: 'any',
+      },
+    ]);
+    check(
+      'R2-C 合法 ref=null + image 选择器仍有效（对照）',
+      nullRefImage.corrupt === false && nullRefImage.dependencies.length === 1,
+    );
+    const validRefPair = parseStoredDependencies([
+      {
+        ref: { kind: 'tool_result', ref_id: `observation:${facts.observationA}`, label: null, derived_from: null },
+        tool: 'get_observation',
+        image_id: null,
+        message_id: 'm-1',
+        fragment_id: 'f-1',
+        projection: 'full',
+      },
+    ]);
+    check(
+      'R2-C 合法 ref + message/fragment 选择器仍有效（对照）',
+      validRefPair.corrupt === false && validRefPair.dependencies.length === 1,
+    );
+
     /* ============================== 中断恢复标记 ============================== */
 
     await database.query(
@@ -2435,6 +2700,23 @@ async function main(): Promise<void> {
             if (!server1) return;
             const report = await stopTrackedChildTree(server1.tracked);
             if (!report.ok) throw new Error(`${report.detail}\n${readLogTail(server1.tracked, 30)}`);
+          },
+        },
+        {
+          label: 'r2-clients',
+          run: async () => {
+            for (const [label, client] of [
+              ['r2-racer', r2Racer],
+              ['r2-lock', r2Lock],
+            ] as const) {
+              if (!client) continue;
+              try {
+                await client.query('ROLLBACK').catch(() => undefined);
+                await client.end();
+              } catch (error) {
+                throw new Error(`${label}: ${String(error)}`);
+              }
+            }
           },
         },
         {

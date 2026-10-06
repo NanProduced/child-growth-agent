@@ -133,7 +133,13 @@ function parseStoredSourceRef(value: unknown): YayaSourceRef | null {
  */
 function parseStrictDependency(value: unknown): YayaRunDependency | null {
   if (!isRecord(value)) return null;
-  const ref = parseStoredSourceRef(value.ref);
+  // 合法 ref=null 与非空 ref 解析失败必须区分：任何非空 ref 的未知 kind、缺字段或
+  // 非法类型都使整组不可核验，不得因同一目另有合法 message/image 选择器而豁免。
+  let ref: YayaSourceRef | null = null;
+  if (value.ref !== null && value.ref !== undefined) {
+    ref = parseStoredSourceRef(value.ref);
+    if (ref === null) return null;
+  }
   const tool = parseOptionalNonEmptyString(value.tool);
   const imageId = parseOptionalNonEmptyString(value.image_id);
   const messageId = parseOptionalNonEmptyString(value.message_id);
@@ -388,18 +394,26 @@ const DEADLINE_OUTCOME = { kind: 'stopped', reason: 'deadline', detail: null } a
 
 export interface YayaRunFinalizeOptions {
   /**
-   * 同一保存边界内的当前身份重核（使用同一 TransactionClient）：
-   * 返回非空停止终态候选时，最终裁决优先按停止落账（取消/替换/到期仍优先）。
+   * run 行锁之前的身份阶段（同一 TransactionClient）：
+   * 账号/会话取共享行锁并重核当前身份；返回非空停止候选时按该停止落账
+   * （取消/替换/到期仍优先）。
    */
   verify?: (client: TransactionClient) => Promise<unknown | null>;
+  /**
+   * run 行锁**等待完成后**的来源阶段（同一 TransactionClient）：
+   * 以锁后的当前事实重核已装载来源/历史/图片投影；返回非空停止候选时按该停止落账。
+   */
+  verifyProjections?: (client: TransactionClient) => Promise<unknown | null>;
 }
 
 /**
  * 终态落库（最后保存边界）：
- * - 在同一短事务内先做可选身份重核，再用条件更新原子核对
- *   `state='active' AND owner_instance=$`、取消、替换与 deadline；
- * - 已被取消 / 替换 / 到期时，成功候选不得落账，改落对应的合法停止终态；
- * - 行已被外部终态化时返回其已存终态（可核准），否则返回 null（不得当作当前结果发布）。
+ * 1. 身份阶段（可选 `verify`）：账号/会话共享锁 + 身份重核；
+ * 2. `SELECT ... FOR UPDATE` 取得 run 行锁（如被占用则等待，锁序为 账号/会话 → run）；
+ * 3. 来源阶段（可选 `verifyProjections`）：按锁等待后的当前事实重核已装载投影；
+ * 4. 条件更新：`state='active' AND owner_instance=$` + 取消/替换/到期裁决；
+ *    deadline 与 terminal_at 使用 `clock_timestamp()`（实际裁决时刻，不掩盖锁等待）；
+ * 5. 行已被外部终态化时返回其已存终态，否则返回 null（不得当作当前结果发布）。
  */
 export async function finalizeYayaRun(
   runId: string,
@@ -413,16 +427,30 @@ export async function finalizeYayaRun(
       const forced = await options.verify(client);
       if (forced !== null && forced !== undefined) candidate = forced;
     }
+    const locked = await client.query<{ data: unknown }>(
+      `SELECT ${RUN_SELECT} FROM yaya_runs r WHERE r.id = $1 FOR UPDATE`,
+      [runId],
+    );
+    if (!locked.rows[0]) return null;
+    const current = parseYayaRunRecord(locked.rows[0].data);
+    if (current === null) return null;
+    if (current.state !== 'active' || current.owner_instance !== ownerInstance) {
+      return current.state === 'terminal' ? current : null;
+    }
+    if (options.verifyProjections !== undefined) {
+      const forced = await options.verifyProjections(client);
+      if (forced !== null && forced !== undefined) candidate = forced;
+    }
     const updated = await client.query<{ data: unknown }>(
       `UPDATE yaya_runs
           SET state = 'terminal',
               outcome = CASE
                 WHEN yaya_runs.cancel_requested_at IS NOT NULL THEN $3::jsonb
                 WHEN yaya_runs.replaced_by IS NOT NULL THEN $4::jsonb
-                WHEN yaya_runs.deadline_at <= now() THEN $5::jsonb
+                WHEN yaya_runs.deadline_at <= clock_timestamp() THEN $5::jsonb
                 ELSE $6::jsonb
               END,
-              terminal_at = now(), updated_at = now()
+              terminal_at = clock_timestamp(), updated_at = clock_timestamp()
         WHERE yaya_runs.id = $1 AND yaya_runs.state = 'active' AND yaya_runs.owner_instance = $2
         RETURNING ${RUN_RETURNING}`,
       [
@@ -434,13 +462,7 @@ export async function finalizeYayaRun(
         JSON.stringify(candidate ?? null),
       ],
     );
-    if (updated.rows[0]) return parseYayaRunRecord(updated.rows[0].data);
-    const fallback = await client.query<{ data: unknown }>(
-      `SELECT ${RUN_SELECT} FROM yaya_runs r WHERE r.id = $1`,
-      [runId],
-    );
-    const record = fallback.rows[0] ? parseYayaRunRecord(fallback.rows[0].data) : null;
-    return record !== null && record.state === 'terminal' ? record : null;
+    return updated.rows[0] ? parseYayaRunRecord(updated.rows[0].data) : null;
   });
 }
 
@@ -511,6 +533,14 @@ export async function assertYayaRunActive(
     current.replaced_by !== null
   ) {
     throw new YayaRunInactiveError();
+  }
+  // 期限必须在取得行锁之后按实际当前时刻判定（锁等待可能跨过 deadline）。
+  const deadline = await client.query<{ expired: boolean }>(
+    'SELECT deadline_at <= clock_timestamp() AS expired FROM yaya_runs WHERE id = $1',
+    [runId],
+  );
+  if (deadline.rows[0]?.expired === true) {
+    throw new YayaRunInactiveError('运行已超过时间上限，拒绝保存迟到结果。');
   }
 }
 

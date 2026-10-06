@@ -235,3 +235,64 @@
 未新增真实模型额度消耗。生成物已还原、容器/媒体根/进程树清理闸门通过。
 
 NOT_RUN 同 §7：真实模型质量、真实浏览器、生产迁移/部署、代理长连接仍不在本轮。
+
+## 10. R2 返修：收紧共享保存边界与解析器
+
+起点 `722b8fab26ab5be2be712b3999cb686f5e9f4bbf`（主评审 P1-A/P1-B/P2-C 见 R1 评审记录）。
+只改 APP1 runtime、专属检查与本文件；**无 DDL 变更**；冻结类型/API0/内核/LLM/AUTH/DATA/MEDIA/READ1/harness/package/lock 未改；
+未新增审批框架、状态库或全局锁；模型调用保持事务外；API 流仍唯一一致终态、结果未知只查原身份、不重发。
+
+### 10.1 RED→GREEN
+
+先按真实时序反例入库（两连接行锁交错、真实 `startYayaRun` + READ1 + 锁内转班、纯解析反例），
+在原候选上实测 RED：`131/139`，失败 8 项；
+再修共享根因后 GREEN：`139/139`，`failures: []`，清理闸门通过。
+
+| 场景 | RED（R1 候选实测） | GREEN（R2 实测） |
+|---|---|---|
+| 最后保存身份边界 | 身份核验先于 run 行锁；锁等待期间撤销已提交仍落账 answered | 身份阶段先取账号→会话共享锁（AUTH 同序），持锁至终态提交；锁等待期间的会话撤被串行化到原终态之后，提交后撤销才生效 |
+| 最后保存来源边界 | 真实 `startYayaRun` 完整投影 → 终态 UPDATE 等锁 → 转班 → 仍发布私有标记 answer | run 行锁等待完成后，以**同一 client**重跑全部已装载来源/历史/图片投影；降级即 `stopped(context_revoked)`，无 answer |
+| 到期判断 | `deadline_at <= now()`（事务开始时刻）：锁等待跨过期限仍落 answered，`terminal_at` 还早于 deadline | 取得 run 行锁后按 `clock_timestamp()` 裁决；跨期限落 `stopped(deadline)`，`terminal_at` 反映实际裁决时刻 |
+| 保存 hook 期限 | 已过期 active run 返回 allowed | `assertYayaRunActive` 取得行锁后按实际时刻判期限并拒绝 |
+| 严格解析 | 非法 ref + 合法 message/fragment（或 image）并存时非法 ref 被吞成 null，整条通过 | 非空 ref 解析失败即整组 `dependencies_corrupt`；合法 `ref=null`+image 与合法 ref+message/fragment 对照仍有效 |
+
+### 10.2 实现要点
+
+- `store.ts::finalizeYayaRun` 同一短事务顺序：`verify` 身份阶段 → `SELECT … FOR UPDATE` 等 run 行锁
+  → `verifyProjections` 来源阶段 → 条件更新（active/owner_instance + 取消/替换/clock_timestamp 到期）；
+  行已被外部终态化时返回已存终态；到期与 `terminal_at` 均用 `clock_timestamp()`。
+- `identity.ts`：`resolveYayaRunBoundaryIdentity` 以 AUTH 锁序（账号→会话）取共享行锁并重核身份；
+  `boundaryStopForIdentity` 统一身份结论；引擎边界的 `resolveCurrentIdentity` 保持无锁快路径。
+- `context.ts`：抽出 `revalidateYayaRunContextWithClient`（资源事实、历史投影、图片授权全部走同一 client），
+  引擎异步边界包一层短事务复用同一核心；图片重核用 `bindDataAttachmentMetadataPort(client)` 与同事务记录授权事实。
+- `dependencies` 快照解析：`ref=null`（合法空）与非空 ref 解析失败严格区分；未知 kind/缺字段/非法类型不因其他选择器合法而豁免。
+- 正常成功、合法停止、已持久化终态后的取消不回溯、fallback 已存终态发布分支全部共用同一核验。
+
+### 10.3 R2 文件清单（在 R1 七文件基础上）
+
+| 文件 | 变更 |
+|---|---|
+| `src/lib/yaya/agent/runtime/store.ts` | finalize 锁序与双阶段核验；clock_timestamp 到期/时间；hook 锁后判期限；非空 ref 严格解析 |
+| `src/lib/yaya/agent/runtime/identity.ts` | 账号→会话共享锁的边界身份核验与结论导出 |
+| `src/lib/yaya/agent/runtime/context.ts` | 同 client 重核核心（资源/历史/图片）与引擎包装 |
+| `src/lib/yaya/agent/runtime/service.ts` | 保存边界绑定身份+投影双阶段；查询重核异常保守不可展示 |
+| `scripts/yaya/check-agent-app1.ts` | 原 139 项（R1 后）新增 14 项 R2 正反例；R1-C 撤权对照改用当前数据库事实 |
+| `docs/yaya-v1/agent-app1-delivery.md` | 本 R2 章节 |
+
+`deps.ts`、迁移与表结构在本轮未改。
+
+### 10.4 R2 验收（本候选实跑）
+
+| 检查 | 结果 |
+|---|---|
+| 专属验收 | **139/139**（原 78 + R1 46 + R2 14），`failures: []`，清理闸门通过 |
+| `pnpm validate` / `pwsh scripts/build.ps1` | 通过 |
+| check-preflight / contract / api-contract | 15/15 / 68/68 / 57/57 |
+| check-agent-engine / agent-llm | 29/29 / 7/7（`real_model_requests: 0`） |
+| check-tools-read / data / media | 189/189 / 27/27 / 28/28 |
+
+分层同 §9：真实 next dev HTTP、真实 AUTH/PG/DATA/READ1/sharp+本地对象根、两连接真实行锁交错与真实
+`startYayaRun` 交错；模型替身为本地 StepFun 协议服务（真实 `llm.ts` 路径）；真实 provider/搜索/S3/托管库请求 0，
+新增 20 次真实额度未动。清理精确核验通过（容器/媒体根/进程树/两连接客户端/生成物还原）。
+
+NOT_RUN 同 §7/§9。

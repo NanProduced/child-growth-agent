@@ -12,15 +12,21 @@
  *   任何不可核验都保守返回 context_revoked，不继续消费旧私域数据。
  */
 import { authorizeAction } from '@/lib/accounts/authorize';
+import { loadAccountsConfig } from '@/lib/accounts/config';
 import type { HeaderCarrier } from '@/lib/accounts/guards';
 import type { AccessAction, AccessResource, Principal } from '@/lib/accounts/types';
 import { withPrivateRead, yayaDataRepository } from '@/lib/yaya/data';
 import { projectMessageRow } from '@/lib/yaya/data/projection';
 import type { YayaMessageRow } from '@/lib/yaya/data/rows';
-import { evaluateAttachmentRead, loadAttachmentContent } from '@/lib/media/content-service';
+import { bindDataAttachmentMetadataPort } from '@/lib/media/data-adapter';
+import {
+  evaluateAttachmentRead,
+  loadAttachmentContent,
+  type RecordAccessLoader,
+} from '@/lib/media/content-service';
 import { createDatabaseRecordAccessLoader } from '@/lib/media/record-access';
 import { mediaRuntimeOrThrow } from '@/lib/media/runtime';
-import { queryOne } from '@/storage/database/pg-client';
+import { query, withTransaction, type TransactionClient } from '@/storage/database/pg-client';
 
 import type {
   YayaAuthorizedImage,
@@ -277,27 +283,41 @@ const AGGREGATE_SCOPE_SOURCES = new Set([
   'classes:catalog',
 ]);
 
-function readResourceFacts(
+type RowQuery = <T>(sql: string, params?: unknown[]) => Promise<T[]>;
+
+const poolRows: RowQuery = (sql, params) => query(sql, params);
+
+function clientRows(client: TransactionClient): RowQuery {
+  return async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
+    const result = await client.query(sql, params as never[]);
+    return result.rows as T[];
+  };
+}
+
+/** 资源事实读取按调用方给的行查询执行（池或同一保存事务 client） */
+async function readResourceFactsWith(
+  runQuery: RowQuery,
   kind: 'child' | 'class' | 'observation',
   id: string,
 ): Promise<AccessResource | null> {
   if (kind === 'class') {
-    return queryOne<{ id: string }>('SELECT id FROM classes WHERE id = $1', [id]).then((row) =>
-      row === null ? null : { kind: 'class', class_id: id },
-    );
+    const rows = await runQuery<{ id: string }>('SELECT id FROM classes WHERE id = $1', [id]);
+    return rows[0] === undefined ? null : { kind: 'class', class_id: id };
   }
   if (kind === 'child') {
-    return queryOne<{ current_class_id: string | null }>(
+    const rows = await runQuery<{ current_class_id: string | null }>(
       `SELECT (SELECT e.class_id FROM child_class_enrollments e
                 WHERE e.child_id = c.id AND e.end_date IS NULL
                 ORDER BY e.start_date DESC LIMIT 1) AS current_class_id
          FROM children c WHERE c.id = $1`,
       [id],
-    ).then((row) =>
-      row === null ? null : { kind: 'child', child_id: id, current_class_id: row.current_class_id },
     );
+    const row = rows[0];
+    return row === undefined
+      ? null
+      : { kind: 'child', child_id: id, current_class_id: row.current_class_id };
   }
-  return queryOne<{
+  const rows = await runQuery<{
     child_id: string;
     observed_class_id: string | null;
     current_class_id: string | null;
@@ -311,18 +331,18 @@ function readResourceFacts(
             to_jsonb(o.*)->>'created_by_account_id' AS author_account_id
        FROM observations o WHERE o.id = $1`,
     [id],
-  ).then((row) =>
-    row === null
-      ? null
-      : {
-          kind: 'observation',
-          observation_id: id,
-          child_id: row.child_id,
-          current_class_id: row.current_class_id,
-          observed_class_id: row.observed_class_id,
-          author_account_id: row.author_account_id,
-        },
   );
+  const row = rows[0];
+  return row === undefined
+    ? null
+    : {
+        kind: 'observation',
+        observation_id: id,
+        child_id: row.child_id,
+        current_class_id: row.current_class_id,
+        observed_class_id: row.observed_class_id,
+        author_account_id: row.author_account_id,
+      };
 }
 
 /** business_scope 边界探针：复用 AUTH `class.catalog.read` 的当前范围判定（空任教/无范围拒绝） */
@@ -344,7 +364,8 @@ function scopeBoundaryAllows(principal: Principal): boolean {
  * - scope/目录来源走原 scope 边界；指南引用只要求有效账号（authenticated_reference）；
  * - 教师账号引用要求管理员 + 全园范围；未知引用保守拒绝。
  */
-export async function recheckYayaRunDependency(
+export async function recheckYayaRunDependencyWith(
+  runQuery: RowQuery,
   principal: Principal,
   dependency: YayaRunDependency,
 ): Promise<boolean> {
@@ -387,12 +408,24 @@ export async function recheckYayaRunDependency(
   } else {
     return false;
   }
-  const facts = await readResourceFacts(prefix as 'child' | 'class' | 'observation', id);
+  const facts = await readResourceFactsWith(
+    runQuery,
+    prefix as 'child' | 'class' | 'observation',
+    id,
+  );
   if (facts === null) return false;
   const decision = authorizeAction(principal, action, facts);
   if (!decision.allowed) return false;
   if (requiredProjection === 'full' && decision.projection !== 'full') return false;
   return true;
+}
+
+/** 池查询便捷封装（引擎/查询路径）；保存边界用同一 client 版本 */
+export function recheckYayaRunDependency(
+  principal: Principal,
+  dependency: YayaRunDependency,
+): Promise<boolean> {
+  return recheckYayaRunDependencyWith(poolRows, principal, dependency);
 }
 
 /**
@@ -401,8 +434,10 @@ export async function recheckYayaRunDependency(
  * - 只有该片段当前仍为 full 才放行；删除、损坏、来源撤权、会话删除一律保守拒绝；
  * - 不扩大模型历史加载（loadHistory 仍保留 20 条上限）。
  */
-async function recheckHistory(
+async function recheckHistoryWith(
+  client: TransactionClient,
   state: YayaRunRuntimeState,
+  principal: Principal,
   denied: string[],
 ): Promise<void> {
   const snapshots = [...state.dependencies.values()].filter(
@@ -410,77 +445,93 @@ async function recheckHistory(
   );
   if (snapshots.length === 0) return;
   const messageIds = [...new Set(snapshots.map((dependency) => dependency.message_id as string))];
-  let deniedKeys: string[];
   try {
-    deniedKeys = await withPrivateRead(state.carrier, async ({ client, principal, schoolId }) => {
-      const conversation = await yayaDataRepository.getConversation(
-        client,
-        principal.account_id,
-        state.run.conversation_id,
-      );
-      if (conversation === null) {
-        return snapshots.map(
-          (dependency) => `${dependency.message_id as string}#${dependency.fragment_id as string}`,
-        );
-      }
-      const result = await client.query<{ data: unknown }>(
-        'SELECT to_jsonb(m.*) AS data FROM yaya_messages m WHERE m.id = ANY($1::varchar[])',
-        [messageIds],
-      );
-      const byId = new Map<string, Record<string, unknown>>();
-      for (const row of result.rows) {
-        if (isRecord(row.data) && typeof row.data.id === 'string') byId.set(row.data.id, row.data);
-      }
-      const localDenied: string[] = [];
-      for (const dependency of snapshots) {
-        const messageId = dependency.message_id as string;
-        const fragmentId = dependency.fragment_id as string;
-        const key = `${messageId}#${fragmentId}`;
-        const raw = byId.get(messageId);
-        if (
-          raw === undefined ||
-          (raw.deleted_at !== null && raw.deleted_at !== undefined) ||
-          raw.owner_account_id !== principal.account_id
-        ) {
-          localDenied.push(key);
-          continue;
-        }
-        let visible = false;
-        try {
-          const projection = await projectMessageRow(
-            client,
-            principal,
-            schoolId,
-            raw as unknown as YayaMessageRow,
-          );
-          const fragment = projection.fragments.find((entry) => entry.fragment_id === fragmentId);
-          visible = fragment !== undefined && fragment.visibility === 'full' && fragment.text !== null;
-        } catch {
-          visible = false;
-        }
-        if (!visible) localDenied.push(key);
-      }
-      return localDenied;
-    });
-  } catch {
-    deniedKeys = snapshots.map(
-      (dependency) => `${dependency.message_id as string}#${dependency.fragment_id as string}`,
+    const conversation = await yayaDataRepository.getConversation(
+      client,
+      principal.account_id,
+      state.run.conversation_id,
     );
+    if (conversation === null) {
+      for (const dependency of snapshots) {
+        denied.push(`${dependency.message_id as string}#${dependency.fragment_id as string}`);
+      }
+      return;
+    }
+    const result = await client.query<{ data: unknown }>(
+      'SELECT to_jsonb(m.*) AS data FROM yaya_messages m WHERE m.id = ANY($1::varchar[])',
+      [messageIds],
+    );
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const row of result.rows) {
+      if (isRecord(row.data) && typeof row.data.id === 'string') byId.set(row.data.id, row.data);
+    }
+    for (const dependency of snapshots) {
+      const messageId = dependency.message_id as string;
+      const fragmentId = dependency.fragment_id as string;
+      const key = `${messageId}#${fragmentId}`;
+      const raw = byId.get(messageId);
+      if (
+        raw === undefined ||
+        (raw.deleted_at !== null && raw.deleted_at !== undefined) ||
+        raw.owner_account_id !== principal.account_id
+      ) {
+        denied.push(key);
+        continue;
+      }
+      let visible = false;
+      try {
+        const projection = await projectMessageRow(
+          client,
+          principal,
+          loadAccountsConfig()?.schoolId ?? 'yaya-school',
+          raw as unknown as YayaMessageRow,
+        );
+        const fragment = projection.fragments.find((entry) => entry.fragment_id === fragmentId);
+        visible = fragment !== undefined && fragment.visibility === 'full' && fragment.text !== null;
+      } catch {
+        visible = false;
+      }
+      if (!visible) denied.push(key);
+    }
+  } catch {
+    for (const dependency of snapshots) {
+      denied.push(`${dependency.message_id as string}#${dependency.fragment_id as string}`);
+    }
   }
-  for (const key of deniedKeys) denied.push(key);
 }
 
-async function recheckImages(state: YayaRunRuntimeState, denied: string[], viewer: Principal): Promise<void> {
+/** 图片重核用同一 client 的元数据/引用读取，并在同一事务内复读记录授权事实 */
+async function recheckImagesWith(
+  client: TransactionClient,
+  state: YayaRunRuntimeState,
+  viewer: Principal,
+  denied: string[],
+): Promise<void> {
   const imageIds = [...state.image_ids];
   if (imageIds.length === 0) return;
   let runtime;
   try {
-    runtime = mediaRuntimeOrThrow();
+    runtime = {
+      ...mediaRuntimeOrThrow(),
+      metadata: bindDataAttachmentMetadataPort(client),
+    };
   } catch {
     for (const imageId of imageIds) denied.push(imageId);
     return;
   }
-  const loadRecordAccess = createDatabaseRecordAccessLoader(viewer);
+  const runQuery = clientRows(client);
+  const loadRecordAccess: RecordAccessLoader = async (record) => {
+    if (record.record_kind !== 'observation') return null;
+    const facts = await readResourceFactsWith(runQuery, 'observation', record.record_id);
+    if (facts === null) return null;
+    const decision = authorizeAction(viewer, 'observation.read', facts);
+    if (!decision.allowed) return null;
+    return {
+      record_kind: 'observation',
+      record_id: record.record_id,
+      projection: decision.projection === 'historical_read_only' ? 'historical_read_only' : 'full',
+    };
+  };
   for (const attachmentId of imageIds) {
     try {
       const evaluation = await evaluateAttachmentRead(runtime, {
@@ -496,14 +547,14 @@ async function recheckImages(state: YayaRunRuntimeState, denied: string[], viewe
 }
 
 /**
- * 正式 `revalidateProjectedContext`：
- * 引擎传入的 sources/image_ids 与本 run 累积依赖合并后逐项重核；
- * 任何一个不可核验（含加载阶段失败）都返回 `context_revoked` 并列出拒绝引用。
+ * 正式 `revalidateProjectedContext` 的共享核心：全部读取都在传入的同一 client 上执行，
+ * 供引擎异步边界与最后保存边界（run 锁等待之后）复用。
  */
-export async function revalidateYayaRunContext(
+export async function revalidateYayaRunContextWithClient(
   state: YayaRunRuntimeState,
   input: YayaContextRevalidationInput,
   identity: { principal: Principal | null },
+  client: TransactionClient,
 ): Promise<YayaContextRevalidation> {
   if (state.load_failed) {
     return { ok: false, reason: 'context_revoked', denied_refs: ['context_load_failed'] };
@@ -536,13 +587,14 @@ export async function revalidateYayaRunContext(
     const key = yayaRunDependencyKey(dependency);
     if (!dependencies.has(key)) dependencies.set(key, dependency);
   }
+  const runQuery = clientRows(client);
   const denied: string[] = [];
   for (const dependency of dependencies.values()) {
-    // 历史片段依赖由 recheckHistory 重跑当前投影校验；这里不再按 provenance ref 单独判资源。
+    // 历史片段依赖由 recheckHistoryWith 重跑当前投影校验；这里不再按 provenance ref 单独判资源。
     if (dependency.message_id !== null) continue;
     let allowed = false;
     try {
-      allowed = await recheckYayaRunDependency(principal, dependency);
+      allowed = await recheckYayaRunDependencyWith(runQuery, principal, dependency);
     } catch {
       allowed = false;
     }
@@ -556,11 +608,25 @@ export async function revalidateYayaRunContext(
       );
     }
   }
-  await recheckHistory(state, denied);
-  await recheckImages(state, denied, principal);
+  await recheckHistoryWith(client, state, principal, denied);
+  await recheckImagesWith(client, state, principal, denied);
   const unique = [...new Set(denied)];
   if (unique.length > 0) {
     return { ok: false, reason: 'context_revoked', denied_refs: unique };
   }
   return { ok: true };
+}
+
+/**
+ * 引擎异步边界的重核入口：用短事务的同一 client 执行共享核心；
+ * 连接/查询失败向上抛出，由引擎按保守停止处理。
+ */
+export async function revalidateYayaRunContext(
+  state: YayaRunRuntimeState,
+  input: YayaContextRevalidationInput,
+  identity: { principal: Principal | null },
+): Promise<YayaContextRevalidation> {
+  return withTransaction((client) =>
+    revalidateYayaRunContextWithClient(state, input, identity, client),
+  );
 }

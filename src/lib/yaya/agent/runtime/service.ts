@@ -37,6 +37,7 @@ import { runYayaAgent } from '../engine';
 import {
   DEFAULT_YAYA_AGENT_LIMITS,
   type YayaAgentEvent,
+  type YayaCurrentIdentity,
   type YayaRunOutcome,
 } from '../types';
 
@@ -44,9 +45,14 @@ import {
   createYayaRunRuntimeState,
   createYayaRunRuntimeStateFromRecord,
   revalidateYayaRunContext,
+  revalidateYayaRunContextWithClient,
 } from './context';
 import { createYayaRunDependencies, type YayaRunDependencyOptions } from './deps';
-import { isYayaRunOwnedByThisProcess, verifyYayaRunBoundaryIdentity } from './identity';
+import {
+  boundaryStopForIdentity,
+  isYayaRunOwnedByThisProcess,
+  resolveYayaRunBoundaryIdentity,
+} from './identity';
 import {
   abortYayaRunProcess,
   getYayaRunProcessInstanceId,
@@ -196,12 +202,17 @@ async function runTerminalPresentable(
     principal,
     session_valid: true,
   };
-  const verdict = await revalidateYayaRunContext(
-    state,
-    { run_id: run.run_id, identity, sources: [], image_ids: [] },
-    { principal },
-  );
-  return verdict.ok;
+  try {
+    const verdict = await revalidateYayaRunContext(
+      state,
+      { run_id: run.run_id, identity, sources: [], image_ids: [] },
+      { principal },
+    );
+    return verdict.ok;
+  } catch {
+    // 查询路径重核不可用：保守不展示旧内容
+    return false;
+  }
 }
 
 /** 终局事件只能从**已持久化裁决**的终态构造，保证事件流与库逐字一致 */
@@ -325,9 +336,26 @@ async function driveRun(input: {
     });
     let stored: YayaRunRecord | null = null;
     let finalizeThrew = false;
+    // 最后保存边界：身份阶段（账号/会话共享锁）→ run 行锁等待 → 来源阶段（锁后重核全部已装载投影）。
+    // 锁等待期间提交的撤会话/来源降级只能被拒绝；并发撤销被共享锁线性化到原终态之后。
+    let boundaryIdentity: YayaCurrentIdentity | null = null;
     try {
       stored = await finalizeYayaRun(run.run_id, ownerInstance, result.outcome, {
-        verify: (client) => verifyYayaRunBoundaryIdentity(client, { run, token }),
+        verify: async (client) => {
+          boundaryIdentity = await resolveYayaRunBoundaryIdentity(client, { run, token });
+          return boundaryStopForIdentity(boundaryIdentity, run);
+        },
+        verifyProjections: async (client) => {
+          const identity = boundaryIdentity;
+          if (identity === null || identity.principal === null) return null;
+          const verdict = await revalidateYayaRunContextWithClient(
+            state,
+            { run_id: run.run_id, identity, sources: [], image_ids: [] },
+            { principal: identity.principal },
+            client,
+          );
+          return verdict.ok ? null : { kind: 'stopped', reason: 'context_revoked', detail: null };
+        },
       });
     } catch {
       finalizeThrew = true;
