@@ -42,7 +42,7 @@ await seed.teardown();                            // 容器（ID+标签核验）
 | 账号 | 管理员；教师A（松果班+白桦班+故障隔离班）；教师B（云杉班）；未分配教师；另有教师A 对云杉班的已撤销任教历史 |
 | 班级 | 松果班/白桦班/云杉班（small，当前学年）+ `[故障夹具] 隔离班` |
 | 幼儿 | 同名「王一诺」×2（两班）；共用照片「陈小满/周小满」；可信空数据「赵小树」；转班「郑小舟」（松果班→云杉班）；draft/needs_input/ai_organized 各一名；`[故障夹具]` 两名 |
-| 观察 | 14 条：draft/needs_input/ai_organized/confirmed 全覆盖；全部 `is_demo` + 原文 `[合成]` 标记 |
+| 观察 | 15 条：draft/needs_input/ai_organized/confirmed 全覆盖；全部 `is_demo` + 原文 `[合成]` 标记（YAYA-PREP-INTEGRATE2 按种子实际键数勘正，原记 14 条） |
 | 指南证据 | 行为 `item.moe.health.physical.1.3-4.2`、持续性 `item.moe.health.physical.2.3-4.1`、保健参考 `item.moe.health.physical.1.3-4.1`、社会行为 `item.moe.social.interpersonal.1.3-4.1`；均由产品 decisions 路径写入，依据逐条可核验，条目与事实语义对照见下表 |
 | 媒体 | 1 张 sharp 合成照片（ready、`metadata.synthetic=true`），被两名幼儿两条观察各自引用；对象目录仅 3 个派生对象 |
 | 会话 | 教师A 场景会话（full / historical_read_only / hidden 三种片段 + 受限标题）；教师B 私有会话 |

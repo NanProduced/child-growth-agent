@@ -19,6 +19,20 @@
 第一波是实现代码，不是再写可行性报告。组件/库的依赖注入用于接真服务和有限测试，不允许用永久 mock 路由、TODO 返回成功、伪执行卡宣布闭环。
 TOOLS1/UI1具体prompt在第一波整合后以新共同SHA发布，本轮不给缺前置的任务抢跑。
 
+## 1.1 C2 联合基线后的第二波接续（2026-10-06，YAYA-PREP-INTEGRATE2）
+
+第二波共同基线 = YAYA-PREP-INTEGRATE2 组合候选（分支 `codex/yaya-prep-integration2`，完整 C2_SHA 由交付回复给出；
+组合内容见 `core-integration-r1.md` + `api0-delivery.md` + `tools-read1-delivery.md` + `qa-seed1-delivery.md`）。
+只消费已发布接口，不重开选型；详细移交见本轮整合交付文档。
+
+| 任务 | 唯一 owner 范围 | 允许消费 | 本轮未实现（NOT_IMPLEMENTED） |
+|---|---|---|---|
+| **TOOLS1** | `src/lib/yaya/tools/**` 写工具部分、`/api/yaya/operations` **POST**、必要的既有业务 routes/queries 兼容修改 | READ1 的 `createYayaReadRegistry().definitions`/`readTool`（不重新实现读取）；DATA 的 `prepareProposal/recordApproval/executeApprovedOperations`（同一 `TransactionClient`）、`computeYayaContentDigest`、附件端口 | 写工具/提案/执行适配、operations POST 与同事务业务 callback、密码安全窗口 |
+| **AGENT-APP1** | `src/lib/yaya/agent/runtime/**`（正式装配）、`/api/yaya/` 运行/查询/取消/事件接口 | `runYayaAgent`/`recoverYayaOperations`、`YayaAgentDependencies` 全部端口、READ1 的 citable/recheck 来源协议、DATA 消息/提案投影、MEDIA 授权字节、AUTH 身份、API0 线协议 | run/cancel/事件 HTTP、run 持久化（不得用内存 Map 冒充跨进程恢复）、按当前授权逐项重核 `recheck_dependencies`、历史与 operation 恢复接线 |
+| **UI1** | `src/components/yaya/**`、助手入口页面、**package.json/pnpm-lock.yaml 唯一 owner** | API0 协议与批准/事件 DTO；只渲染，不做授权/统计/假批准 | 聊天界面、adapters、移动端；视觉选稿是否获批与代码整合分开，不把推荐稿标为已批准 |
+
+表单 / Review / 档案附件接入与最终浏览器联测属于后续 INTEGRATE1/QA1 轮；run 持久化如需存储扩展，由 AGENT-APP1 在本轮后列明最小需求并再报 owner。
+
 ## 2. 独占文件与发布接口
 
 | Owner | 唯一修改范围 | 交付给其他模块 |
