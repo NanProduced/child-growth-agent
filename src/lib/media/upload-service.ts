@@ -14,20 +14,23 @@ import { sha256Hex } from "./object-store";
 import type { MediaServiceDeps } from "./runtime";
 
 /**
- * MEDIA1 上传编排（R1：未知结果不得破坏已提交对象）。
+ * MEDIA1 上传编排（R1：未知结果不得破坏已提交对象；R2：无键上传同一身份可恢复）。
  *
  * 冻结口径：
  * - 账号私有上传：只要求已认证账号，不要求幼儿、不要求 ≥10 字；上传不形成业务观察；
  * - 每次最多 8 张、单图 10MiB；服务端魔数 + 解码 + 像素上限；不支持的格式**逐图**
  *   明确报错，其他图片与文字不受影响；
  * - 对象只写一次并回读核对 checksum；只保存对象引用，不保存任何 URL；
- * - **幂等与内容绑定**：带 client_upload_id 的上传使用确定性 attachment_id，
- *   按 owner + client_upload_id 核对；同键同内容恢复原结果，同键异内容明确冲突；
- * - **未知结果**：注册异常不等于未提交。按原 attachment_id 读回：
- *   已提交且完整 → 恢复原结果；读回失败或未找到 → 保留对象与可恢复身份，
- *   报 `upload_unknown`，**绝不**在注册尝试后进行破坏性补偿；
- * - **确定失败补偿**：只有对象写入阶段失败（注册尚未发生）才清理本轮确实创建的
- *   精确 key；delete 未知/抛错时如实报 `compensation_unknown`，不宣称清理成功；
+ * - **稳定身份**：显式 `client_upload_id` 派生确定性 attachment_id；无键上传按
+ *   `owner + 原始字节 checksum` 派生内容身份——同一输入重试永远命中同一身份，
+ *   不需要教师或客户端携带任何标识；不同内容（含仅 EXIF 不同）身份不同；
+ * - **幂等与内容绑定**：按原身份读回；同内容恢复原结果，同键异内容明确冲突；
+ * - **未知结果**：注册异常不等于未提交。按原身份读回：已提交且完整 → 恢复；
+ *   读回失败/未找到 → 保留对象与可恢复身份，报 `upload_unknown`，
+ *   **绝不**在注册尝试后进行破坏性补偿；正常回应也走同一核对（身份/owner/
+ *   内容/完整性/ready），非 ready 或错配回应不显示成功；
+ * - **确定失败补偿**：只有随机兜底身份（内容身份已被回收后的重新上传）在对象写入
+ *   阶段失败时才精确清理本轮创建的 key；delete 未知/抛错报 `compensation_unknown`；
  * - 不按前缀扫描或清空；一张失败不清空其余图片与文字。
  */
 
@@ -75,14 +78,25 @@ function normalizedClientUploadId(value: string | null): string | null {
 }
 
 /**
- * 确定性附件身份：同一 owner + client_upload_id 永远映射同一 attachment_id，
- * 使重试/响应丢失后可以按原身份读回，不新建上传身份绕过未知结果。
+ * 确定性附件身份（显式幂等键）：同一 owner + client_upload_id 永远映射同一
+ * attachment_id，使重试/响应丢失后可以按原身份读回，不新建上传身份绕过未知结果。
  */
 export function deterministicAttachmentId(ownerAccountId: string, clientUploadId: string): string {
-  const hex = createHash("sha256")
-    .update(`yaya-media1:${ownerAccountId}\u0000${clientUploadId}`, "utf8")
-    .digest("hex")
-    .slice(0, 32);
+  return uuidShapedHash(`yaya-media1:client:${ownerAccountId}\u0000${clientUploadId}`);
+}
+
+/**
+ * 内容派生的稳定附件身份（无幂等键上传）：同一 owner + 同一原始字节映射同一
+ * attachment_id，因此“同一输入重试”不需要教师或客户端携带任何标识，也能按原身份
+ * 恢复未知结果；不同内容（含仅 EXIF 不同）得到不同身份，绝不静默复用旧图。
+ * 与显式键命名空间分离，两者不会互相碰撞。
+ */
+export function contentAttachmentId(ownerAccountId: string, sourceChecksum: string): string {
+  return uuidShapedHash(`yaya-media1:content:${ownerAccountId}\u0000${sourceChecksum}`);
+}
+
+function uuidShapedHash(seed: string): string {
+  const hex = createHash("sha256").update(seed, "utf8").digest("hex").slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
@@ -124,12 +138,18 @@ export function toAttachmentView(record: AttachmentRecord): UploadAttachmentView
   };
 }
 
-/** 已登记记录恢复：同内容才恢复，异内容/不完整/不可用明确报错，绝不静默返回旧图 */
+/** 已登记记录恢复/回应核对：身份、owner、内容绑定、完整性与 ready 全部一致才成功 */
 function restoreRegistered(
   record: AttachmentRecord,
   ownerAccountId: string,
   sourceChecksum: string,
+  expectedAttachmentId: string,
 ): UploadAttachmentView {
+  if (record.attachment_id !== expectedAttachmentId) {
+    throw new MediaError("upload_unknown", "登记回应与预期身份不一致，结果未知。", {
+      attachment_id: expectedAttachmentId,
+    });
+  }
   if (record.owner_account_id !== ownerAccountId) {
     throw new MediaError("idempotency_conflict", "该上传标识属于其他账号，拒绝复用。", {
       attachment_id: record.attachment_id,
@@ -193,18 +213,25 @@ async function uploadOne(
 ): Promise<UploadAttachmentView> {
   const clientUploadId = normalizedClientUploadId(file.client_upload_id);
   const sourceChecksum = sha256Hex(file.body);
-  const attachmentId =
-    clientUploadId === null ? randomUUID() : deterministicAttachmentId(ownerAccountId, clientUploadId);
+  const keyedId = clientUploadId === null ? null : deterministicAttachmentId(ownerAccountId, clientUploadId);
+  const contentId = contentAttachmentId(ownerAccountId, sourceChecksum);
+  let attachmentId = keyedId ?? contentId;
 
-  // 幂等前置：按原身份读回；读回失败时保留未知语义，不进入新写入。
-  if (clientUploadId !== null) {
-    const existing = await readBackRegistered(deps, attachmentId);
+  // 幂等前置：显式键与内容派生身份都可按“同一输入重试”读回原记录；
+  // 读回失败保留未知语义，不进入新写入，也不产生新身份。
+  {
+    const preflightId = keyedId ?? contentId;
+    const existing = await readBackRegistered(deps, preflightId);
     if (existing.state === "found") {
-      return restoreRegistered(existing.record, ownerAccountId, sourceChecksum);
-    }
-    if (existing.state === "unavailable") {
+      if (existing.record.status === "deleted" && clientUploadId === null) {
+        // 内容身份已被回收：主键不可复用，为本次新上传分配新身份（窄边界，见 R2 交付文档）。
+        attachmentId = randomUUID();
+      } else {
+        return restoreRegistered(existing.record, ownerAccountId, sourceChecksum, preflightId);
+      }
+    } else if (existing.state === "unavailable") {
       throw new MediaError("upload_unknown", "无法核对上次上传结果，请稍后重试。", {
-        attachment_id: attachmentId,
+        attachment_id: preflightId,
       });
     }
   }
@@ -266,14 +293,14 @@ async function uploadOne(
     };
 
     registerAttempted = true;
+    let registered: AttachmentRecord;
     try {
-      const registered = await deps.metadata.registerAttachment(registerInput);
-      return toAttachmentView(registered);
+      registered = await deps.metadata.registerAttachment(registerInput);
     } catch (error) {
       // 注册异常不等于未提交：按原身份读回；未知时保留对象与可恢复身份。
       const readBack = await readBackRegistered(deps, attachmentId);
       if (readBack.state === "found") {
-        return restoreRegistered(readBack.record, ownerAccountId, sourceChecksum);
+        return restoreRegistered(readBack.record, ownerAccountId, sourceChecksum, attachmentId);
       }
       throw new MediaError(
         "upload_unknown",
@@ -281,11 +308,16 @@ async function uploadOne(
         { attachment_id: attachmentId, cause: error instanceof MediaError ? error.code : "unknown" },
       );
     }
+    // 正常回应同样走统一核对：身份/owner/内容/完整性/ready 一致才显示成功；
+    // 核对失败不回读覆盖不一致的回应，也不做破坏性补偿（对象保留）。
+    return restoreRegistered(registered, ownerAccountId, sourceChecksum, attachmentId);
   } catch (error) {
     if (!registerAttempted) {
-      // 对象写入阶段失败（注册尚未发生）。仅无幂等键的上传可确定地精确补偿；
-      // 带 client_upload_id 时并发重复请求可能正在注册，保留对象供重试复用。
-      if (clientUploadId === null && createdKeys.length > 0) {
+      // 对象写入阶段失败（注册尚未发生）。确定性身份（显式键或内容派生）下，
+      // 并发重复请求/同一输入重试可复用这些对象，因此保留；只有随机兜底身份
+      // （内容身份已被回收后重新上传）才做精确补偿。
+      const recoverableIdentity = attachmentId === contentId || attachmentId === keyedId;
+      if (!recoverableIdentity && createdKeys.length > 0) {
         await compensateCreatedObjects(deps, createdKeys);
       }
       if (error instanceof MediaError) throw error;

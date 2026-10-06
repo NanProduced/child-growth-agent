@@ -27,9 +27,14 @@ import { MediaError } from "../../src/lib/media/errors";
 import { MemoryAttachmentMetadata } from "../../src/lib/media/metadata-memory";
 import type { RegisterAttachmentInput } from "../../src/lib/media/metadata-port";
 import { LocalMediaObjectStore } from "../../src/lib/media/object-store-local";
+import { sha256Hex } from "../../src/lib/media/object-store";
 import { recycleAttachment } from "../../src/lib/media/retention-service";
 import type { MediaServiceDeps } from "../../src/lib/media/runtime";
-import { deterministicAttachmentId, uploadImages } from "../../src/lib/media/upload-service";
+import {
+  contentAttachmentId,
+  deterministicAttachmentId,
+  uploadImages,
+} from "../../src/lib/media/upload-service";
 
 const CHECK_ROOT = path.join(os.tmpdir(), "opencode", `yaya-media1-r1-${process.pid}-${Date.now()}`);
 const OWNER_A = "account-teacher-a";
@@ -49,9 +54,9 @@ async function check(name: string, run: () => Promise<void> | void): Promise<voi
   }
 }
 
-function pngBuffer(): Promise<Buffer> {
+function pngBuffer(width = 48, height = 48): Promise<Buffer> {
   return sharp({
-    create: { width: 48, height: 48, channels: 3, background: { r: 30, g: 120, b: 200 } },
+    create: { width, height, channels: 3, background: { r: 30, g: 120, b: 200 } },
   })
     .png()
     .toBuffer();
@@ -126,6 +131,13 @@ async function uploadOne(
   return { attachment_id: first.attachment.attachment_id };
 }
 
+/** 每次需要“全新附件”时使用显式唯一键；无键上传按内容派生身份，同内容会去重。 */
+let freshCounter = 0;
+async function freshUpload(deps: MediaServiceDeps, owner: string): Promise<{ attachment_id: string }> {
+  freshCounter += 1;
+  return uploadOne(deps, owner, await pngBuffer(), `r2-fresh-${freshCounter}`);
+}
+
 async function main(): Promise<void> {
   await mkdir(CHECK_ROOT, { recursive: true });
   const metadata = new MemoryAttachmentMetadata();
@@ -136,7 +148,7 @@ async function main(): Promise<void> {
   /* ============================ A. 租约原子协调 ============================ */
 
   await check("A1 引用先成立 → 回收拒绝且对象保留", async () => {
-    const image = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const image = await freshUpload(deps, OWNER_A);
     metadata.seedObservation("observation-a1", "draft");
     await metadata.linkObservationReferences({
       observation_id: "observation-a1",
@@ -151,7 +163,7 @@ async function main(): Promise<void> {
   });
 
   await check("A2 租约先成立 → 新引用（追加/关联）被拒", async () => {
-    const image = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const image = await freshUpload(deps, OWNER_A);
     const record = await metadata.get(image.attachment_id);
     assert.ok(record);
     const lease = await metadata.beginDeletionLease({
@@ -191,7 +203,7 @@ async function main(): Promise<void> {
   });
 
   await check("A3 查询与租约之间新增引用 → 租约拒绝、对象保留", async () => {
-    const image = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const image = await freshUpload(deps, OWNER_A);
     metadata.seedObservation("observation-a3", "draft");
     const before = (await listFiles(CHECK_ROOT)).length;
     metadata.onNextReferenceFacts = () => {
@@ -210,7 +222,7 @@ async function main(): Promise<void> {
   });
 
   await check("A4 多引用/共享照片：观察+消息+提案全部保护", async () => {
-    const image = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const image = await freshUpload(deps, OWNER_A);
     metadata.seedConversation("conversation-a4", OWNER_A);
     for (const [observationId, status] of [
       ["observation-a4-draft", "draft"],
@@ -246,7 +258,7 @@ async function main(): Promise<void> {
   });
 
   await check("A5 引用查询失败/悬空引用 → 禁止回收", async () => {
-    const image = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const image = await freshUpload(deps, OWNER_A);
     const before = (await listFiles(CHECK_ROOT)).length;
     metadata.failNext("getReferenceFacts");
     await assert.rejects(
@@ -275,7 +287,7 @@ async function main(): Promise<void> {
   });
 
   await check("A6 revision 不匹配 → 租约拒绝且不删对象", async () => {
-    const image = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const image = await freshUpload(deps, OWNER_A);
     const record = await metadata.get(image.attachment_id);
     assert.ok(record);
     const stale = await metadata.beginDeletionLease({
@@ -294,7 +306,7 @@ async function main(): Promise<void> {
   });
 
   await check("A7 未知删除状态不可新增引用", async () => {
-    const image = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const image = await freshUpload(deps, OWNER_A);
     const record = await metadata.get(image.attachment_id);
     assert.ok(record);
     const lease = await metadata.beginDeletionLease({
@@ -431,6 +443,11 @@ async function main(): Promise<void> {
 
   await check("B5 补偿删除未知：不宣称清理成功", async () => {
     metadata.clearFailpoints();
+    // 内容身份已被回收 → 重新上传走随机兜底身份，对象阶段失败才会精确补偿；
+    // 补偿删除返回 unknown 时必须如实报错，不宣称清理成功。
+    const content = await pngBuffer(150, 150);
+    const recycled = await uploadOne(deps, OWNER_A, content);
+    assert.equal((await recycleAttachment(deps, { attachment_id: recycled.attachment_id })).status, "deleted");
     const recordsBefore = metadata.countAttachments();
     const unknownStore = {
       putOnce: async (input: { key: string; content_type: string; body: Buffer }) => {
@@ -448,7 +465,7 @@ async function main(): Promise<void> {
     const unknownDeps: MediaServiceDeps = { metadata, store: unknownStore, environment: "development" };
     const batch = await uploadImages(unknownDeps, {
       owner_account_id: OWNER_A,
-      files: [{ filename: "b5.png", declared_content_type: null, body: await pngBuffer(), client_upload_id: null }],
+      files: [{ filename: "b5.png", declared_content_type: null, body: content, client_upload_id: null }],
     });
     const first = batch.uploads[0];
     assert.ok(first && !first.ok && first.code === "compensation_unknown");
@@ -520,8 +537,8 @@ async function main(): Promise<void> {
 
   await check("C1 并发同 expected_revision：一成功一明确冲突", async () => {
     metadata.clearFailpoints();
-    metadata.seedObservation("observation-c1", "confirmed");
-    const image = await uploadOne(deps, OWNER_A, await pngBuffer());
+    metadata.seedObservation("observation-c1", "confirmed", "2026-10-05T08:00:00.000Z");
+    const image = await freshUpload(deps, OWNER_A);
     const input = {
       host: hostFacts({ observation_id: "observation-c1" }),
       principal: teacherA,
@@ -553,8 +570,9 @@ async function main(): Promise<void> {
 
   await check("C2 部分附件不可用：不产生半成功引用与修订", async () => {
     metadata.clearFailpoints();
-    const first = await uploadOne(deps, OWNER_A, await pngBuffer());
-    const second = await uploadOne(deps, OWNER_A, await pngBuffer());
+    metadata.seedObservation("observation-c2", "confirmed", "2026-10-05T08:00:00.000Z");
+    const first = await freshUpload(deps, OWNER_A);
+    const second = await freshUpload(deps, OWNER_A);
     const secondRecord = await metadata.get(second.attachment_id);
     assert.ok(secondRecord);
     const lease = await metadata.beginDeletionLease({
@@ -584,9 +602,10 @@ async function main(): Promise<void> {
 
   await check("C3 引用、修订与审计同一原子边界（含来源前提）", async () => {
     metadata.clearFailpoints();
+    metadata.seedObservation("observation-c3", "confirmed", "2026-10-05T08:00:00.000Z");
     const referencesBefore = metadata.countReferences();
-    const first = await uploadOne(deps, OWNER_A, await pngBuffer());
-    const second = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const first = await freshUpload(deps, OWNER_A);
+    const second = await freshUpload(deps, OWNER_A);
     const result = await appendObservationImages(deps, {
       host: hostFacts({ observation_id: "observation-c3" }),
       principal: teacherA,
@@ -609,7 +628,8 @@ async function main(): Promise<void> {
   });
 
   await check("C4 来源前提不一致：端口原子边界不被调用、修订不变", async () => {
-    const image = await uploadOne(deps, OWNER_A, await pngBuffer());
+    metadata.seedObservation("observation-c4", "confirmed", "2026-10-05T08:00:00.000Z");
+    const image = await freshUpload(deps, OWNER_A);
     await assert.rejects(
       appendObservationImages(deps, {
         host: hostFacts({ observation_id: "observation-c4" }),
@@ -656,7 +676,8 @@ async function main(): Promise<void> {
   });
 
   await check("C6 管理员/越权/非本人追加仍拒绝（原子边界不绕过授权）", async () => {
-    const image = await uploadOne(deps, OWNER_A, await pngBuffer());
+    metadata.seedObservation("observation-c6", "confirmed", "2026-10-05T08:00:00.000Z");
+    const image = await freshUpload(deps, OWNER_A);
     const host = hostFacts({ observation_id: "observation-c6" });
     await assert.rejects(
       appendObservationImages(deps, {
@@ -694,6 +715,143 @@ async function main(): Promise<void> {
       },
     );
     assert.equal(await metadata.getObservationAttachmentRevision("observation-c6"), 0);
+  });
+
+  /* ==================== D. R2 评审复现（无键恢复/回应核对/宿主前提） ==================== */
+
+  await check("D1 无键未知上传：同一输入重试按内容身份恢复", async () => {
+    metadata.clearFailpoints();
+    const body = await pngBuffer(300, 200);
+    const contentId = contentAttachmentId(OWNER_A, sha256Hex(body));
+    const beforeFiles = (await listFiles(CHECK_ROOT)).length;
+    const recordsBefore = metadata.countAttachments();
+    metadata.failNext("register_before");
+    const first = await uploadImages(deps, {
+      owner_account_id: OWNER_A,
+      files: [{ filename: "d1.png", declared_content_type: null, body, client_upload_id: null }],
+    });
+    const firstResult = first.uploads[0];
+    assert.ok(firstResult && !firstResult.ok && firstResult.code === "upload_unknown");
+    assert.equal(firstResult.recoverable?.attachment_id, contentId, "可恢复身份必须稳定可推导");
+    assert.equal(metadata.countAttachments(), recordsBefore);
+    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles + 3, "未知结果保留对象");
+    const retry = await uploadImages(deps, {
+      owner_account_id: OWNER_A,
+      files: [{ filename: "d1.png", declared_content_type: null, body, client_upload_id: null }],
+    });
+    const retryResult = retry.uploads[0];
+    assert.ok(retryResult?.ok, "同一输入重试必须恢复原身份，不新建操作");
+    assert.equal(retryResult.attachment.attachment_id, contentId);
+    assert.equal(metadata.countAttachments(), recordsBefore + 1, "恢复为唯一记录");
+    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles + 3, "对象不重复");
+  });
+
+  await check("D2 注册正常返回但非 ready：不显示成功、保留对象", async () => {
+    class BadAck extends MemoryAttachmentMetadata {
+      override async registerAttachment(input: RegisterAttachmentInput) {
+        const record = await super.registerAttachment(input);
+        return { ...record, status: "deleting" as const };
+      }
+    }
+    const badMetadata = new BadAck();
+    const badDeps: MediaServiceDeps = { metadata: badMetadata, store, environment: "development" };
+    const before = (await listFiles(CHECK_ROOT)).length;
+    const batch = await uploadImages(badDeps, {
+      owner_account_id: OWNER_A,
+      files: [{ filename: "d2.png", declared_content_type: null, body: await pngBuffer(), client_upload_id: "r2-bad-ack" }],
+    });
+    const result = batch.uploads[0];
+    assert.ok(result && !result.ok, "非 ready 回应不得显示成功");
+    assert.equal(!result.ok && result.code, "attachment_gone");
+    assert.equal((await listFiles(CHECK_ROOT)).length, before + 3, "对象保留，不做破坏性补偿");
+    const stored = await badMetadata.get(deterministicAttachmentId(OWNER_A, "r2-bad-ack"));
+    assert.equal(stored?.status, "ready", "存储记录不被回应伪造改写");
+  });
+
+  await check("D3 宿主前提在保存边界变化：拒绝且零写入", async () => {
+    class ChangedHost extends MemoryAttachmentMetadata {
+      changeOnRead = false;
+      override async get(id: string) {
+        const record = await super.get(id);
+        if (this.changeOnRead) {
+          this.changeOnRead = false;
+          this.seedObservation("observation-d3", "draft");
+        }
+        return record;
+      }
+    }
+    const hostMetadata = new ChangedHost();
+    const hostDeps: MediaServiceDeps = { metadata: hostMetadata, store, environment: "development" };
+    hostMetadata.seedObservation("observation-d3", "confirmed", "2026-10-05T08:00:00.000Z");
+    const image = await uploadOne(hostDeps, OWNER_A, await pngBuffer(), "r2-d3");
+    hostMetadata.changeOnRead = true;
+    await assert.rejects(
+      appendObservationImages(hostDeps, {
+        host: hostFacts({ observation_id: "observation-d3" }),
+        principal: teacherA,
+        image_ids: [image.attachment_id],
+        expected_attachment_revision: 0,
+        source_confirmed_at: "2026-10-05T08:00:00.000Z",
+        request_id: "req-d3",
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof MediaError && error.code === "observation_not_confirmed");
+        return true;
+      },
+    );
+    assert.equal(await hostMetadata.getObservationAttachmentRevision("observation-d3"), 0, "修订不得写入");
+    assert.equal(hostMetadata.countReferences(), 0, "引用不得写入");
+    assert.equal(hostMetadata.audits().length, 0, "审计不得写入");
+  });
+
+  await check("D4 宿主确认来源在保存边界变化：source_conflict 零写入", async () => {
+    class ChangedSource extends MemoryAttachmentMetadata {
+      changeOnRead = false;
+      override async get(id: string) {
+        const record = await super.get(id);
+        if (this.changeOnRead) {
+          this.changeOnRead = false;
+          this.seedObservation("observation-d4", "confirmed", "2026-10-06T00:00:00.000Z");
+        }
+        return record;
+      }
+    }
+    const sourceMetadata = new ChangedSource();
+    const sourceDeps: MediaServiceDeps = { metadata: sourceMetadata, store, environment: "development" };
+    sourceMetadata.seedObservation("observation-d4", "confirmed", "2026-10-05T08:00:00.000Z");
+    const image = await uploadOne(sourceDeps, OWNER_A, await pngBuffer(), "r2-d4");
+    sourceMetadata.changeOnRead = true;
+    await assert.rejects(
+      appendObservationImages(sourceDeps, {
+        host: hostFacts({ observation_id: "observation-d4" }),
+        principal: teacherA,
+        image_ids: [image.attachment_id],
+        expected_attachment_revision: 0,
+        source_confirmed_at: "2026-10-05T08:00:00.000Z",
+        request_id: "req-d4",
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof MediaError && error.code === "source_conflict");
+        return true;
+      },
+    );
+    assert.equal(await sourceMetadata.getObservationAttachmentRevision("observation-d4"), 0);
+    assert.equal(sourceMetadata.countReferences(), 0);
+    assert.equal(sourceMetadata.audits().length, 0);
+  });
+
+  await check("D5 无键上传内容绑定：同内容去重、异内容不同身份", async () => {
+    metadata.clearFailpoints();
+    const body = await pngBuffer(320, 210);
+    const before = (await listFiles(CHECK_ROOT)).length;
+    const first = await uploadOne(deps, OWNER_A, body);
+    const second = await uploadOne(deps, OWNER_A, body);
+    assert.equal(second.attachment_id, first.attachment_id, "同内容同身份，不重复上传");
+    assert.equal((await listFiles(CHECK_ROOT)).length, before + 3);
+    const other = await pngBuffer(321, 210);
+    const third = await uploadOne(deps, OWNER_A, other);
+    assert.notEqual(third.attachment_id, first.attachment_id, "异内容不同身份");
+    assert.equal((await listFiles(CHECK_ROOT)).length, before + 6);
   });
 
   const leftovers = await listFiles(CHECK_ROOT);

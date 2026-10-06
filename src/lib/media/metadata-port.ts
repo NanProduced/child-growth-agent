@@ -18,7 +18,10 @@ import type { MediaContentType } from "./limits";
  * 6. `commitDeletion` / `failDeletion` 必须核对 revision；
  *    `failDeletion` 保持 deleting+unknown；对象删除由 MEDIA1 在事务外按精确 key 执行；
  * 7. `appendObservationAttachments` 是单一原子边界：附件 ready/owner 校验、
- *    观察级 expected_revision CAS、引用写入与独立审计（含来源确认前提）全有或全无；
+ *    **宿主前提核验**、观察级 expected_revision CAS、引用写入与独立审计
+ *    （含来源确认前提）全有或全无。宿主前提必须在该边界内重读/锁定宿主：
+ *    当前 status=confirmed 且 confirmed_at 与提交的 `source_confirmed_at`
+ *    为同一时刻；把来源写进审计**不等于**前提成立。服务层预检只用于快速失败；
  * 8. `linkObservationReferences` 供创建观察事务内关联；不递增 revision、不写审计；
  * 9. 不允许默认 ready、伪造 checksum、空引用或类型强转填平字段差异。
  */
@@ -113,6 +116,11 @@ export interface AppendObservationAttachmentsInput {
   attachment_ids: readonly string[];
   expected_attachment_revision: number;
   actor_account_id: string;
+  /**
+   * 宿主确认来源前提：端口必须在同一原子边界内重读/锁定宿主，
+   * 要求 status=confirmed 且 confirmed_at 与本值同一时刻；
+   * 不满足时拒绝写入（不得只把它写进审计）。
+   */
   source_confirmed_at: string | null;
   request_id: string | null;
   approval_id: string | null;

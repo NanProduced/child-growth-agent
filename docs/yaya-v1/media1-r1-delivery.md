@@ -62,7 +62,12 @@ RED 输出（旧提交，探针 exit 1）与 GREEN 输出（修复后，`all_ok=
 新增错误码：`idempotency_conflict`、`upload_unknown`、`compensation_unknown`、`attachment_conflict`；
 `MediaError` 支持内部 `details`（可恢复身份，不保证对外暴露）。
 
-## 4. DATA 逐方法需求与映射表（`src/lib/yaya/storage-types.ts` @ `0f135a4`）
+## 4. DATA 逐方法需求与映射表（已被 R2 取代）
+
+> 本节映射基于 DATA 初版 `0f135a4`，其中“缺列”等结论已过时：DATA-R1 已新增
+> `client_upload_id`、三派生对象/checksum/宽高显式列、来源审计列与 `checksum_sha256` 命名。
+> 权威映射见 `docs/yaya-v1/media1-r2-delivery.md` §4（DATA-R1 `yaya-media-storage-r1`
+> @ `3d96f69`）；本表仅保留历史记录，不作为当前口径。
 
 | MEDIA1 端口 v2 | DATA repository | 映射 | 缺口 / 对 DATA 的要求 |
 |---|---|---|---|

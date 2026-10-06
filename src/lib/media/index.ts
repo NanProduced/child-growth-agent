@@ -63,6 +63,7 @@ export { MemoryAttachmentMetadata, type MemoryMetadataFailpoint } from "./metada
 export { bindMediaRuntime, createLocalMediaRuntime, mediaRuntimeOrThrow, type MediaServiceDeps } from "./runtime";
 export {
   attachmentRecordIsComplete,
+  contentAttachmentId,
   deterministicAttachmentId,
   toAttachmentView,
   uploadImages,

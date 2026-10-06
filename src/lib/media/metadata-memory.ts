@@ -51,6 +51,12 @@ function refKey(ref: StoredReference): string {
   return `${ref.ref_kind}\u0000${ref.ref_id}\u0000${ref.attachment_id}`;
 }
 
+function sameInstant(a: string, b: string): boolean {
+  const first = Date.parse(a);
+  const second = Date.parse(b);
+  return Number.isFinite(first) && Number.isFinite(second) && first === second;
+}
+
 function assertRegisterInput(input: RegisterAttachmentInput): void {
   const blank = (value: string) => typeof value !== "string" || value.trim() === "";
   if (
@@ -80,6 +86,7 @@ export class MemoryAttachmentMetadata implements AttachmentMetadataPort {
   private readonly references = new Map<string, StoredReference>();
   private readonly observationRevisions = new Map<string, number>();
   private readonly observationStatuses = new Map<string, ObservationStatus>();
+  private readonly observationConfirmedAt = new Map<string, string | null>();
   private readonly conversationOwners = new Map<string, string>();
   private readonly auditEntries: AttachmentAuditEntry[] = [];
   private readonly failpoints = new Set<MemoryMetadataFailpoint>();
@@ -103,8 +110,9 @@ export class MemoryAttachmentMetadata implements AttachmentMetadataPort {
     if (this.lateCommit) await this.lateCommit;
   }
 
-  seedObservation(observation_id: string, status: ObservationStatus): void {
+  seedObservation(observation_id: string, status: ObservationStatus, confirmed_at: string | null = null): void {
     this.observationStatuses.set(observation_id, status);
+    this.observationConfirmedAt.set(observation_id, confirmed_at);
   }
 
   seedConversation(conversation_id: string, owner_account_id: string): void {
@@ -354,9 +362,22 @@ export class MemoryAttachmentMetadata implements AttachmentMetadataPort {
     if (!Number.isInteger(input.expected_attachment_revision) || input.expected_attachment_revision < 0) {
       throw new MediaError("invalid_request", "附件修订前提不合法。");
     }
-    // 共同原子边界：整体校验 → CAS → 引用+审计+修订一次性写入（无 await 插入）。
+    // 共同原子边界：整体校验 → 宿主前提核验 → CAS → 引用+审计+修订一次性写入（无 await 插入）。
     for (const attachmentId of input.attachment_ids) {
       this.requireReady(attachmentId, input.actor_account_id);
+    }
+    // 宿主前提：必须在本边界内成立；来源写进审计不等于前提成立。
+    const hostStatus = this.observationStatuses.get(input.observation_id);
+    if (hostStatus === undefined || hostStatus !== "confirmed") {
+      throw new MediaError("observation_not_confirmed", "宿主观察当前不是已确认状态，拒绝追加资料。");
+    }
+    const hostConfirmedAt = this.observationConfirmedAt.get(input.observation_id) ?? null;
+    if (
+      hostConfirmedAt === null ||
+      input.source_confirmed_at === null ||
+      !sameInstant(hostConfirmedAt, input.source_confirmed_at)
+    ) {
+      throw new MediaError("source_conflict", "宿主确认来源前提已变化，拒绝追加资料。");
     }
     const current = this.observationRevisions.get(input.observation_id) ?? 0;
     if (current !== input.expected_attachment_revision) {

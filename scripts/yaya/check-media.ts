@@ -55,7 +55,7 @@ import { assertSafeObjectKey, sha256Hex } from "../../src/lib/media/object-store
 import { LocalMediaObjectStore } from "../../src/lib/media/object-store-local";
 import { recycleAttachment } from "../../src/lib/media/retention-service";
 import { createLocalMediaRuntime, type MediaServiceDeps } from "../../src/lib/media/runtime";
-import { deterministicAttachmentId, uploadImages } from "../../src/lib/media/upload-service";
+import { deterministicAttachmentId, contentAttachmentId, uploadImages } from "../../src/lib/media/upload-service";
 import type { YayaImageViewerRecordAccess } from "../../src/lib/yaya/types";
 
 const CHECK_ROOT = path.join(os.tmpdir(), "opencode", `yaya-media1-check-${process.pid}-${Date.now()}`);
@@ -227,6 +227,18 @@ async function uploadOne(
   return { attachment_id: first.attachment.attachment_id };
 }
 
+/** 每次需要“全新附件”时使用独立内容；无键上传按内容派生身份，同内容会去重。 */
+async function distinctPng(seed: number): Promise<Buffer> {
+  return pngBuffer(200 + seed, 180);
+}
+
+async function freshUpload(deps: MediaServiceDeps, owner: string): Promise<{ attachment_id: string }> {
+  return uploadOne(deps, owner, await pngBuffer(160 + (freshCounter % 50), 150), {
+    client: `fresh-${(freshCounter += 1)}`,
+  });
+}
+let freshCounter = 0;
+
 function fullAccess(recordId: string): YayaImageViewerRecordAccess {
   return { record_kind: "observation", record_id: recordId, projection: "full" };
 }
@@ -342,13 +354,15 @@ async function main(): Promise<void> {
   });
 
   await check("每次上限 8 张：8 张可用、9 张整批拒绝", async () => {
-    const tiny = await pngBuffer(24, 24);
+    const contents = await Promise.all(
+      Array.from({ length: MEDIA_MAX_IMAGES_PER_UPLOAD + 1 }, (_, index) => pngBuffer(24 + index, 24)),
+    );
     const eight = await uploadImages(deps, {
       owner_account_id: OWNER_A,
-      files: Array.from({ length: MEDIA_MAX_IMAGES_PER_UPLOAD }, () => ({
+      files: contents.slice(0, MEDIA_MAX_IMAGES_PER_UPLOAD).map((body) => ({
         filename: "t.png",
         declared_content_type: null,
-        body: tiny,
+        body,
         client_upload_id: null,
       })),
     });
@@ -356,10 +370,10 @@ async function main(): Promise<void> {
     await assert.rejects(
       uploadImages(deps, {
         owner_account_id: OWNER_A,
-        files: Array.from({ length: MEDIA_MAX_IMAGES_PER_UPLOAD + 1 }, () => ({
+        files: contents.map((body) => ({
           filename: "t.png",
           declared_content_type: null,
-          body: tiny,
+          body,
           client_upload_id: null,
         })),
       }),
@@ -377,7 +391,7 @@ async function main(): Promise<void> {
         {
           filename: "mismatch.png",
           declared_content_type: "image/jpeg",
-          body: await pngBuffer(),
+          body: await distinctPng(7),
           client_upload_id: null,
         },
       ],
@@ -424,9 +438,10 @@ async function main(): Promise<void> {
     assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles + 3, "重试不得重复写对象");
   });
 
-  await check("对象阶段失败（注册前）：精确补偿本轮对象", async () => {
+  await check("对象阶段失败（注册前）：确定性身份保留对象、重试完成", async () => {
     const beforeFiles = (await listFiles(CHECK_ROOT)).length;
     const beforeRecords = metadata.countAttachments();
+    const content = await distinctPng(10);
     const failingStore = {
       putOnce: async (input: { key: string; content_type: string; body: Buffer }) => {
         if (input.key.endsWith("/thumbnail")) {
@@ -440,15 +455,21 @@ async function main(): Promise<void> {
     const failingDeps: MediaServiceDeps = { metadata, store: failingStore, environment: "development" };
     const batch = await uploadImages(failingDeps, {
       owner_account_id: OWNER_A,
-      files: [{ filename: "y.png", declared_content_type: null, body: await pngBuffer(), client_upload_id: null }],
+      files: [{ filename: "y.png", declared_content_type: null, body: content, client_upload_id: null }],
     });
     const result = batch.uploads[0];
     assert.ok(result && !result.ok && result.code === "object_store_unavailable");
-    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles, "确定失败必须精确补偿已写对象");
+    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles + 1, "确定性身份保留原图对象供重试");
     assert.equal(metadata.countAttachments(), beforeRecords, "注册未发生不得留下记录");
+    const retry = await uploadOne(deps, OWNER_A, content);
+    assert.equal(retry.attachment_id, contentAttachmentId(OWNER_A, sha256Hex(content)));
+    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles + 3, "重试复用已保留对象");
   });
 
-  await check("补偿不按前缀清空：同前缀的他轮对象保留", async () => {
+  await check("补偿只清本轮对象、不按前缀清空（回收后重新上传的兜底身份）", async () => {
+    const content = await distinctPng(11);
+    const recycled = await uploadOne(deps, OWNER_A, content);
+    assert.equal((await recycleAttachment(deps, { attachment_id: recycled.attachment_id })).status, "deleted");
     const foreignKey = buildObjectKey({
       environment: "development",
       owner_account_id: OWNER_A,
@@ -456,6 +477,7 @@ async function main(): Promise<void> {
       variant: "original",
     });
     await store.putOnce({ key: foreignKey, content_type: "image/png", body: Buffer.from("foreign") });
+    const beforeFiles = (await listFiles(CHECK_ROOT)).length;
     const failingStore = {
       putOnce: async (input: { key: string; content_type: string; body: Buffer }) => {
         if (input.key.endsWith("/thumbnail")) {
@@ -469,9 +491,10 @@ async function main(): Promise<void> {
     const failingDeps: MediaServiceDeps = { metadata, store: failingStore, environment: "development" };
     const batch = await uploadImages(failingDeps, {
       owner_account_id: OWNER_A,
-      files: [{ filename: "z.png", declared_content_type: null, body: await pngBuffer(), client_upload_id: null }],
+      files: [{ filename: "z.png", declared_content_type: null, body: content, client_upload_id: null }],
     });
     assert.ok(batch.uploads[0] && !batch.uploads[0].ok);
+    assert.equal((await listFiles(CHECK_ROOT)).length, beforeFiles, "兜底身份失败精确补偿本轮对象");
     assert.ok((await store.get(foreignKey)) !== null, "其他轮对象不得被前缀清空");
     await store.delete(foreignKey);
   });
@@ -479,7 +502,7 @@ async function main(): Promise<void> {
   /* ------------------------------ 授权读取 ------------------------------ */
 
   const unattached = await uploadOne(deps, OWNER_A, await jpegWithExif());
-  const attached = await uploadOne(deps, OWNER_A, await pngBuffer());
+  const attached = await freshUpload(deps, OWNER_A);
 
   await check("未关联图片：仅上传者可读，同班教师/管理员拒绝", async () => {
     const noAccess = async () => null;
@@ -638,6 +661,7 @@ async function main(): Promise<void> {
 
   await check("归档后追加：核 source_confirmed_at/revision/所有权并写审计", async () => {
     const host = hostFacts({ observation_id: "observation-append" });
+    metadata.seedObservation("observation-append", "confirmed", host.confirmed_at);
     const frozen = JSON.stringify(host);
     const result = await appendObservationImages(deps, {
       host,
@@ -752,6 +776,7 @@ async function main(): Promise<void> {
   await check("共同照片多引用：不复制对象、不重复上传", async () => {
     const before = (await listFiles(CHECK_ROOT)).length;
     const hostTwo = hostFacts({ observation_id: "observation-2" });
+    metadata.seedObservation("observation-2", "confirmed", hostTwo.confirmed_at);
     const result = await appendObservationImages(deps, {
       host: hostTwo,
       principal: teacherA,
@@ -765,7 +790,7 @@ async function main(): Promise<void> {
   });
 
   await check("删除租约阻止新引用；失败保持 deleting+unknown 不恢复 ready", async () => {
-    const leaseImage = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const leaseImage = await freshUpload(deps, OWNER_A);
     const record = await metadata.get(leaseImage.attachment_id);
     assert.ok(record);
     const lease = await metadata.beginDeletionLease({
@@ -821,7 +846,7 @@ async function main(): Promise<void> {
   /* ------------------------------ 引用与回收 ------------------------------ */
 
   await check("观察全状态引用保护；解除本会话引用后其余引用仍保护", async () => {
-    const shared = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const shared = await freshUpload(deps, OWNER_A);
     metadata.seedConversation("conversation-1", OWNER_A);
     metadata.seedConversation("conversation-2", OWNER_A);
     for (const [observationId, status] of [
@@ -875,7 +900,7 @@ async function main(): Promise<void> {
   });
 
   await check("无引用回收：精确删除三个对象并落 deleted", async () => {
-    const disposable = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const disposable = await freshUpload(deps, OWNER_A);
     const record = await metadata.get(disposable.attachment_id);
     assert.ok(record);
     const objectPaths = [record.object_key, record.thumbnail_key, record.model_key].map((key) =>
@@ -898,7 +923,7 @@ async function main(): Promise<void> {
   });
 
   await check("引用查询不完整禁止回收", async () => {
-    const disposable = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const disposable = await freshUpload(deps, OWNER_A);
     const before = (await listFiles(CHECK_ROOT)).length;
     metadata.failNext("getReferenceFacts");
     await assert.rejects(
@@ -914,7 +939,7 @@ async function main(): Promise<void> {
   });
 
   await check("外部删除结果未知：保留 deleting+unknown，可核验后重试", async () => {
-    const disposable = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const disposable = await freshUpload(deps, OWNER_A);
     const flakyStore = {
       putOnce: store.putOnce.bind(store),
       get: store.get.bind(store),
@@ -948,7 +973,7 @@ async function main(): Promise<void> {
   });
 
   await check("回收租约互斥：进行中的回收不可重入", async () => {
-    const disposable = await uploadOne(deps, OWNER_A, await pngBuffer());
+    const disposable = await freshUpload(deps, OWNER_A);
     const record = await metadata.get(disposable.attachment_id);
     assert.ok(record);
     const lease = await metadata.beginDeletionLease({
