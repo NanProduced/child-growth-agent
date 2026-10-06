@@ -4,6 +4,9 @@ import '@/components/home-v2/home-fonts.css';
 import { Toaster } from '@/components/ui/sonner';
 import { TeacherProvider } from '@/components/teacher-provider';
 import { TopNav } from '@/components/top-nav';
+import { YayaEntry } from '@/components/yaya/yaya-entry';
+import { YayaPanel } from '@/components/yaya/yaya-panel';
+import { YayaSurface } from '@/components/yaya/yaya-provider';
 import { resolveServerAuth } from '@/lib/accounts/access';
 
 export const metadata: Metadata = {
@@ -26,8 +29,12 @@ export default async function RootLayout({
     <html lang="zh-CN">
       <body className="min-h-screen bg-background antialiased">
         <TeacherProvider initial={initial}>
-          <TopNav />
-          <main className="mx-auto w-full max-w-[1536px] px-4 pb-16 pt-6 sm:px-6 lg:px-10">{children}</main>
+          <YayaSurface auth={resolved}>
+            <TopNav />
+            <main className="mx-auto w-full max-w-[1536px] px-4 pb-16 pt-6 sm:px-6 lg:px-10">{children}</main>
+            <YayaEntry auth={resolved} />
+            <YayaPanel auth={resolved} />
+          </YayaSurface>
         </TeacherProvider>
         <Toaster richColors position="top-center" />
       </body>
