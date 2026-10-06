@@ -16,28 +16,37 @@
  *
  * 安全边界：
  * - 新请求协议拒绝客户端自报 Principal / scope / 角色 / 批准身份（严格对象 +
- *   显式权威字段扫描）；
+ *   显式权威字段扫描）；服务器响应合法携带批准身份 / 摘要等字段，响应解析只
+ *   扫描秘密字段，不套用请求禁止字段；
  * - 密码类管理动作只返回安全控件意图 / 目标，协议不接受也不返回任何秘密字段；
  * - 响应头未发送前允许 HTTP 错误；流已开始后失败必须是显式终态事件
  *   （`run_end`），不允许中途伪装成 HTTP 503；停止详情使用协议固定文案，
  *   不回传内部异常栈或未经校验的模型原始 JSON。
+ *
+ * 浏览器消费边界：本模块是 UI1 可直接打包的纯协议层，**不得引入
+ * `node:crypto` / Next / 数据库 / 模型模块**；摘要格式校验在本文件内联
+ * 实现，不导入服务器侧 `storage-types`。
  */
 import { z } from "zod";
 
 import { ACCESS_ACTIONS, ACCESS_RESOURCE_KINDS } from "../accounts/types";
 import type { LlmUsage } from "../llm";
 import { MEDIA_MAX_IMAGES_PER_UPLOAD } from "../media/limits";
-import { isYayaDigestHex } from "./storage-types";
 import {
+  compareBatchReceipts,
+  itemsToResend,
+  queryOperationOutcome,
   receiptProvesSuccess,
   YAYA_PAYLOAD_KINDS,
   YAYA_PROVENANCE_KINDS,
   YAYA_RECEIPT_EFFECTS,
   YAYA_RECEIPT_STATUSES,
+  type YayaBatchComparison,
   type YayaDomainPayload,
   type YayaOperationProposal,
   type YayaOperationQueryOutcome,
   type YayaOperationReceipt,
+  type YayaPlannedOperation,
   type YayaSourceRef,
   type YayaToolAuth,
 } from "./types";
@@ -73,6 +82,34 @@ export const YAYA_API_PATHS = {
   approval: "/api/yaya/proposals/{proposal_id}/approval",
 } as const;
 
+/**
+ * 内容摘要格式（与 storage-types.isYayaDigestHex 同口径，服务器仍负责计算）。
+ * 协议层不导入 storage-types：其运行时引入 node:crypto，会破坏浏览器打包。
+ */
+const YAYA_CONTENT_DIGEST_HEX = /^[0-9a-f]{64}$/;
+export function isYayaDigestHexWire(value: unknown): value is string {
+  return typeof value === "string" && YAYA_CONTENT_DIGEST_HEX.test(value);
+}
+
+/** 语义深比较：对象键顺序无关；数组保持业务顺序；用于终态、提案与回执一致性 */
+function valuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((entry, index) => valuesEqual(entry, b[index]));
+  }
+  if (typeof a !== "object") return false;
+  const aRecord = a as Record<string, unknown>;
+  const bRecord = b as Record<string, unknown>;
+  const aKeys = Object.keys(aRecord).sort();
+  const bKeys = Object.keys(bRecord).sort();
+  if (aKeys.length !== bKeys.length || aKeys.some((key, index) => key !== bKeys[index])) {
+    return false;
+  }
+  return aKeys.every((key) => valuesEqual(aRecord[key], bRecord[key]));
+}
+
 /* ------------------------------- 违规与解析结果 ------------------------------- */
 
 export const YAYA_API_VIOLATION_CODES = [
@@ -93,6 +130,8 @@ export const YAYA_API_VIOLATION_CODES = [
   "receipt_identity_mismatch",
   "contradictory_receipt",
   "unverified_success",
+  "response_incomplete",
+  "response_identity_mismatch",
 ] as const;
 export type YayaApiViolationCode = (typeof YAYA_API_VIOLATION_CODES)[number];
 
@@ -203,21 +242,33 @@ export function findSecretFields(value: unknown): string[] {
   return hits;
 }
 
-function scanViolations(input: unknown): YayaApiViolation[] {
+/**
+ * 扫描模式：
+ * - request：请求体禁止自报权威字段，也禁止任何秘密字段；
+ * - response：服务器响应合法携带批准身份 / 摘要 / 资源事实，只禁止秘密字段；
+ * - none：线事件载荷已由专属 schema 校验（payload 守卫另行排除秘密字段）。
+ */
+export type YayaScanMode = "request" | "response" | "none";
+
+function scanViolations(input: unknown, mode: YayaScanMode): YayaApiViolation[] {
   const violations: YayaApiViolation[] = [];
-  for (const path of findForgedAuthorityFields(input)) {
-    violations.push(
-      violation(
-        "forged_authority_field",
-        path,
-        "客户端不能自报身份 / 范围 / 角色 / 批准字段；服务端只认当前认证与批准记录。",
-      ),
-    );
+  if (mode === "request") {
+    for (const path of findForgedAuthorityFields(input)) {
+      violations.push(
+        violation(
+          "forged_authority_field",
+          path,
+          "客户端不能自报身份 / 范围 / 角色 / 批准字段；服务端只认当前认证与批准记录。",
+        ),
+      );
+    }
   }
-  for (const path of findSecretFields(input)) {
-    violations.push(
-      violation("secret_field_present", path, "协议不接受密码 / 令牌等秘密字段。"),
-    );
+  if (mode !== "none") {
+    for (const path of findSecretFields(input)) {
+      violations.push(
+        violation("secret_field_present", path, "协议不接受密码 / 令牌等秘密字段。"),
+      );
+    }
   }
   return violations;
 }
@@ -236,10 +287,13 @@ function zodViolations(error: z.ZodError, basePath: string): YayaApiViolation[] 
 function parseWith<T>(
   input: unknown,
   schema: z.ZodType<T>,
-  options: { scan?: boolean; basePath?: string } = {},
+  options: { scan?: YayaScanMode; basePath?: string } = {},
 ): YayaApiParseResult<T> {
   const basePath = options.basePath ?? "";
-  const violations: YayaApiViolation[] = options.scan === false ? [] : scanViolations(input);
+  const violations: YayaApiViolation[] =
+    options.scan === undefined || options.scan === "none"
+      ? []
+      : scanViolations(input, options.scan);
   const parsed = schema.safeParse(input);
   if (!parsed.success) {
     violations.push(...zodViolations(parsed.error, basePath));
@@ -296,7 +350,7 @@ export const yayaRunStartRequestSchema: z.ZodType<YayaRunStartRequest> = z
 export function parseYayaRunStartRequest(
   input: unknown,
 ): YayaApiParseResult<YayaRunStartRequest> {
-  return parseWith(input, yayaRunStartRequestSchema);
+  return parseWith(input, yayaRunStartRequestSchema, { scan: "request" });
 }
 
 /* ------------------------------- 原运行查询 ------------------------------- */
@@ -338,7 +392,7 @@ export const yayaRunLookupResponseSchema: z.ZodType<YayaRunLookupResponse> =
 export function parseYayaRunLookupResponse(
   input: unknown,
 ): YayaApiParseResult<YayaRunLookupResponse> {
-  return parseWith(input, yayaRunLookupResponseSchema);
+  return parseWith(input, yayaRunLookupResponseSchema, { scan: "response" });
 }
 
 /** 数据层事实：由 AGENT-APP1 从 owner 绑定的运行记录读取，本模块只做分类 */
@@ -355,6 +409,7 @@ export type YayaRunLookupFacts =
 /**
  * 查询事实 → 五态响应。owner 绑定核不上、终态不可读一律 `unverifiable`；
  * 数据库/服务查询失败是 `service_failure`，绝不折叠成 `missing`。
+ * stopped 终态的 detail 与实时事件同口径，统一替换为协议安全文案。
  */
 export function classifyYayaRunLookup(facts: YayaRunLookupFacts): YayaRunLookupResponse {
   if (facts.kind === "query_failed") return { status: "service_failure" };
@@ -367,7 +422,11 @@ export function classifyYayaRunLookup(facts: YayaRunLookupFacts): YayaRunLookupR
   }
   const parsed = yayaRunOutcomeSchema.safeParse(facts.state.outcome);
   if (!parsed.success) return { status: "unverifiable", reason: "terminal_unreadable" };
-  return { status: "finished", run_id: facts.run_id, outcome: parsed.data };
+  const outcome =
+    parsed.data.kind === "stopped"
+      ? { ...parsed.data, detail: safeYayaStopDetail(parsed.data.reason) }
+      : parsed.data;
+  return { status: "finished", run_id: facts.run_id, outcome };
 }
 
 /* ------------------------------- 取消运行 ------------------------------- */
@@ -380,7 +439,7 @@ export const yayaRunCancelRequestSchema: z.ZodType<YayaRunCancelRequest> = z.str
 export function parseYayaRunCancelRequest(
   input: unknown,
 ): YayaApiParseResult<YayaRunCancelRequest> {
-  return parseWith(input, yayaRunCancelRequestSchema);
+  return parseWith(input, yayaRunCancelRequestSchema, { scan: "request" });
 }
 
 /**
@@ -406,7 +465,7 @@ export const yayaRunCancelResponseSchema: z.ZodType<YayaRunCancelResponse> = z.s
 export function parseYayaRunCancelResponse(
   input: unknown,
 ): YayaApiParseResult<YayaRunCancelResponse> {
-  return parseWith(input, yayaRunCancelResponseSchema);
+  return parseWith(input, yayaRunCancelResponseSchema, { scan: "response" });
 }
 
 /* ------------------------------- 失败投递 ------------------------------- */
@@ -471,7 +530,7 @@ export const yayaOperationProposalSchema: z.ZodType<YayaOperationProposal> = z.s
       z.strictObject({
         item_key: nonBlankString(),
         target_id: z.string().nullable(),
-        content_digest: z.string().refine(isYayaDigestHex, "content_digest 必须是 SHA-256 十六进制"),
+        content_digest: z.string().refine(isYayaDigestHexWire, "content_digest 必须是 SHA-256 十六进制"),
         attachment_associations: z.array(
           z.strictObject({
             attachment_id: nonBlankString(),
@@ -706,7 +765,7 @@ export function parseYayaRunWireLine(line: string): YayaApiParseResult<YayaRunWi
       ],
     };
   }
-  const parsed = parseWith(raw, yayaRunWireEventSchema, { scan: false });
+  const parsed = parseWith(raw, yayaRunWireEventSchema, { scan: "none" });
   if (parsed.ok) return parsed;
   return {
     ok: false,
@@ -722,10 +781,6 @@ export function parseYayaRunWireLine(line: string): YayaApiParseResult<YayaRunWi
 export type YayaRunStreamVerdict =
   | { ok: true; run_id: string; outcome: YayaRunOutcome; event_count: number }
   | { ok: false; run_id: string | null; violations: readonly YayaApiViolation[] };
-
-function outcomeJson(value: unknown): string {
-  return JSON.stringify(value);
-}
 
 /**
  * 流校验（纯函数）：协议版本、run 身份、序号连续、唯一终态、终态与已发布
@@ -748,7 +803,7 @@ export function validateYayaRunEventStream(
   const parsed: YayaRunWireEvent[] = [];
   for (let index = 0; index < events.length; index += 1) {
     const result = parseWith(events[index], yayaRunWireEventSchema, {
-      scan: false,
+      scan: "none",
       basePath: `events[${index}]`,
     });
     if (!result.ok) {
@@ -813,6 +868,12 @@ export function validateYayaRunEventStream(
   const clarifies = parsed.filter((event) => event.type === "clarify");
   const stoppeds = parsed.filter((event) => event.type === "stopped");
   const proposals = parsed.filter((event) => event.type === "proposal_prepared");
+  const proposalIds = proposals.map((event) => event.proposal.proposal_id);
+  if (new Set(proposalIds).size !== proposalIds.length) {
+    violations.push(
+      violation("contradictory_terminal", "", "提案身份重复或歧义，不得折叠成一致"),
+    );
+  }
 
   if (end !== undefined && end.type === "run_end") {
     const outcome = end.outcome;
@@ -822,7 +883,7 @@ export function validateYayaRunEventStream(
         answers.length !== 1 ||
         answer === undefined ||
         answer.content !== outcome.content ||
-        jsonEquals(answer.sources, outcome.sources) === false
+        valuesEqual(answer.sources, outcome.sources) === false
       ) {
         violations.push(violation("contradictory_terminal", "", "answer 事件与终态不一致"));
       }
@@ -844,12 +905,15 @@ export function validateYayaRunEventStream(
     } else if (outcome.kind === "proposed") {
       if (proposals.length === 0 || proposals.length !== outcome.proposals.length) {
         violations.push(violation("contradictory_terminal", "", "提案事件与终态不一致"));
-      } else {
-        const eventIds = proposals.map((event) => event.proposal.proposal_id);
-        const outcomeIds = outcome.proposals.map((proposal) => proposal.proposal_id);
-        if (jsonEquals(eventIds, outcomeIds) === false) {
-          violations.push(violation("contradictory_terminal", "", "提案身份与终态不一致"));
-        }
+      } else if (
+        valuesEqual(
+          proposals.map((event) => event.proposal),
+          outcome.proposals,
+        ) === false
+      ) {
+        // 完整业务内容比对：同 proposal_id 但批次 / 目标 / 动作 / 原文 / 摘要 / 附件
+        // 任一不同都判矛盾，重复或歧义不得折叠成一致。
+        violations.push(violation("contradictory_terminal", "", "提案业务内容与终态不一致"));
       }
       if (answers.length > 0 || clarifies.length > 0 || stoppeds.length > 0) {
         violations.push(violation("contradictory_terminal", "", "终态为提案但存在其他终局事件"));
@@ -897,7 +961,7 @@ export function validateYayaRunEventStream(
   for (const [operationId, outcomes] of receiptsByOperation) {
     const head = outcomes[0];
     if (head === undefined) continue;
-    if (!outcomes.every((entry) => outcomeJson(entry) === outcomeJson(head))) {
+    if (!outcomes.every((entry) => valuesEqual(entry, head))) {
       violations.push(
         violation("contradictory_receipt", `receipt(${operationId})`, "同一操作回执互相矛盾"),
       );
@@ -908,10 +972,6 @@ export function validateYayaRunEventStream(
     return { ok: false, run_id: streamRunId, violations };
   }
   return { ok: true, run_id: end.run_id, outcome: end.outcome, event_count: parsed.length };
-}
-
-function jsonEquals(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /* ------------------------------- 批准请求（DATA 入口） ------------------------------- */
@@ -940,7 +1000,7 @@ export const yayaApprovalActionRequestSchema: z.ZodType<YayaApprovalActionReques
 export function parseYayaApprovalActionRequest(
   input: unknown,
 ): YayaApiParseResult<YayaApprovalActionRequest> {
-  return parseWith(input, yayaApprovalActionRequestSchema);
+  return parseWith(input, yayaApprovalActionRequestSchema, { scan: "request" });
 }
 
 /* ------------------------------- 执行请求（TOOLS1 入口） ------------------------------- */
@@ -964,7 +1024,7 @@ export const yayaOperationsExecuteRequestSchema: z.ZodType<YayaOperationsExecute
 export function parseYayaOperationsExecuteRequest(
   input: unknown,
 ): YayaApiParseResult<YayaOperationsExecuteRequest> {
-  return parseWith(input, yayaOperationsExecuteRequestSchema);
+  return parseWith(input, yayaOperationsExecuteRequestSchema, { scan: "request" });
 }
 
 export interface YayaOperationsExecuteResponse {
@@ -977,7 +1037,85 @@ export const yayaOperationsExecuteResponseSchema: z.ZodType<YayaOperationsExecut
 export function parseYayaOperationsExecuteResponse(
   input: unknown,
 ): YayaApiParseResult<YayaOperationsExecuteResponse> {
-  return parseWith(input, yayaOperationsExecuteResponseSchema, { scan: false });
+  return parseWith(input, yayaOperationsExecuteResponseSchema, { scan: "response" });
+}
+
+/* ------------------------------- 执行响应语义核验 ------------------------------- */
+
+export interface YayaOperationsExecutionAssessment {
+  response: YayaOperationsExecuteResponse;
+  /** 复用冻结 `compareBatchReceipts`：缺项 / 多出 / 重复 / 矛盾 / 未证明成功 */
+  comparison: YayaBatchComparison;
+  /** 逐项查询语义，复用冻结 `queryOperationOutcome` */
+  outcomes: readonly { operation_id: string; outcome: YayaOperationQueryOutcome }[];
+  /** 显式恢复候选（仅“明确失败且确认无效果”），协议不自动重发 */
+  explicit_resend_candidates: readonly YayaOperationReceipt[];
+}
+
+/**
+ * operations POST 响应的**语义**核验（结构合法 ≠ 业务已保存）：
+ * - 先做结构解析（response 扫描），再按 DATA prepare 的完整预期计划对账；
+ * - 成功声明必须通过冻结 `receiptProvesSuccess`（saved + effect=unknown +
+ *   空业务标识一律不算成功）；
+ * - 缺项 / 身份错配（错 target / 错 actor / 多出）/ 矛盾回执 / 未证明成功
+ *   一律拒绝，不能渲染全成功；
+ * - 合法的 failed / in_progress / unknown 与 `unchanged` 保留在 comparison 与
+ *   outcomes 中，不因非成功被丢弃；合法幂等重复回执允许（仍表达为重复）。
+ */
+export function assessYayaOperationsExecutionResponse(
+  plan: readonly YayaPlannedOperation[],
+  input: unknown,
+): YayaApiParseResult<YayaOperationsExecutionAssessment> {
+  const parsed = parseYayaOperationsExecuteResponse(input);
+  if (!parsed.ok) return parsed;
+  const receipts = parsed.value.receipts;
+  const comparison = compareBatchReceipts(plan, receipts);
+  const violations: YayaApiViolation[] = [];
+
+  if (
+    comparison.duplicate_plan_operation_ids.length > 0 ||
+    comparison.duplicate_plan_item_keys.length > 0
+  ) {
+    violations.push(violation("invalid_shape", "plan", "预期计划存在重复身份，无法对账"));
+  }
+  for (const operationId of comparison.missing_operation_ids) {
+    violations.push(
+      violation("response_incomplete", `receipt(${operationId})`, "缺少该操作的合法回执"),
+    );
+  }
+  for (const operationId of comparison.unexpected_operation_ids) {
+    violations.push(
+      violation(
+        "response_identity_mismatch",
+        `receipt(${operationId})`,
+        "回执身份（batch/proposal/item/target/actor）与预期计划不一致",
+      ),
+    );
+  }
+  for (const operationId of comparison.contradictory_operation_ids) {
+    violations.push(
+      violation("contradictory_receipt", `receipt(${operationId})`, "同一操作回执互相矛盾"),
+    );
+  }
+  for (const operationId of comparison.unverified_success_operation_ids) {
+    violations.push(
+      violation("unverified_success", `receipt(${operationId})`, "成功声明缺少完整成功证明"),
+    );
+  }
+  if (violations.length > 0) return { ok: false, violations };
+
+  return {
+    ok: true,
+    value: {
+      response: parsed.value,
+      comparison,
+      outcomes: plan.map((operation) => ({
+        operation_id: operation.operation_id,
+        outcome: queryOperationOutcome(receipts, operation),
+      })),
+      explicit_resend_candidates: itemsToResend(plan, receipts),
+    },
+  };
 }
 
 /* ------------------------------- 密码安全控件意图 ------------------------------- */

@@ -1,12 +1,16 @@
 # 芽芽 v1 可序列化 HTTP / 事件协议（api-contract-v1）
 
-2026-10-06，YAYA-API0，基线 `24b0588c07ce68968178660ba7dc1382292e8bdc`（YAYA-CORE-INTEGRATE1 候选）。
+2026-10-06，YAYA-API0（含 R1 返修），基线 `24b0588c07ce68968178660ba7dc1382292e8bdc`（YAYA-CORE-INTEGRATE1 候选）。
 本文件是**接口协议**，不是实现：正式运行 API 归 AGENT-APP1，`operations` POST 归 TOOLS1；UI1 只消费，不自行修改或 fork。
-运行时代码：`src/lib/yaya/api-contract.ts`；纯检查：`scripts/yaya/check-api-contract.ts`（45 项，reference_only）。
+运行时代码：`src/lib/yaya/api-contract.ts`；纯检查：`scripts/yaya/check-api-contract.ts`（57 项，含真实 browser-target 打包检查，reference_only）。
 
 冻结口径（`contract-v1.md` / `src/lib/yaya/types.ts`）不变；本协议只做**可序列化外壳**：
 `YayaRunRequest` 的 `signal` / `onEvent` 是进程内对象，不能 JSON 化，浏览器请求使用本协议的 `YayaRunStartRequest`，
 run_id 由服务器建立。事件种类 / 停止原因 / 提案 / 回执 / 查询结论全部复用冻结类型，不维护影子协议。
+
+浏览器消费边界：协议层是 UI1 可直接打包的纯模块，不导入 `node:crypto` / Next / 数据库 / 模型模块；
+摘要只做格式校验（内联实现，不导入服务器侧 `storage-types`），摘要计算仍归服务器。检查含真实 esbuild
+`platform=browser` 打包（不使用 polyfill、不新增依赖）。
 
 ## 1. 接口路径表
 
@@ -57,7 +61,9 @@ run_id 由服务器建立。事件种类 / 停止原因 / 提案 / 回执 / 查�
 
 - owner 绑定核不上（`owner_binding_failed`）或终态记录不可读 / 不合法（`terminal_unreadable`）→ `unverifiable`；
 - 数据库 / 服务失败是 `service_failure`，**绝不冒充** `missing`；
-- `finished` 只返回冻结 `YayaRunOutcome`，未知结果只核原身份，**不自动重发 POST**。
+- `finished` 只返回冻结 `YayaRunOutcome`，未知结果只核原身份，**不自动重发 POST**；
+- `finished` 的 `stopped.detail` 与实时事件同口径，统一替换为 `safeYayaStopDetail` 协议文案，不回传内部异常文本；
+- 响应解析只扫描秘密字段，不套用请求的伪造权威字段（`content_digest` / `actor_account_id` 等是合法响应字段）。
 
 取消（请求体必须为空；run_id 在路径）：
 
@@ -79,7 +85,12 @@ run_id 由服务器建立。事件种类 / 停止原因 / 提案 / 回执 / 查�
   `action_parsed` / `tool_result` / `public_search_refused` / `proposal_prepared` / `answer` /
   `clarify` / `receipt` / `stopped`）+ 线协议终态 `run_end`。
 - 结束形态：每个流恰好一个 `run_end`，`outcome` 为冻结 `YayaRunOutcome`（answered / clarified / proposed / stopped），
-  必须与已发布事件一致（回答正文、澄清问题、提案身份、停止原因逐一对照）。
+  必须与已发布事件一致：回答正文、澄清问题、停止原因逐一对照；提案按**完整业务内容**（proposal/batch 身份、
+  动作/资源、逐项 item_key/target/content_digest、附件关联、payload 全部字段）语义深比较，键顺序无关；
+  同 `proposal_id` 但内容不同、或同 id 重复/歧义，一律判矛盾，不得折叠成一致。
+- 回执事件：成功声明（saved / saved_detail_unavailable）必须通过冻结 `receiptProvesSuccess`（`effect=committed` +
+  非空业务标识）；`effect=unknown` 或空标识一律 `unverified_success`；回执身份与原操作不一致、同一操作回执矛盾分别拒绝；
+  完全相同结果的重复回执是合法幂等重放。
 - 不承诺字符级模型流：`model_completed` 是整段响应；无 token/delta 事件。
 - 失败投递：`selectYayaRunFailureMode(headersSent)` → 头未发 `http_error`，流已开始 `terminal_event`
   （中途失败不能伪装成 HTTP 503）。
@@ -115,10 +126,16 @@ run_id 由服务器建立。事件种类 / 停止原因 / 提案 / 回执 / 查�
 - TOOLS1 执行入口 `POST /api/yaya/operations` 最小请求：`{ "approval_id": "...", "operation_ids": ["..."] }`；
   提交者身份 / 会话 / CSRF / 执行时刻由服务端解析（`YayaApprovalSubmitter`），不得自报；
   请求体 `approved`、模型输出、本地 runtime tool part 都不是批准证明。
-- 最小响应：`{ "receipts": [YayaOperationReceipt, ...] }`，非空；每个回执成功必须满足冻结
-  `receiptProvesSuccess`（`effect=committed` + 非空业务标识 + saved/saved_detail_unavailable/unchanged）。
-- 未知结果只按原 operation_id 查询（DATA GET）；`itemsToResend` 仅输出“明确失败且无效果”的显式候选项，
-  协议不自动重发任何 POST。
+- 最小响应：`{ "receipts": [YayaOperationReceipt, ...] }`，非空；结构解析之后必须走语义核验
+  `assessYayaOperationsExecutionResponse(plan, body)`（复用冻结 `compareBatchReceipts` / `queryOperationOutcome` /
+  `receiptProvesSuccess` / `itemsToResend`）：
+  - 成功声明必须满足 `receiptProvesSuccess`；`saved + effect=unknown + 空业务标识` 结构合法但判 `unverified_success`，
+    不能渲染为已保存；
+  - 对照 DATA prepare 的完整预期计划：缺项 `response_incomplete`、身份错配（错 batch/proposal/item/target/actor 或多出）
+    `response_identity_mismatch`、矛盾回执 `contradictory_receipt`，任一存在都不能渲染全成功；
+  - 合法的 failed / in_progress / unknown 与 `unchanged` 保留在 `comparison` / `outcomes` 中；合法幂等重复回执允许；
+    `explicit_resend_candidates` 只含“明确失败且确认无效果”的显式候选，协议不自动重发。
+- 未知结果只按原 operation_id 查询（DATA GET）；协议不自动重发任何 POST。
 
 ## 6. 密码相关管理动作
 
@@ -147,10 +164,20 @@ run_id 由服务器建立。事件种类 / 停止原因 / 提案 / 回执 / 查�
 | 矛盾 | run_end 后有事件；回答 / 澄清 / 提案 / 停止事件与终态不一致 | `event_after_terminal` / `contradictory_terminal` |
 | 中断 | 空流、首事件不是 run_started、缺 run_end、序号缺口 | `missing_run_started` / `missing_terminal` / `sequence_gap` |
 | 查询 | 服务失败 vs 缺失 vs 运行中 vs 已结束 vs 不可核验 | 五态分开，服务失败不冒充缺失 |
+| 查询 | `finished + proposed` 往返（含 `content_digest` / `actor_account_id`） | 响应解析只扫秘密字段，不误判伪造 |
+| 查询 | 恢复路径 `stopped.detail` 带内部标记 | 统一替换为 `safeYayaStopDetail` |
 | 回执 | `unknown` 不冒充成功；空业务标识的“成功” | `unverified_success` |
 | 回执 | 回执身份与原操作不一致；同一操作回执矛盾 | `receipt_identity_mismatch` / `contradictory_receipt` |
+| 回执 | 流回执 `saved + effect=unknown + 空标识` | `unverified_success`，不得当成功 |
+| 执行 | POST 响应结构合法但未证明成功（`effect=unknown`） | `unverified_success`（结构解析与语义核验分开） |
+| 执行 | 缺项 / 错 target / 错 actor / 错 batch / 矛盾回执 | `response_incomplete` / `response_identity_mismatch` / `contradictory_receipt` |
+| 执行 | 合法 failed / in_progress / unknown / unchanged / 幂等重复 | 保留在 comparison / outcomes，不丢失 |
+| 提案 | 同 `proposal_id` 但 batch / 目标 / 原文 / 摘要 / 附件改变 | `contradictory_terminal`（完整业务内容比对） |
+| 提案 | 仅对象键顺序不同、语义一致 | 放行 |
+| 提案 | 同 id 重复 / 歧义提案 | `contradictory_terminal`，不得折叠 |
 | 幂等 | 完全相同结果的重复回执 | 合法幂等，放行 |
 | 文案 | 停止详情携带内部异常文本 | 被 `safeYayaStopDetail` 替换 |
+| 浏览器 | 协议层真实 esbuild `platform=browser` 打包 | 通过；无 `node:` 内置依赖链 |
 
 ## 8. 未实现接口清单与 NOT_RUN
 

@@ -12,9 +12,12 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 import { normalizeApprovalAction } from "../../src/lib/yaya/data/invariants";
 import {
+  assessYayaOperationsExecutionResponse,
   classifyYayaRunLookup,
   encodeYayaRunEventLine,
   findForgedAuthorityFields,
@@ -676,6 +679,272 @@ check("回执：相同结果重复是合法幂等，矛盾回执被拒绝", () =
   }
 });
 
+/* ------------------------------- R1：恢复响应与提案内容一致性 ------------------------------- */
+
+check("恢复：四种终态 classify → 解析往返一致", () => {
+  const outcomes: unknown[] = [
+    { kind: "answered", content: "hi", sources: [] },
+    { kind: "clarified", question: "哪个班？" },
+    { kind: "proposed", proposals: [PROPOSAL] },
+    { kind: "stopped", reason: "model_failed", detail: "raw internal marker" },
+  ];
+  for (const outcome of outcomes) {
+    const lookup = classifyYayaRunLookup({
+      kind: "found",
+      run_id: RUN_ID,
+      owner_verified: true,
+      state: { kind: "terminal", outcome },
+    });
+    assert.equal(lookup.status, "finished");
+    const parsed = parseYayaRunLookupResponse(lookup);
+    assert.equal(parsed.ok, true);
+  }
+});
+
+check("恢复：finished + proposed 不被误判为伪造字段", () => {
+  const lookup = classifyYayaRunLookup({
+    kind: "found",
+    run_id: RUN_ID,
+    owner_verified: true,
+    state: { kind: "terminal", outcome: { kind: "proposed", proposals: [PROPOSAL] } },
+  });
+  assert.equal(lookup.status, "finished");
+  const parsed = parseYayaRunLookupResponse(lookup);
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) assert.equal(parsed.value.status, "finished");
+});
+
+check("恢复：stopped.detail 统一套用安全文案，不回传内部标记", () => {
+  const marker = "REVIEW_INTERNAL_STACK_MARKER at /srv/private/review.ts";
+  const lookup = classifyYayaRunLookup({
+    kind: "found",
+    run_id: RUN_ID,
+    owner_verified: true,
+    state: {
+      kind: "terminal",
+      outcome: { kind: "stopped", reason: "model_failed", detail: marker },
+    },
+  });
+  assert.equal(lookup.status, "finished");
+  assert.equal(JSON.stringify(lookup).includes("REVIEW_INTERNAL_STACK_MARKER"), false);
+  if (lookup.status === "finished" && lookup.outcome.kind === "stopped") {
+    assert.equal(lookup.outcome.detail, safeYayaStopDetail("model_failed"));
+  }
+  const parsed = parseYayaRunLookupResponse(lookup);
+  assert.equal(parsed.ok, true);
+});
+
+check("提案一致性：同 proposal_id 不同业务内容判矛盾", () => {
+  const changed = {
+    ...PROPOSAL,
+    batch_id: "different-batch",
+    items: [
+      {
+        ...PROPOSAL.items[0],
+        target_id: "child-b",
+        content_digest: "b".repeat(64),
+        payload: {
+          ...PROPOSAL.items[0].payload,
+          child_id: "child-b",
+          raw_text: "阿依搭了六层积木。",
+        },
+      },
+    ],
+  };
+  const verdict = validateYayaRunEventStream([
+    STARTED,
+    { ...envelope(2), type: "proposal_prepared", proposal: PROPOSAL },
+    { ...envelope(3), type: "run_end", outcome: { kind: "proposed", proposals: [changed] } },
+  ]);
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.ok(verdict.violations.some((entry) => entry.code === "contradictory_terminal"));
+  }
+});
+
+check("提案一致性：键顺序不同但语义一致不误拒", () => {
+  const reordered = {
+    prepared_at: PROPOSAL.prepared_at,
+    items: PROPOSAL.items.map((item) => ({
+      payload: { ...item.payload },
+      attachment_associations: item.attachment_associations,
+      content_digest: item.content_digest,
+      target_id: item.target_id,
+      item_key: item.item_key,
+    })),
+    auth: PROPOSAL.auth,
+    proposal_origin: PROPOSAL.proposal_origin,
+    batch_id: PROPOSAL.batch_id,
+    proposal_id: PROPOSAL.proposal_id,
+  };
+  const verdict = validateYayaRunEventStream([
+    STARTED,
+    { ...envelope(2), type: "proposal_prepared", proposal: PROPOSAL },
+    { ...envelope(3), type: "run_end", outcome: { kind: "proposed", proposals: [reordered] } },
+  ]);
+  assert.equal(verdict.ok, true);
+});
+
+check("提案一致性：同 id 的重复 / 歧义提案不得折叠", () => {
+  const changed = { ...PROPOSAL, batch_id: "different-batch" };
+  const verdict = validateYayaRunEventStream([
+    STARTED,
+    { ...envelope(2), type: "proposal_prepared", proposal: PROPOSAL },
+    { ...envelope(3), type: "proposal_prepared", proposal: changed },
+    {
+      ...envelope(4),
+      type: "run_end",
+      outcome: { kind: "proposed", proposals: [PROPOSAL, changed] },
+    },
+  ]);
+  assert.equal(verdict.ok, false);
+});
+
+/* ------------------------------- R1：执行响应语义核验 ------------------------------- */
+
+const EXEC_PLAN = [PLANNED];
+
+check("执行：结构合法但未证明成功不得判保存", () => {
+  const fake = {
+    ...SAVED_RECEIPT,
+    effect: "unknown",
+    business_object_id: null,
+    business_revision: null,
+  };
+  const shape = parseYayaOperationsExecuteResponse({ receipts: [fake] });
+  assert.equal(shape.ok, true);
+  const verdict = assessYayaOperationsExecutionResponse(EXEC_PLAN, { receipts: [fake] });
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.ok(verdict.violations.some((entry) => entry.code === "unverified_success"));
+  }
+});
+
+check("执行：完整成功 / unchanged / 合法失败与执行中都不丢失", () => {
+  const saved = assessYayaOperationsExecutionResponse(EXEC_PLAN, {
+    receipts: [SAVED_RECEIPT],
+  });
+  assert.equal(saved.ok, true);
+  if (saved.ok) {
+    assert.equal(saved.value.comparison.all_saved, true);
+    assert.equal(saved.value.outcomes[0]?.outcome.kind, "saved");
+    assert.deepEqual(saved.value.explicit_resend_candidates, []);
+  }
+  const unchanged = { ...SAVED_RECEIPT, status: "unchanged", business_revision: null };
+  const unchangedVerdict = assessYayaOperationsExecutionResponse(EXEC_PLAN, {
+    receipts: [unchanged],
+  });
+  assert.equal(unchangedVerdict.ok, true);
+  if (unchangedVerdict.ok) assert.equal(unchangedVerdict.value.comparison.all_saved, true);
+  const failed = {
+    ...SAVED_RECEIPT,
+    status: "failed",
+    effect: "none",
+    business_object_id: null,
+    business_revision: null,
+  };
+  const failedVerdict = assessYayaOperationsExecutionResponse(EXEC_PLAN, {
+    receipts: [failed],
+  });
+  assert.equal(failedVerdict.ok, true);
+  if (failedVerdict.ok) {
+    assert.equal(failedVerdict.value.comparison.all_saved, false);
+    assert.equal(failedVerdict.value.outcomes[0]?.outcome.kind, "failed");
+    assert.equal(failedVerdict.value.explicit_resend_candidates.length, 1);
+  }
+  const inProgress = { ...failed, status: "in_progress", effect: "unknown" };
+  const inProgressVerdict = assessYayaOperationsExecutionResponse(EXEC_PLAN, {
+    receipts: [inProgress],
+  });
+  assert.equal(inProgressVerdict.ok, true);
+  if (inProgressVerdict.ok) {
+    assert.equal(inProgressVerdict.value.outcomes[0]?.outcome.kind, "in_progress");
+  }
+});
+
+check("执行：缺项 / 错身份 / 矛盾回执不得渲染成功", () => {
+  const wrongOperation = assessYayaOperationsExecutionResponse(EXEC_PLAN, {
+    receipts: [{ ...SAVED_RECEIPT, operation_id: "op-other" }],
+  });
+  assert.equal(wrongOperation.ok, false);
+  if (!wrongOperation.ok) {
+    const codes = wrongOperation.violations.map((entry) => entry.code);
+    assert.ok(codes.includes("response_identity_mismatch"));
+    assert.ok(codes.includes("response_incomplete"));
+  }
+  for (const wrong of [
+    { ...SAVED_RECEIPT, actor_account_id: "teacher-other" },
+    { ...SAVED_RECEIPT, target_id: "child-other" },
+    { ...SAVED_RECEIPT, batch_id: "batch-other" },
+  ]) {
+    const verdict = assessYayaOperationsExecutionResponse(EXEC_PLAN, { receipts: [wrong] });
+    assert.equal(verdict.ok, false);
+    if (!verdict.ok) {
+      assert.ok(verdict.violations.some((entry) => entry.code === "response_identity_mismatch"));
+    }
+  }
+  const contradictory = assessYayaOperationsExecutionResponse(EXEC_PLAN, {
+    receipts: [
+      SAVED_RECEIPT,
+      {
+        ...SAVED_RECEIPT,
+        status: "failed",
+        effect: "none",
+        business_object_id: null,
+        business_revision: null,
+      },
+    ],
+  });
+  assert.equal(contradictory.ok, false);
+  if (!contradictory.ok) {
+    assert.ok(contradictory.violations.some((entry) => entry.code === "contradictory_receipt"));
+  }
+});
+
+check("执行：合法幂等重复回执保留，不误判矛盾", () => {
+  const verdict = assessYayaOperationsExecutionResponse(EXEC_PLAN, {
+    receipts: [SAVED_RECEIPT, SAVED_RECEIPT],
+  });
+  assert.equal(verdict.ok, true);
+  if (verdict.ok) {
+    assert.ok(verdict.value.comparison.duplicate_operation_ids.includes("op-1"));
+    assert.equal(verdict.value.comparison.saved, 1);
+  }
+});
+
+check("流回执：effect=unknown 的 saved 不算成功", () => {
+  const fake = {
+    ...SAVED_RECEIPT,
+    effect: "unknown",
+    business_object_id: null,
+    business_revision: null,
+  };
+  const verdict = validateYayaRunEventStream([
+    STARTED,
+    {
+      ...envelope(2),
+      type: "receipt",
+      operation_id: "op-1",
+      outcome: { kind: "saved", receipt: fake },
+    },
+    {
+      ...envelope(3),
+      type: "stopped",
+      reason: "cancelled",
+      detail: safeYayaStopDetail("cancelled"),
+    },
+    {
+      ...envelope(4),
+      type: "run_end",
+      outcome: { kind: "stopped", reason: "cancelled", detail: safeYayaStopDetail("cancelled") },
+    },
+  ]);
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.ok(verdict.violations.some((entry) => entry.code === "unverified_success"));
+  }
+});
+
 /* ------------------------------- 停止详情与失败投递 ------------------------------- */
 
 check("停止详情：内部异常文本不进入线协议", () => {
@@ -733,19 +1002,52 @@ check("路径表与冻结 owner 口径一致", () => {
   assert.equal(YAYA_API_PATHS.run_start, "/api/yaya/conversations/{conversation_id}/runs");
 });
 
-check("协议模块无 Next / 数据库 / 模型导入，纯校验", () => {
+check("协议模块无 Next / 数据库 / 模型 / node:crypto 依赖链，纯校验", () => {
   const source = readFileSync(
     new URL("../../src/lib/yaya/api-contract.ts", import.meta.url),
     "utf8",
   );
-  for (const forbidden of ["next/server", "pg-client", "invokeChatLlm", "fetch(", "zod/v4"]) {
+  for (const forbidden of [
+    "next/server",
+    "pg-client",
+    "invokeChatLlm",
+    "fetch(",
+    "zod/v4",
+    'from "./storage-types"',
+  ]) {
     assert.equal(
       source.includes(forbidden),
       false,
       `api-contract.ts 不应包含 ${forbidden}`,
     );
   }
+  assert.equal(
+    /from\s+["']node:/.test(source),
+    false,
+    "api-contract.ts 不得导入 node: 内置模块（浏览器打包边界）",
+  );
   assert.ok(source.includes(YAYA_RUN_EVENT_PROTOCOL));
+});
+
+check("浏览器：协议层可被 browser-target 真实打包（esbuild）", () => {
+  const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const requireFromHere = createRequire(import.meta.url);
+  const tsupPath = requireFromHere.resolve("tsup");
+  const esbuild = createRequire(tsupPath)("esbuild") as {
+    buildSync(options: Record<string, unknown>): unknown;
+  };
+  esbuild.buildSync({
+    stdin: {
+      contents:
+        "import { parseYayaRunWireLine, classifyYayaRunLookup, assessYayaOperationsExecutionResponse } from './src/lib/yaya/api-contract'; console.log(parseYayaRunWireLine('{}'), classifyYayaRunLookup({ kind: 'not_found' }), assessYayaOperationsExecutionResponse);",
+      resolveDir: projectRoot,
+      sourcefile: "api-contract-browser-check.ts",
+    },
+    bundle: true,
+    platform: "browser",
+    write: false,
+    logLevel: "silent",
+  });
 });
 
 console.log(
