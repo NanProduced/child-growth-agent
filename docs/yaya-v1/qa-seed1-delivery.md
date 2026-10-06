@@ -2,7 +2,7 @@
 
 - 任务起点（基线）：`24b0588c07ce68968178660ba7dc1382292e8bdc`
 - 工作树/分支：`codex/yaya-qa-seed1`（独立工作树 `child-growth-agent-qa-seed1`）
-- 交付提交：`89c3e0c583c002d55fcfc7a4d8ac22b03dacf036`（本文件 SHA 更新为后续文档提交）
+- 交付提交：实现 `89c3e0c583c002d55fcfc7a4d8ac22b03dacf036`；返修（P1×3 + P2×2）`23dbe189fa2e496926acfd174c615a6d902df16f`
 - 交付文件（独占范围）：
   - `scripts/yaya/acceptance/types.ts`、`resources.ts`、`media.ts`、`seed.ts`、`verify.ts`、`run.ts`、`README.md`（新）
   - `docs/yaya-v1/browser-acceptance-plan.md`（新）
