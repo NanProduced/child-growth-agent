@@ -109,3 +109,8 @@
 `list_guide_items` / `get_guide_item` / `list_education_suggestions` /
 `list_teacher_accounts`；Q8 按目录/条目/教育建议拆分为三个工具。
 本模块只注册真实读取，不注册生成/修改/删除，不含公网搜索或任意执行器。
+
+来源协议（R1）：结果以非空、稳定的 `citable_source` 为唯一可引用来源，
+`recheck_dependencies` 仅供服务端按当前授权重核；观察详情不把混合内容整体标为
+`child_fact`，原文/确认稿/AI 草稿/工作流分别标注，`formal_evidence_eligible`
+复用 `basisIsFormalEvidence` 口径；成长小结/活动支持的依据观察并入重核依赖。

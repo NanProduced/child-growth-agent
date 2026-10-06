@@ -91,14 +91,21 @@ export interface YayaReadPorts {
 }
 
 /**
- * 工具结构化结果。`source_refs[0]` 与 `YayaReadToolOutcome.source` 相同：
- * 引擎只登记这一个来源作为可引用 id；其余条目是底层业务依赖，供 APP 重核，
- * 不是新的权限来源，也不能由模型引用决定权限。
+ * 工具结构化结果（R1 来源协议）：
+ * - `citable_source`：唯一可引用来源，ref_id 非空、稳定、无隐私；与
+ *   `YayaReadToolOutcome.source` 相同，是引擎登记进 knownSources 的唯一 id。
+ *   列表/目录/管理员列表也有自己的稳定主来源（如 `children:current_scope`），
+ *   模型引用它不会落空；底层对象 ID 不冒充可引用来源。
+ * - `recheck_dependencies`：结果依赖的全部业务对象（含 citable_source，去重），
+ *   仅供 APP 按当前授权逐项重核；不是模型可引用来源，模型引用其中未被引擎登记的
+ *   ID 会被 source_mismatch 保守拦截。
+ * 两者都不是权限来源，也不能由模型引用决定权限。
  */
 export interface YayaReadPayload<T> {
   tool: string;
   scope_policy: YayaToolScopePolicy;
-  source_refs: readonly YayaSourceRef[];
+  citable_source: YayaSourceRef;
+  recheck_dependencies: readonly YayaSourceRef[];
   data: T;
 }
 

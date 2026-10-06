@@ -16,6 +16,8 @@ import { createSessionToken } from '../../src/lib/accounts/session';
 import { listGuideItems } from '../../src/lib/guide/catalog';
 import { GUIDE_CATALOG_VERSION } from '../../src/lib/guide/types';
 import type { ObservationDraft } from '../../src/lib/types';
+import { runYayaAgent } from '../../src/lib/yaya/agent/engine';
+import type { YayaAgentDependencies, YayaCurrentIdentity } from '../../src/lib/yaya/agent/types';
 import { createYayaReadRegistry } from '../../src/lib/yaya/tools/read/registry';
 import type { YayaReadPayload } from '../../src/lib/yaya/tools/read/types';
 
@@ -347,10 +349,28 @@ async function main(): Promise<void> {
     const fullDetail = payloadOf(await run(teacherA.token, 'get_observation', { observation_id: ids.obsA }));
     const fullData = fullDetail.data as {
       observation: { access_projection: string; guide_evidence: unknown; raw_text: string };
+      content_sources: {
+        raw_text: { kind: string } | null;
+        confirmed_content: { kind: string } | null;
+        ai_draft: { kind: string } | null;
+        workflow: { kind: string } | null;
+        guide_evidence: { kind: string } | null;
+      };
+      formal_evidence_eligible: boolean;
     };
+    check(fullDetail.citable_source.kind === 'tool_result', 'observation envelope is tool_result, not child_fact');
+    check(fullDetail.citable_source.ref_id === `observation:${ids.obsA}`, 'observation citable source is the record itself');
     check(fullData.observation.access_projection === 'full', 'current teacher reads a full observation');
     check(fullData.observation.guide_evidence !== null, 'full observation keeps guide evidence');
     check(fullData.observation.raw_text.includes('幼儿把积木放在一起'), 'full observation keeps raw text');
+    check(
+      fullData.content_sources.raw_text?.kind === 'child_fact' &&
+        fullData.content_sources.confirmed_content?.kind === 'child_fact',
+      'confirmed raw text and confirmed content carry child_fact semantics',
+    );
+    check(fullData.content_sources.ai_draft?.kind === 'model_text', 'AI draft carries model_text semantics');
+    check(fullData.content_sources.guide_evidence?.kind === 'tool_result', 'guide evidence ledger is platform data');
+    check(fullData.formal_evidence_eligible === true, 'confirmed observation is eligible as formal evidence');
 
     const historicalDetail = payloadOf(await run(teacherA.token, 'get_observation', { observation_id: ids.obsMovedOld }));
     const historicalData = historicalDetail.data as {
@@ -361,6 +381,13 @@ async function main(): Promise<void> {
         agent_context: unknown;
         ai_draft: unknown;
       };
+      content_sources: {
+        raw_text: { kind: string; label: string | null } | null;
+        ai_draft: unknown;
+        workflow: unknown;
+        guide_evidence: unknown;
+      };
+      formal_evidence_eligible: boolean;
     };
     check(historicalData.observation.access_projection === 'historical_read_only', 'former teacher gets the historical projection');
     check(historicalData.observation.can_write === false, 'historical projection cannot write');
@@ -371,19 +398,41 @@ async function main(): Promise<void> {
       'historical projection strips cross-class details',
     );
     check(!JSON.stringify(historicalDetail.data).includes('must-not-leak'), 'historical projection leaks no private workflow data');
+    check(
+      historicalData.content_sources.raw_text?.label?.includes('原班历史') === true &&
+        historicalData.content_sources.ai_draft === null &&
+        historicalData.content_sources.workflow === null,
+      'historical content sources mark the trimmed projection',
+    );
+    check(historicalData.formal_evidence_eligible === false, 'unconfirmed record is not eligible as formal evidence');
 
-    const currentTeacherDetail = dataOf<{ observation: { access_projection: string; can_write: boolean; agent_context: unknown } }>(
+    const currentTeacherDetail = payloadOf(
       await run(teacherB.token, 'get_observation', { observation_id: ids.obsMovedOld }),
     );
+    const currentTeacherData = currentTeacherDetail.data as {
+      observation: { access_projection: string; can_write: boolean; agent_context: unknown };
+      content_sources: { ai_draft: { kind: string } | null; workflow: { kind: string } | null };
+      formal_evidence_eligible: boolean;
+    };
     check(
-      currentTeacherDetail.observation.access_projection === 'full' && currentTeacherDetail.observation.can_write,
+      currentTeacherData.observation.access_projection === 'full' && currentTeacherData.observation.can_write,
       'current teacher reads the complete record',
     );
-    check(currentTeacherDetail.observation.agent_context !== null, 'full record keeps workflow context for the current teacher');
+    check(currentTeacherData.observation.agent_context !== null, 'full record keeps workflow context for the current teacher');
+    check(
+      currentTeacherData.content_sources.ai_draft?.kind === 'model_text' &&
+        currentTeacherData.content_sources.workflow?.kind === 'tool_result',
+      'AI draft and workflow keep separate provenance for the current teacher',
+    );
+    check(currentTeacherData.formal_evidence_eligible === false, 'ai_organized record is not eligible as formal evidence');
 
-    const observationList = dataOf<{ observations: Array<{ observation_id: string; access_projection: string }> }>(
-      await run(teacherA.token, 'list_observations'),
-    ).observations;
+    const observationList = dataOf<{
+      observations: Array<{
+        observation_id: string;
+        access_projection: string;
+        formal_evidence_eligible: boolean;
+      }>;
+    }>(await run(teacherA.token, 'list_observations')).observations;
     check(
       observationList.some((entry) => entry.observation_id === ids.obsA && entry.access_projection === 'full'),
       'observation list includes the current-class record as full',
@@ -393,9 +442,17 @@ async function main(): Promise<void> {
       'observation list includes the original-class record as historical',
     );
     check(!observationList.some((entry) => entry.observation_id === ids.obsB), 'observation list excludes other classes');
+    check(
+      observationList.find((entry) => entry.observation_id === ids.obsA)?.formal_evidence_eligible === true &&
+        observationList.find((entry) => entry.observation_id === ids.obsMovedOld)?.formal_evidence_eligible === false,
+      'observation list separates confirmed and unconfirmed evidence eligibility',
+    );
 
     /* ------------------------------ 成长档案与活动支持 ------------------------------ */
 
+    const profilePayload = payloadOf(
+      await run(teacherA.token, 'get_child_growth_profile', { child_id: ids.childA }),
+    );
     const profile = dataOf<{
       growth_profile: { source: string; basis_observation_ids: string[] } | null;
       activity_support: { source: string } | null;
@@ -403,6 +460,13 @@ async function main(): Promise<void> {
     check(profile.growth_profile?.source === 'fallback', 'fallback profile is labelled');
     check(profile.activity_support?.source === 'ai_summary', 'activity support is labelled as AI summary');
     check(profile.growth_profile?.basis_observation_ids.includes(ids.obsA) === true, 'profile keeps its basis observations');
+    const profileRefs = profilePayload.recheck_dependencies.map((entry) => entry.ref_id);
+    check(profileRefs.includes(`child:${ids.childA}`), 'profile keeps the child dependency');
+    check(profileRefs.includes(`observation:${ids.obsA}`), 'profile adds its basis observation to recheck dependencies');
+    check(
+      profilePayload.recheck_dependencies[0].ref_id === profilePayload.citable_source.ref_id,
+      'profile dependencies start with the citable source',
+    );
     const profileDenied = await run(teacherA.token, 'get_child_growth_profile', { child_id: ids.childB });
     check(!profileDenied.ok && profileDenied.code === 'out_of_scope', 'profile read is scoped');
 
@@ -413,10 +477,16 @@ async function main(): Promise<void> {
       evidence_book: { status_counts: { has_clues: number }; roster?: unknown };
     }>(await run(teacherA.token, 'get_child_evidence_book', { child_id: ids.childA, scope: 'all_history' }));
     check(bookData.evidence_book.status_counts.has_clues >= 1, 'evidence book counts the confirmed clue');
-    const bookRefs = book.source_refs.map((entry) => entry.ref_id);
-    check(bookRefs.includes(`child:${ids.childA}`), 'evidence book keeps the child dependency');
-    check(bookRefs.includes(`observation:${ids.obsA}`), 'evidence book keeps the observation dependency');
-    check(bookRefs.includes(`guide_item:${item.id}`), 'evidence book keeps the guide item dependency');
+    const bookRefs = book.recheck_dependencies;
+    const bookRefIds = bookRefs.map((entry) => entry.ref_id);
+    check(book.citable_source.ref_id === `child:${ids.childA}`, 'evidence book citable source is the child');
+    check(bookRefIds.includes(`child:${ids.childA}`), 'evidence book keeps the child dependency');
+    check(bookRefIds.includes(`observation:${ids.obsA}`), 'evidence book keeps the observation dependency');
+    check(bookRefIds.includes(`guide_item:${item.id}`), 'evidence book keeps the guide item dependency');
+    check(
+      bookRefs.find((entry) => entry.ref_id === `observation:${ids.obsA}`)?.kind === 'child_fact',
+      'verified evidence basis keeps child_fact provenance',
+    );
     check(!JSON.stringify(book.data).includes('"catalog":'), 'evidence book does not duplicate the static catalog');
     const bookDenied = await run(teacherA.token, 'get_child_evidence_book', { child_id: ids.childB });
     check(!bookDenied.ok && bookDenied.code === 'out_of_scope', 'evidence book read is scoped');
@@ -426,7 +496,8 @@ async function main(): Promise<void> {
       await run(teacherA.token, 'get_class_evidence_overview', { class_id: ids.classA, scope: 'all_history' }),
     );
     check(overviewData.evidence_overview.roster.child_count === 1, 'class overview denominator is the current roster');
-    const overviewRefs = overview.source_refs.map((entry) => entry.ref_id);
+    const overviewRefs = overview.recheck_dependencies.map((entry) => entry.ref_id);
+    check(overview.citable_source.ref_id === `class:${ids.classA}`, 'class overview citable source is the class');
     check(overviewRefs.includes(`class:${ids.classA}`), 'class overview keeps the class dependency');
     check(overviewRefs.includes(`child:${ids.childA}`), 'class overview keeps the roster dependency');
     const overviewDenied = await run(teacherA.token, 'get_class_evidence_overview', { class_id: ids.classB });
@@ -439,7 +510,93 @@ async function main(): Promise<void> {
     const guideAnonymous = await run(null, 'list_guide_items');
     check(!guideAnonymous.ok && guideAnonymous.code === 'unauthenticated', 'static reference still requires login');
     const guideDetail = payloadOf(await run(emptyTeacher.token, 'get_guide_item', { item_id: item.id }));
-    check(guideDetail.source_refs[0].kind === 'guide_catalog', 'guide item is catalog provenance');
+    check(guideDetail.citable_source.kind === 'guide_catalog', 'guide item is catalog provenance');
+    const guideList = payloadOf(await run(emptyTeacher.token, 'list_guide_items'));
+    check(
+      guideList.citable_source.ref_id === 'guide_catalog:items',
+      'static guide list has a stable citable source id',
+    );
+    const guideListAgain = payloadOf(await run(emptyTeacher.token, 'list_guide_items'));
+    check(
+      guideListAgain.citable_source.ref_id === guideList.citable_source.ref_id,
+      'static guide list citable id is stable across calls',
+    );
+
+    /* ------------------------------ 列表主来源与引擎引用闭环 ------------------------------ */
+
+    const firstList = payloadOf(await run(teacherA.token, 'list_children'));
+    check(
+      firstList.citable_source.ref_id === 'children:current_scope' &&
+        firstList.recheck_dependencies.some((entry) => entry.ref_id === `child:${ids.childA}`),
+      'list result has a citable primary and keeps child dependencies',
+    );
+    const secondList = payloadOf(await run(teacherA.token, 'list_children'));
+    check(
+      secondList.citable_source.ref_id === firstList.citable_source.ref_id,
+      'list citable id is stable across calls',
+    );
+
+    const identity: YayaCurrentIdentity = {
+      run_id: 'read-db-loop-run',
+      identity_state: 'authenticated',
+      session_valid: true,
+      principal: {
+        account_id: 'loop-teacher',
+        username: 'loop',
+        display_name: '循环教师',
+        role: 'teacher',
+        account_status: 'active',
+        scope: { kind: 'classes', class_ids: [ids.classA] },
+      },
+    };
+    const engineLoop = async (citedRef: string) => {
+      let modelCalls = 0;
+      const deps: YayaAgentDependencies = {
+        model: {
+          generate: async () => {
+            modelCalls += 1;
+            return {
+              provider: 'in-process-double',
+              model: 'double',
+              usage: null,
+              content: JSON.stringify(
+                modelCalls === 1
+                  ? { action: 'read', content: '', tool: 'list_children', params_json: '{}', source_refs: [] }
+                  : { action: 'answer', content: '当前可读幼儿如下。', tool: '', params_json: '', source_refs: [citedRef] },
+              ),
+            };
+          },
+        },
+        resolveCurrentIdentity: async ({ run_id }) => ({ ...identity, run_id }),
+        loadProjectedContext: async () => ({ history: [], sources: [], images: [], guide_catalog: null }),
+        revalidateProjectedContext: async () => ({ ok: true }),
+        readTool: (input) =>
+          registry.dispatch({ tool: input.tool, params: input.params }, { request: carrier(teacherA.token) }),
+        proposeWrite: async () => ({ ok: false, code: 'unsupported', message: 'read-only check' }),
+        queryOperation: async () => ({ kind: 'unknown', reason: 'no_receipt' }),
+        publicSearchPolicy: { provider_enabled: false, scanChildIdentifiers: async () => 'unknown' },
+        tools: { read_tools: registry.definitions, write_tools: [] },
+      };
+      return { result: await runYayaAgent(deps, { run_id: `loop-${randomUUID()}`, user_text: '列出可读幼儿' }), modelCalls };
+    };
+    const positive = await engineLoop('children:current_scope');
+    check(
+      positive.result.outcome.kind === 'answered' &&
+        positive.result.outcome.sources.some((source) => source.ref_id === 'children:current_scope'),
+      'engine loop: model can cite the list citable source',
+    );
+    const negativeDependency = await engineLoop(`child:${ids.childA}`);
+    check(
+      negativeDependency.result.outcome.kind === 'stopped' &&
+        negativeDependency.result.outcome.reason === 'source_mismatch',
+      'engine loop: dependency ids stay non-citable and are blocked by the guard',
+    );
+    const negativeUnknown = await engineLoop('child:not-a-real-id');
+    check(
+      negativeUnknown.result.outcome.kind === 'stopped' &&
+        negativeUnknown.result.outcome.reason === 'source_mismatch',
+      'engine loop: arbitrary ids stay blocked',
+    );
 
     /* ------------------------------ 管理员/教师差异 ------------------------------ */
 

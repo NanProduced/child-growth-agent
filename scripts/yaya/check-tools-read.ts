@@ -15,7 +15,9 @@ import type { ClassEvidenceOverview, ChildEvidenceBook } from '../../src/lib/gui
 import { GUIDE_CATALOG_VERSION } from '../../src/lib/guide/types';
 import { resolveEvidenceScope } from '../../src/lib/semester';
 import type { Child, Observation, ObservationDraft, SchoolClass } from '../../src/lib/types';
-import type { YayaCurrentIdentity } from '../../src/lib/yaya/agent/types';
+import { runYayaAgent } from '../../src/lib/yaya/agent/engine';
+import type { YayaAgentDependencies, YayaCurrentIdentity } from '../../src/lib/yaya/agent/types';
+import type { YayaSourceRef } from '../../src/lib/yaya/types';
 import { createYayaReadRegistry } from '../../src/lib/yaya/tools/read/registry';
 import type {
   YayaChildClassContext,
@@ -43,6 +45,7 @@ const CLASS_B = '22222222-2222-4222-8222-222222222222';
 const CHILD_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const CHILD_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const OBS_A = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const OBS_B = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
 const TEACHER_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const T0 = '2026-09-10T02:00:00.000Z';
 
@@ -117,9 +120,6 @@ function scoped(observation: Observation, projection: 'full' | 'historical_read_
   return { ...observation, access_projection: projection, can_write: projection === 'full' };
 }
 
-const fullObservation = scoped(makeObservation(), 'full');
-const historicalObservation = scoped(makeObservation({ id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' }), 'historical_read_only');
-
 const principal: Principal = {
   account_id: 'acct-teacher',
   username: 'teacher',
@@ -136,6 +136,14 @@ const unassignedPrincipal: Principal = {
   account_status: 'active',
   scope: { kind: 'classes', class_ids: [] },
 };
+
+const fullObservation = scoped(makeObservation(), 'full');
+/** 历史只读用真实投影函数生成（与 scoped-queries 相同口径），不是手改标记 */
+const historicalObservation = projectObservation(
+  makeObservation({ id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' }),
+  'historical_read_only',
+  principal,
+);
 
 interface FakeState {
   children: Child[];
@@ -569,13 +577,79 @@ async function main(): Promise<void> {
 
   const detail = payloadOf(await registry.dispatch({ tool: 'get_observation', params: { observation_id: OBS_A } }));
   check(JSON.stringify(detail.data).includes('幼儿把积木放在一起'), 'get_observation returns full raw text for a readable record');
-  check(detail.source_refs[0].kind === 'child_fact', 'observation source is child_fact');
+  check(detail.citable_source.kind === 'tool_result', 'observation envelope is tool_result, not child_fact');
+  check(detail.citable_source.ref_id === `observation:${OBS_A}`, 'observation citable source is the record');
+  const detailData = detail.data as {
+    content_sources: {
+      raw_text: { kind: string; label: string | null } | null;
+      confirmed_content: { kind: string } | null;
+      ai_draft: { kind: string } | null;
+      workflow: { kind: string } | null;
+      guide_evidence: { kind: string } | null;
+    };
+    formal_evidence_eligible: boolean;
+  };
+  check(detailData.content_sources.raw_text?.kind === 'child_fact', 'saved raw text carries child_fact semantics');
+  check(detailData.content_sources.ai_draft?.kind === 'model_text', 'AI draft carries model_text semantics');
+  check(detailData.content_sources.workflow?.kind === 'tool_result', 'workflow context is platform data');
+  check(detailData.content_sources.guide_evidence?.kind === 'tool_result', 'guide evidence ledger is platform data');
+  check(detailData.formal_evidence_eligible === false, 'ai_organized observation is not formal evidence');
+
+  for (const fixture of [
+    { status: 'draft', eligible: false, label: '未经确认' },
+    { status: 'needs_input', eligible: false, label: '未经确认' },
+    { status: 'ai_organized', eligible: false, label: '未经确认' },
+    { status: 'confirmed', eligible: true, label: '已确认' },
+  ] as const) {
+    state.observation = scoped(
+      makeObservation({
+        status: fixture.status,
+        confirmed_content: fixture.status === 'confirmed' ? draft : null,
+        confirmed_at: fixture.status === 'confirmed' ? T0 : null,
+      }),
+      'full',
+    );
+    const fixturePayload = payloadOf(
+      await registry.dispatch({ tool: 'get_observation', params: { observation_id: OBS_A } }),
+    );
+    const fixtureData = fixturePayload.data as {
+      content_sources: { raw_text: { label: string | null } | null; confirmed_content: unknown };
+      formal_evidence_eligible: boolean;
+    };
+    check(
+      fixtureData.formal_evidence_eligible === fixture.eligible,
+      `${fixture.status}: formal evidence eligibility`,
+    );
+    check(
+      fixtureData.content_sources.raw_text?.label?.includes(fixture.label) === true,
+      `${fixture.status}: raw text label reflects confirmation state`,
+    );
+  }
+
   state.observation = historicalObservation;
   const historicalDetail = payloadOf(await registry.dispatch({ tool: 'get_observation', params: { observation_id: historicalObservation.id } }));
   check(
-    historicalDetail.source_refs[0].label?.includes('原班历史观察') === true,
+    historicalDetail.citable_source.label?.includes('原班历史观察') === true,
     'historical detail is labelled',
   );
+  const historicalDetailData = historicalDetail.data as {
+    content_sources: {
+      raw_text: { label: string | null } | null;
+      confirmed_content: unknown;
+      ai_draft: unknown;
+      workflow: unknown;
+      guide_evidence: unknown;
+    };
+    formal_evidence_eligible: boolean;
+  };
+  check(
+    historicalDetailData.content_sources.raw_text?.label?.includes('原班历史') === true &&
+      historicalDetailData.content_sources.ai_draft === null &&
+      historicalDetailData.content_sources.workflow === null &&
+      historicalDetailData.content_sources.guide_evidence === null,
+    'historical projection only exposes the read-only raw text source',
+  );
+  check(historicalDetailData.formal_evidence_eligible === false, 'historical unconfirmed record is not formal evidence');
   state.observation = fullObservation;
   state.observation = null;
   const missingObservation = await registry.dispatch({ tool: 'get_observation', params: { observation_id: OBS_A } });
@@ -601,20 +675,21 @@ async function main(): Promise<void> {
       development_clues: [],
       next_support: '',
       next_focus: '',
-      source_observation_ids: [OBS_A],
+      // 重复依据 + 缺失依据：去重且不伪造已核验事实
+      source_observation_ids: [OBS_A, OBS_A, 'missing-basis-id'],
       ai_model: 'offline-substitute',
       updated_at: T0,
       is_fallback: true,
       activity_support: {
         suggestions: [],
-        source_observation_ids: [OBS_A],
+        source_observation_ids: [OBS_B],
         ai_model: 'offline-substitute',
         generated_at: T0,
       },
     },
     activity_support: {
       suggestions: [],
-      source_observation_ids: [OBS_A],
+      source_observation_ids: [OBS_B],
       ai_model: 'offline-substitute',
       generated_at: T0,
     },
@@ -632,18 +707,61 @@ async function main(): Promise<void> {
   check(profileData.notes.length > 0, 'AI summary boundary is stated in the payload');
   check(!('note' in profileData.child), 'profile payload omits teacher-private note');
 
+  const profileRefIds = profile.recheck_dependencies.map((entry) => entry.ref_id);
+  check(profileRefIds.includes(`child:${CHILD_A}`), 'profile dependencies keep the child');
+  check(profileRefIds.includes(`observation:${OBS_A}`), 'profile dependencies include the summary basis observation');
+  check(profileRefIds.includes(`observation:${OBS_B}`), 'profile dependencies include the activity-support basis observation');
+  check(profileRefIds.includes('observation:missing-basis-id'), 'missing basis stays visible as an unverified dependency');
+  check(
+    profileRefIds.filter((refId) => refId === `observation:${OBS_A}`).length === 1,
+    'duplicate basis observations are deduplicated',
+  );
+  check(
+    profile.recheck_dependencies
+      .filter((entry) => entry.ref_id?.startsWith('observation:'))
+      .every((entry) => entry.label?.includes('未经本工具核验') === true),
+    'basis dependencies are labelled as not verified by this tool',
+  );
+
+  // APP 式重核替身：按返回的依赖逐项核当前可读性；撤权依据必须能被识别
+  const revokedObservationIds = new Set([OBS_B]);
+  const appStyleRecheck = (deps: readonly YayaSourceRef[]) => {
+    const denied = deps
+      .filter(
+        (entry) =>
+          entry.ref_id?.startsWith('observation:') === true &&
+          revokedObservationIds.has(entry.ref_id.slice('observation:'.length)),
+      )
+      .map((entry) => entry.ref_id as string);
+    return { ok: denied.length === 0, denied };
+  };
+  check(
+    appStyleRecheck(profile.recheck_dependencies).ok === false &&
+      appStyleRecheck(profile.recheck_dependencies).denied.includes(`observation:${OBS_B}`),
+    'APP-style recheck catches a revoked basis observation from the dependency list',
+  );
+  check(
+    appStyleRecheck([profile.citable_source]).ok === true,
+    'rechecking only the child would miss the revoked basis (dependencies are required)',
+  );
+
   /* ------------------------------ 证据册/概览聚合来源 ------------------------------ */
 
   const book = payloadOf(await registry.dispatch({ tool: 'get_child_evidence_book', params: { child_id: CHILD_A, scope: 'all_history' } }));
-  const bookRefs = book.source_refs.map((entry) => entry.ref_id);
+  const bookRefs = book.recheck_dependencies.map((entry) => entry.ref_id);
   check(bookRefs.includes(`child:${CHILD_A}`), 'evidence book keeps the child dependency');
   check(bookRefs.includes(`observation:${OBS_A}`), 'evidence book keeps the underlying observation dependency');
   check(bookRefs.some((refId) => refId?.startsWith('guide_item:')), 'evidence book keeps the guide item dependency');
   check(!JSON.stringify(book.data).includes('"catalog":'), 'evidence book does not duplicate the static catalog');
-  check(book.source_refs[0].ref_id === `child:${CHILD_A}`, 'evidence book primary source is the child');
+  check(book.citable_source.ref_id === `child:${CHILD_A}`, 'evidence book primary source is the child');
+  check(
+    book.recheck_dependencies.find((entry) => entry.ref_id === `observation:${OBS_A}`)?.kind === 'child_fact',
+    'verified evidence basis keeps child_fact provenance',
+  );
 
   const overview = payloadOf(await registry.dispatch({ tool: 'get_class_evidence_overview', params: { class_id: CLASS_A } }));
-  const overviewRefs = overview.source_refs.map((entry) => entry.ref_id);
+  const overviewRefs = overview.recheck_dependencies.map((entry) => entry.ref_id);
+  check(overview.citable_source.ref_id === `class:${CLASS_A}`, 'class overview primary source is the class');
   check(overviewRefs.includes(`class:${CLASS_A}`), 'class overview keeps the class dependency');
   check(overviewRefs.includes(`child:${CHILD_A}`), 'class overview keeps the roster dependency');
 
@@ -672,7 +790,7 @@ async function main(): Promise<void> {
   const realItem = listGuideItemsSync()[0];
   assert.ok(realItem, 'catalog item exists');
   const guideDetail = payloadOf(await registry.dispatch({ tool: 'get_guide_item', params: { item_id: realItem.id } }));
-  check(guideDetail.source_refs[0].kind === 'guide_catalog', 'guide item source is guide_catalog');
+  check(guideDetail.citable_source.kind === 'guide_catalog', 'guide item source is guide_catalog');
   const missingGuide = await registry.dispatch({ tool: 'get_guide_item', params: { item_id: 'no-such-item' } });
   check(!missingGuide.ok && missingGuide.code === 'not_found', 'unknown guide item maps to not_found');
   const suggestions = payloadOf(await registry.dispatch({ tool: 'list_education_suggestions', params: { goal_id: suggestionGoal } }));
@@ -706,7 +824,152 @@ async function main(): Promise<void> {
   check(adapted.ok && adapted.source.kind === 'tool_result', 'readTool adapter returns a YayaReadToolOutcome');
   const adaptedPayload = adapted.ok ? (adapted.data as YayaReadPayload<unknown>) : null;
   check(adaptedPayload !== null && adaptedPayload.tool === 'list_children', 'readTool payload carries the tool name');
-  check(adapted.ok && adapted.source === adaptedPayload?.source_refs[0], 'outcome source equals the primary dependency');
+  check(
+    adapted.ok && adapted.source === adaptedPayload?.citable_source,
+    'outcome source equals the citable source',
+  );
+  check(
+    adaptedPayload !== null &&
+      adaptedPayload.recheck_dependencies[0] === adaptedPayload.citable_source,
+    'dependencies start with the citable source',
+  );
+
+  /* ---------------------- R1：所有工具的主来源非空且区分依赖 ---------------------- */
+
+  const citationSamples: Array<[string, unknown]> = [
+    ['list_children', {}],
+    ['list_classes', {}],
+    ['get_class', { class_id: CLASS_A }],
+    ['resolve_child_class', { child_id: CHILD_A, observed_at: '2026-09-10' }],
+    ['list_observations', {}],
+    ['get_observation', { observation_id: OBS_A }],
+    ['get_child_growth_profile', { child_id: CHILD_A }],
+    ['get_child_evidence_book', { child_id: CHILD_A }],
+    ['get_class_evidence_overview', { class_id: CLASS_A }],
+    ['list_guide_items', {}],
+    ['get_guide_item', { item_id: realItem.id }],
+    ['list_education_suggestions', { goal_id: suggestionGoal }],
+    ['list_teacher_accounts', {}],
+  ];
+  for (const [tool, params] of citationSamples) {
+    const outcome = await registry.dispatch({ tool, params });
+    check(outcome.ok, `${tool}: sample dispatch succeeds`);
+    if (!outcome.ok) continue;
+    const result = outcome.data as YayaReadPayload<unknown>;
+    check(
+      typeof result.citable_source.ref_id === 'string' && result.citable_source.ref_id.length > 0,
+      `${tool}: citable source id is non-empty`,
+    );
+    check(
+      outcome.source.ref_id === result.citable_source.ref_id,
+      `${tool}: outcome source is the citable source`,
+    );
+    check(
+      result.recheck_dependencies[0]?.ref_id === result.citable_source.ref_id,
+      `${tool}: dependencies start with the citable source`,
+    );
+  }
+
+  state.children = [];
+  const emptyList = payloadOf(await registry.dispatch({ tool: 'list_children', params: {} }));
+  check(
+    emptyList.citable_source.ref_id === 'children:current_scope',
+    'legal empty list keeps a stable citable primary',
+  );
+  check(
+    emptyList.recheck_dependencies.length === 1 &&
+      emptyList.recheck_dependencies[0] === emptyList.citable_source,
+    'empty list has no fabricated dependencies',
+  );
+  state.children = [makeChild(CHILD_A, '幼儿甲', CLASS_A)];
+
+  const stableFirst = payloadOf(await registry.dispatch({ tool: 'list_classes', params: {} }));
+  const stableSecond = payloadOf(await registry.dispatch({ tool: 'list_classes', params: {} }));
+  check(
+    stableFirst.citable_source.ref_id === stableSecond.citable_source.ref_id &&
+      stableFirst.citable_source.ref_id === 'classes:assigned',
+    'list citable ids are stable and meaningful',
+  );
+  check(
+    payloadOf(await registry.dispatch({ tool: 'list_classes', params: { catalog: true } })).citable_source
+      .ref_id === 'classes:catalog',
+    'catalog list has its own stable citable id',
+  );
+
+  /* ---------------------- R1：真实 registry + 引擎引用闭环 ---------------------- */
+
+  const loopIdentity: YayaCurrentIdentity = {
+    run_id: 'loop-run',
+    identity_state: 'authenticated',
+    principal: unassignedPrincipal,
+    session_valid: true,
+  };
+  const carrier = { headers: new Headers() };
+  const engineLoop = async (tool: string, params: unknown, citedRef: string) => {
+    let modelCalls = 0;
+    const deps: YayaAgentDependencies = {
+      model: {
+        generate: async () => {
+          modelCalls += 1;
+          return {
+            provider: 'in-process-double',
+            model: 'double',
+            usage: null,
+            content: JSON.stringify(
+              modelCalls === 1
+                ? { action: 'read', content: '', tool, params_json: JSON.stringify(params), source_refs: [] }
+                : { action: 'answer', content: '读取结果如下。', tool: '', params_json: '', source_refs: [citedRef] },
+            ),
+          };
+        },
+      },
+      resolveCurrentIdentity: async ({ run_id }) => ({ ...loopIdentity, run_id }),
+      loadProjectedContext: async () => ({ history: [], sources: [], images: [], guide_catalog: null }),
+      revalidateProjectedContext: async () => ({ ok: true }),
+      readTool: (input) => registry.dispatch({ tool: input.tool, params: input.params }, { request: carrier }),
+      proposeWrite: async () => ({ ok: false, code: 'unsupported', message: 'read-only check' }),
+      queryOperation: async () => ({ kind: 'unknown', reason: 'no_receipt' }),
+      publicSearchPolicy: { provider_enabled: false, scanChildIdentifiers: async () => 'unknown' },
+      tools: { read_tools: registry.definitions, write_tools: [] },
+    };
+    const result = await runYayaAgent(deps, { run_id: `loop-${tool}-${modelCalls}`, user_text: '读取' });
+    return result;
+  };
+
+  const listLoop = await engineLoop('list_children', {}, 'children:current_scope');
+  check(
+    listLoop.outcome.kind === 'answered' &&
+      listLoop.outcome.sources.some((source) => source.ref_id === 'children:current_scope'),
+    'engine loop: model cites the list citable source successfully',
+  );
+  state.children = [];
+  const emptyListLoop = await engineLoop('list_children', {}, 'children:current_scope');
+  check(
+    emptyListLoop.outcome.kind === 'answered',
+    'engine loop: legal empty list is still citable',
+  );
+  state.children = [makeChild(CHILD_A, '幼儿甲', CLASS_A)];
+  const guideLoop = await engineLoop('list_guide_items', {}, 'guide_catalog:items');
+  check(
+    guideLoop.outcome.kind === 'answered',
+    'engine loop: static catalog list is citable',
+  );
+  const teacherLoop = await engineLoop('list_teacher_accounts', {}, 'teacher_accounts:school');
+  check(
+    teacherLoop.outcome.kind === 'answered',
+    'engine loop: admin list is citable',
+  );
+  const dependencyLoop = await engineLoop('list_children', {}, `child:${CHILD_A}`);
+  check(
+    dependencyLoop.outcome.kind === 'stopped' &&
+      dependencyLoop.outcome.reason === 'source_mismatch',
+    'engine loop: dependency ids stay non-citable and are blocked by the guard',
+  );
+  const unknownLoop = await engineLoop('list_children', {}, 'not-a-source');
+  check(
+    unknownLoop.outcome.kind === 'stopped' && unknownLoop.outcome.reason === 'source_mismatch',
+    'engine loop: arbitrary ids stay blocked',
+  );
 
   const defaultRegistry = createYayaReadRegistry();
   check(defaultRegistry.definitions.length === expectedTools.length, 'default registry builds with real ports');
