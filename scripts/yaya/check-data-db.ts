@@ -1274,6 +1274,12 @@ async function main(): Promise<void> {
     });
 
     // 资料追加审计与 revision CAS（attF 未关联且 ready）
+    // 宿主前提在保存事务锁内复核：先使 obsA 成为已确认归档（带确认时间）。
+    const obsAConfirmedAt = "2026-05-01T00:00:00Z";
+    await database.query(
+      "UPDATE observations SET status = 'confirmed', confirmed_at = $2 WHERE id = $1",
+      [ids.obsA, obsAConfirmedAt],
+    );
     const appended = await withRawTransaction(db, async (tx) =>
       yayaDataRepository.appendObservationAttachments(tx, {
         observation_id: ids.obsA,
@@ -1282,6 +1288,7 @@ async function main(): Promise<void> {
         appended_by_account_id: teacherA.accountId,
         approval_id: null,
         note: "归档后资料",
+        source_confirmed_at: obsAConfirmedAt,
       }),
     );
     check("资料追加写 audit 并递增 revision", appended.attachment_revision === 1);
@@ -1301,6 +1308,7 @@ async function main(): Promise<void> {
             appended_by_account_id: teacherA.accountId,
             approval_id: null,
             note: "过期前提",
+            source_confirmed_at: obsAConfirmedAt,
           }),
         "revision_conflict",
       );

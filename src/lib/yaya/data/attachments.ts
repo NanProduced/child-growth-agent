@@ -38,7 +38,7 @@ import {
 import { iso, isoRequired } from "./rows";
 
 const ATTACHMENT_COLUMNS =
-  "id, uploader_account_id, conversation_id, object_key, thumbnail_key, model_key, media_type, byte_size, checksum_sha256, thumbnail_checksum, model_checksum, width, height, source_kind, derived_from, metadata, status, revision, delete_result, deletion_lease_id, deleting_started_at, deleted_at, client_upload_id, created_at, updated_at";
+  "id, uploader_account_id, conversation_id, object_key, thumbnail_key, model_key, media_type, byte_size, checksum_sha256, thumbnail_checksum, model_checksum, source_checksum, width, height, source_kind, derived_from, metadata, status, revision, delete_result, deletion_lease_id, deleting_started_at, deleted_at, client_upload_id, created_at, updated_at";
 
 interface AttachmentRow {
   id: string;
@@ -52,6 +52,7 @@ interface AttachmentRow {
   checksum_sha256: string;
   thumbnail_checksum: string | null;
   model_checksum: string | null;
+  source_checksum: string | null;
   width: number | null;
   height: number | null;
   source_kind: string;
@@ -472,16 +473,30 @@ interface YayaObservationRefsCasInput {
   attachment_ids: readonly string[];
   actor_account_id: string;
   expected_attachment_revision: number;
+  /** 宿主确认来源前提（与宿主 status/confirmed_at 在同一事务锁内比较） */
+  source_confirmed_at: string | null;
   /** 是否写 DATA1 逐附件追加审计行（归档资料追加用；媒体端口另有聚合审计） */
   write_attachment_audit: boolean;
   approval_id?: string | null;
   note?: string | null;
 }
 
+/** 时间等值比较：任一侧不可解析或缺失都按不一致处理，不猜测 */
+function sameInstant(stored: Date | string, claimed: string | null): boolean {
+  if (claimed === null || claimed.trim() === "") return false;
+  const storedMs = new Date(stored).getTime();
+  const claimedMs = new Date(claimed).getTime();
+  return Number.isFinite(storedMs) && Number.isFinite(claimedMs) && storedMs === claimedMs;
+}
+
 /**
  * 观察附件引用的 CAS 核心（创建关联与归档追加共用存储原子性）：
- * 锁附件（稳定排序、ready+owner）→ 锁 meta → expected_revision 比对 →
- * 拒绝重复引用 → 插引用并 revision+1。
+ * 锁附件（稳定排序、ready+owner）→ 锁宿主并核确认来源前提 → 锁 meta →
+ * expected_revision 比对 → 拒绝重复引用 → 插引用并 revision+1。
+ *
+ * 宿主前提：归档追加必须在同一事务锁读宿主，要求当前 status=confirmed 且
+ * confirmed_at 与提交的 source_confirmed_at 为同一时刻；把来源写进审计
+ * 不等于前提成立。任一不满足 → 整事务零写入。
  */
 async function casObservationAttachmentRefs(
   client: TransactionClient,
@@ -494,10 +509,24 @@ async function casObservationAttachmentRefs(
   if (!Number.isInteger(input.expected_attachment_revision) || input.expected_attachment_revision < 0) {
     throw new YayaDataError("invalid_request", "附件修订前提不合法。");
   }
-  const observation = await client.query("SELECT id FROM observations WHERE id = $1", [
-    input.observation_id,
-  ]);
-  if (!observation.rowCount) throw new YayaDataError("not_found", "观察记录不存在。");
+  const observation = await client.query<{ status: string; confirmed_at: Date | string | null }>(
+    "SELECT status, confirmed_at FROM observations WHERE id = $1 FOR UPDATE",
+    [input.observation_id],
+  );
+  const host = observation.rows[0];
+  if (!host) throw new YayaDataError("not_found", "观察记录不存在。");
+  if (host.status !== "confirmed" || host.confirmed_at === null) {
+    throw new YayaDataError(
+      "observation_not_confirmed",
+      "只有已确认归档的观察才能追加资料附件。",
+    );
+  }
+  if (!sameInstant(host.confirmed_at, input.source_confirmed_at)) {
+    throw new YayaDataError(
+      "source_conflict",
+      "观察确认时间与提交的来源时间不一致，请刷新后重新核对。",
+    );
+  }
   // 统一锁序：先附件（稳定排序），再观察附件 meta；锁后核 ready+owner。
   await lockAttachmentsForReference(client, input.actor_account_id, ids);
   await client.query(
@@ -575,6 +604,7 @@ export async function appendObservationAttachments(
     attachment_ids: input.attachment_ids,
     actor_account_id: input.appended_by_account_id,
     expected_attachment_revision: input.expected_attachment_revision,
+    source_confirmed_at: input.source_confirmed_at,
     write_attachment_audit: true,
     approval_id: input.approval_id,
     note: input.note,
@@ -598,6 +628,7 @@ export async function addObservationAttachmentRefsAtRevision(
     attachment_ids: readonly string[];
     actor_account_id: string;
     expected_attachment_revision: number;
+    source_confirmed_at: string | null;
   },
 ): Promise<YayaMediaObservationReferencesResult> {
   const result = await casObservationAttachmentRefs(client, {
@@ -605,6 +636,7 @@ export async function addObservationAttachmentRefsAtRevision(
     attachment_ids: input.attachment_ids,
     actor_account_id: input.actor_account_id,
     expected_attachment_revision: input.expected_attachment_revision,
+    source_confirmed_at: input.source_confirmed_at,
     write_attachment_audit: false,
   });
   return { added: result.attachment_ids.length, attachment_revision: result.attachment_revision };
@@ -644,6 +676,7 @@ function toMediaRecord(row: AttachmentRow): YayaMediaAttachmentRecord {
     attachment_id: row.id,
     owner_account_id: row.uploader_account_id,
     status: mapMediaAttachmentStatus(row.status, row.delete_result),
+    revision: row.revision,
     object_key: row.object_key,
     thumbnail_key: row.thumbnail_key,
     model_key: row.model_key,
@@ -652,10 +685,14 @@ function toMediaRecord(row: AttachmentRow): YayaMediaAttachmentRecord {
     checksum_sha256: row.checksum_sha256,
     thumbnail_checksum: row.thumbnail_checksum,
     model_checksum: row.model_checksum,
+    source_checksum: row.source_checksum,
     width: row.width,
     height: row.height,
     client_upload_id: row.client_upload_id,
     created_at: isoRequired(row.created_at),
+    updated_at: isoRequired(row.updated_at),
+    deleting_started_at: iso(row.deleting_started_at),
+    deleted_at: iso(row.deleted_at),
     deletion_lease_id: row.deletion_lease_id,
   };
 }
@@ -696,6 +733,7 @@ export async function insertPendingAttachment(
     input.checksum_sha256.trim() === "" ||
     input.thumbnail_checksum.trim() === "" ||
     input.model_checksum.trim() === "" ||
+    (typeof input.source_checksum === "string" && input.source_checksum.trim() === "") ||
     !Number.isInteger(input.width) ||
     !Number.isInteger(input.height) ||
     input.width < 0 ||
@@ -707,9 +745,9 @@ export async function insertPendingAttachment(
     const result = await client.query<AttachmentRow>(
       `INSERT INTO yaya_attachments
          (id, uploader_account_id, object_key, thumbnail_key, model_key, media_type, byte_size,
-          checksum_sha256, thumbnail_checksum, model_checksum, width, height, client_upload_id,
-          source_kind, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'raw_input', 'pending')
+          checksum_sha256, thumbnail_checksum, model_checksum, source_checksum, width, height,
+          client_upload_id, source_kind, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'raw_input', 'pending')
        RETURNING ${ATTACHMENT_COLUMNS}`,
       [
         input.attachment_id,
@@ -722,6 +760,7 @@ export async function insertPendingAttachment(
         input.checksum_sha256,
         input.thumbnail_checksum,
         input.model_checksum,
+        input.source_checksum ?? null,
         input.width,
         input.height,
         input.client_upload_id,
@@ -900,41 +939,54 @@ export async function releaseConversationAttachmentRefs(
 /**
  * 媒体端口租约：ready / deletion_unknown 可取得；租约令牌写入同一行。
  * 必须在附件行锁内**重新核查完整引用**（不依赖调用方的前置 getReferenceFacts）：
- * 已有任何引用或引用查询不完整 → 拒绝（not_ready），状态保持 ready/deletion_unknown。
+ * 有引用 → referenced；悬空/损坏引用 → reference_incomplete；两者都不进入 deleting。
+ * 可选 expected_revision 做 CAS；进行中/已删除/未就绪按 not_ready + 当前端口状态
+ * 分别表达，不折叠为同一结果。
  */
 export async function acquireAttachmentDeletionLease(
   client: TransactionClient,
   attachmentId: string,
+  expectedRevision?: number,
 ): Promise<YayaMediaDeletionLeaseResult> {
+  if (
+    expectedRevision !== undefined &&
+    (!Number.isInteger(expectedRevision) || expectedRevision < 0)
+  ) {
+    throw new YayaDataError("invalid_request", "租约版本前提不合法。");
+  }
   const result = await client.query<AttachmentRow>(
     `SELECT ${ATTACHMENT_COLUMNS} FROM yaya_attachments WHERE id = $1 FOR UPDATE`,
     [attachmentId],
   );
   const row = result.rows[0];
   if (!row) return { outcome: "not_found" };
+  if (expectedRevision !== undefined && row.revision !== expectedRevision) {
+    return { outcome: "revision_conflict" };
+  }
   const leaseToken = randomUUID();
   const transition = mediaAttachmentLeaseTransition(
     { status: row.status, delete_result: row.delete_result, deletion_lease_id: row.deletion_lease_id },
     { action: "begin", lease_token: leaseToken },
   );
   if (!transition.ok) {
-    if (transition.reason === "already_deleting") return { outcome: "already_deleting" };
-    if (transition.reason === "already_deleted") return { outcome: "already_deleted" };
-    return { outcome: "not_ready" };
+    if (transition.reason === "already_deleting") return { outcome: "not_ready", status: "deleting" };
+    if (transition.reason === "already_deleted") return { outcome: "not_ready", status: "deleted" };
+    return { outcome: "not_ready", status: "pending" };
   }
   const referenceState = await attachmentLeaseReferenceState(client, attachmentId);
-  if (referenceState !== "safe") {
-    // 有引用/查询不完整：不得取得租约，也不得进入 deleting
-    return { outcome: "not_ready" };
-  }
-  await client.query(
+  if (referenceState === "referenced") return { outcome: "referenced" };
+  if (referenceState === "incomplete") return { outcome: "reference_incomplete" };
+  const updated = await client.query<AttachmentRow>(
     `UPDATE yaya_attachments
         SET status = 'deleting', delete_result = NULL, deletion_lease_id = $2,
             deleting_started_at = now(), revision = revision + 1, updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1
+      RETURNING ${ATTACHMENT_COLUMNS}`,
     [attachmentId, leaseToken],
   );
-  return { outcome: "acquired", lease_token: leaseToken };
+  const next = updated.rows[0];
+  if (!next) throw new YayaDataError("server_error", "删除租约写入失败。");
+  return { outcome: "acquired", lease_token: leaseToken, record: toMediaRecord(next) };
 }
 
 /** 完成租约：令牌必须匹配；unknown 保留 deletion_unknown，failed 才回 ready */
@@ -998,8 +1050,8 @@ export async function appendMediaAttachmentAudit(
   await client.query(
     `INSERT INTO yaya_attachment_appends
        (id, audit_id, action, observation_id, attachment_ids, appended_by_account_id,
-        source_confirmed_at, request_id, appended_at)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)`,
+        source_confirmed_at, request_id, approval_id, appended_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)`,
     [
       auditId,
       auditId,
@@ -1009,6 +1061,7 @@ export async function appendMediaAttachmentAudit(
       entry.actor_account_id,
       entry.source_confirmed_at,
       entry.request_id,
+      entry.approval_id ?? null,
       entry.recorded_at,
     ],
   );

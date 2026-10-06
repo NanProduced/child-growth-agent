@@ -1,7 +1,10 @@
-# YAYA 媒体附件存储接口（DATA1-R1 发布）
+# YAYA 媒体附件存储接口（DATA1-R1 发布，整合 R2 增量）
 
 状态：接口声明发布（本提交）；实现随 R1 同分支后续提交，见本文件 §7 的映射版本。
-owner：YAYA-DATA1（`yaya_*` DDL、SQL、repository 唯一 owner）。
+**整合 R2 增量（YAYA-CORE-INTEGRATE1）**：`YAYA_MEDIA_INTERFACE_REVISION = "yaya-media-storage-r2"`，
+新增 `source_checksum` 列、归档追加宿主前提、媒体租约 `expected_revision` 与区分结果；
+MEDIA 消费入口为 `src/lib/media/data-adapter.ts`（见 §8）。
+owner：YAYA-DATA1（`yaya_*` DDL、SQL、repository 唯一 owner；R2 增量为整合者按主评审授权修改）。
 起点：`0f135a4b19901523cd1b4cf5f11780538b63ab57`（`codex/yaya-data1`）。
 消费方参考实现：MEDIA1 `6dc3cce3e1d207a915fe435aae22c118e9bb6236` 的
 `src/lib/media/metadata-port.ts` / `upload-service.ts` / `attachment-service.ts` / `retention-service.ts`（只读参考，未修改 MEDIA 文件）。
@@ -138,3 +141,64 @@ await withTransaction(async (client) => {
 - 本文件为接口声明提交（`7182677a37eea3a96785827d815343dc38d400e6`）；实现（迁移增量、storage-types DTO、`src/lib/yaya/data/media-port.ts` 工厂与 repository 原语）随 R1 实现提交落地，见 `docs/yaya-v1/data1-r1-delivery.md`。`YAYA_MEDIA_INTERFACE_REVISION = "yaya-media-storage-r1"` 标明口径版本。
 - 验证：R1 隔离库检查覆盖 `client_upload_id` 幂等、pending→ready CAS、三派生对象持久化、租约令牌/unknown 无损与重取、四类引用写入的受控双连接互斥、仅解除自己会话引用、观察 revision CAS 与独立聚合审计、现有 7 表列签名不变。
 - NOT_RUN（本声明范围）：真实 S3/桶、MEDIA 正式装配、浏览器、端到端业务闭环。
+
+## 8. 整合 R2 增量（YAYA-CORE-INTEGRATE1，2026-10-06）
+
+### 8.1 新列：`source_checksum`
+
+- `yaya_attachments` 新增 `source_checksum varchar(128)`（迁移幂等 `ADD COLUMN IF NOT EXISTS`）：
+  原始上传字节的 SHA-256，与处理后对象 `checksum_sha256` 区分。
+- 既有行为 NULL：保留不可核验语义，不补造；`insertPendingAttachment` 接受并持久化；
+  媒体适配器把 NULL/空白按 `metadata_unavailable` 拒绝（既不默认 ready，也不伪造）。
+- 已通过真实隔离库证明：上传后原始字节 checksum 落库并回传，三对象 checksum 与磁盘一致。
+
+### 8.2 归档追加的宿主前提（写入 CAS 核心）
+
+`casObservationAttachmentRefs` 现在在同一事务内 `SELECT ... FOR UPDATE` 锁读宿主观察：
+
+- 宿主不存在 → `not_found`；
+- `status != 'confirmed'` 或 `confirmed_at IS NULL` → `observation_not_confirmed`（新增错误码，HTTP 409）；
+- `confirmed_at` 与提交的 `source_confirmed_at` 非同一时刻 → `source_conflict`（新增错误码，HTTP 409）；
+- 任一不满足 → 引用/revision/审计零写入（整事务回滚），来源字段写进审计不等于前提成立。
+
+`appendObservationAttachments` 与 `addObservationAttachmentRefsAtRevision` 均要求
+`source_confirmed_at: string | null`；媒体端口 `addObservationReferencesAtRevision/
+addObservationReferences(expected=…)` 透传该字段。
+
+### 8.3 媒体租约：expected_revision 与区分结果
+
+`acquireAttachmentDeletionLease(client, attachmentId, expectedRevision?)` 结果扩展为：
+
+| 结果 | 语义 |
+|---|---|
+| `{ outcome: "acquired", lease_token, record }` | 锁内引用完整且零引用、CAS 通过，进入 deleting |
+| `{ outcome: "referenced" }` | 完整查询下仍有观察/消息/提案引用 |
+| `{ outcome: "reference_incomplete" }` | 悬空/损坏引用，禁止回收（单独表达，不折叠为 referenced/空） |
+| `{ outcome: "revision_conflict" }` | 提供 expected_revision 且与当前不符 |
+| `{ outcome: "not_ready", status }` | pending / deleting（进行中）/ deleted 分别由 status 表达，不折叠 |
+| `{ outcome: "not_found" }` | 附件不存在 |
+
+`beginDeletionLease` 端口签名相应为 `(attachmentId, expectedRevision?)`。
+
+### 8.4 聚合审计可带批准身份
+
+`yaya_attachment_appends.approval_id` 现由 `appendMediaAttachmentAudit` 写入
+（`YayaMediaAttachmentAuditEntry.approval_id?: string | null`），供 TOOLS1 批准执行时携带。
+
+### 8.5 唯一消费适配器
+
+- 位置：`src/lib/media/data-adapter.ts`（MEDIA 侧薄适配，只做形状/错误码转换，不复制 SQL）。
+- 两种调用方式：
+  - `bindDataAttachmentMetadataPort(client)`：绑定现有 `TransactionClient`（创建观察附图、
+    归档追加等业务保存事务内使用；不另开连接、不自行提交）；
+  - `createDataAttachmentMetadataPort(connect?)`：每个方法独立短事务（上传/回收等无外层事务场景；
+    禁止在已有事务内调用）。
+- `registerAttachment` 在同一短事务内完成 `insertPendingAttachment + markAttachmentReady`，
+  pending 中间态不对外暴露；`linkObservationReferences` 走创建语义（不递增追加修订、不写审计），
+  以稳定顺序锁全部附件后核 ready+owner；`appendObservationAttachments` 在同一 client 内
+  完成宿主前提 + revision CAS + 聚合审计。
+- 错误码映射按 §5；`attachment_conflict` 在引用写入路径按锁后状态细化为
+  `attachment_deleting` / `attachment_gone`。
+- 回退身份：MEDIA 无键上传在内容身份被回收后按 `(owner, 原始 checksum, 已回收附件 id)`
+  确定性派生重传身份（`recycledContentAttachmentId`），未知结果重试始终绑定同一身份，
+  不因兜底分支不断产生新对象。

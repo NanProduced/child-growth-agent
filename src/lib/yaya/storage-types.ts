@@ -66,6 +66,8 @@ export const YAYA_DATA_ERROR_CODES = [
   "attachment_conflict",
   "attachment_referenced",
   "reference_incomplete",
+  "observation_not_confirmed",
+  "source_conflict",
   "server_error",
 ] as const;
 export type YayaDataErrorCode = (typeof YAYA_DATA_ERROR_CODES)[number];
@@ -86,6 +88,8 @@ export const YAYA_DATA_ERROR_HTTP_STATUS: Record<YayaDataErrorCode, 400 | 404 | 
   attachment_conflict: 409,
   attachment_referenced: 409,
   reference_incomplete: 409,
+  observation_not_confirmed: 409,
+  source_conflict: 409,
   server_error: 500,
 };
 
@@ -658,6 +662,11 @@ export interface YayaAttachmentAppendInput {
   appended_by_account_id: string;
   approval_id: string | null;
   note: string | null;
+  /**
+   * 宿主确认来源前提：与宿主当前 status=confirmed 和 confirmed_at 在
+   * 同一事务锁内比较；不一致/缺失一律拒绝（来源写进审计不等于前提成立）。
+   */
+  source_confirmed_at: string | null;
 }
 
 export interface YayaAttachmentAppendResult {
@@ -688,13 +697,15 @@ export const YAYA_MEDIA_ATTACHMENT_STATUSES = [
 ] as const;
 export type YayaMediaAttachmentStatus = (typeof YAYA_MEDIA_ATTACHMENT_STATUSES)[number];
 
-export const YAYA_MEDIA_INTERFACE_REVISION = "yaya-media-storage-r1" as const;
+export const YAYA_MEDIA_INTERFACE_REVISION = "yaya-media-storage-r2" as const;
 
 /** 媒体端口记录：只存对象标识/checksum/尺寸/状态，不含 URL */
 export interface YayaMediaAttachmentRecord {
   attachment_id: string;
   owner_account_id: string;
   status: YayaMediaAttachmentStatus;
+  /** 元数据修订；回收租约/落账的 CAS 身份 */
+  revision: number;
   object_key: string;
   thumbnail_key: string;
   model_key: string;
@@ -703,19 +714,25 @@ export interface YayaMediaAttachmentRecord {
   checksum_sha256: string;
   thumbnail_checksum: string;
   model_checksum: string;
+  /** 原始上传字节 SHA-256；既有/不完整行为 null，消费方必须按不可核验拒绝，不得伪造 */
+  source_checksum: string | null;
   width: number;
   height: number;
   client_upload_id: string | null;
   created_at: string;
+  updated_at: string;
+  deleting_started_at: string | null;
+  deleted_at: string | null;
   /** 回收租约令牌；仅端口 status=deleting 时非空 */
   deletion_lease_id: string | null;
 }
 
 export type YayaMediaDeletionLeaseResult =
-  | { outcome: "acquired"; lease_token: string }
-  | { outcome: "already_deleting" }
-  | { outcome: "already_deleted" }
-  | { outcome: "not_ready" }
+  | { outcome: "acquired"; lease_token: string; record: YayaMediaAttachmentRecord }
+  | { outcome: "referenced" }
+  | { outcome: "reference_incomplete" }
+  | { outcome: "revision_conflict" }
+  | { outcome: "not_ready"; status: YayaMediaAttachmentStatus }
   | { outcome: "not_found" };
 
 export interface YayaMediaObservationReferenceFact {
@@ -744,6 +761,8 @@ export interface YayaMediaAttachmentAuditEntry {
   actor_account_id: string;
   source_confirmed_at: string | null;
   request_id: string | null;
+  /** 批准来源（TOOLS1 批准执行时传入；教师直接追加为 null） */
+  approval_id?: string | null;
   recorded_at: string;
 }
 
@@ -762,13 +781,16 @@ export interface YayaAttachmentMetadataPort {
      * addObservationReferencesAtRevision）；创建关联不提供，不做版本前提。
      */
     expected_attachment_revision?: number;
+    /** 归档追加的宿主确认来源前提；提供 expected 时必须一并提供 */
+    source_confirmed_at?: string | null;
   }): Promise<YayaMediaObservationReferencesResult>;
-  /** 归档追加的显式 CAS 入口：必须携带 expected_revision，复用 appendObservationAttachments 同一原语 */
+  /** 归档追加的显式 CAS 入口：必须携带 expected_revision 与宿主来源前提，复用同一原语 */
   addObservationReferencesAtRevision(input: {
     observation_id: string;
     attachment_ids: readonly string[];
     actor_account_id: string;
     expected_attachment_revision: number;
+    source_confirmed_at: string | null;
   }): Promise<YayaMediaObservationReferencesResult>;
   getObservationAttachmentRevision(observationId: string): Promise<number>;
   getReferenceFacts(attachmentId: string): Promise<YayaMediaReferenceFacts>;
@@ -777,7 +799,8 @@ export interface YayaAttachmentMetadataPort {
     message_ids: readonly string[];
     owner_account_id: string;
   }): Promise<number>;
-  beginDeletionLease(attachmentId: string): Promise<YayaMediaDeletionLeaseResult>;
+  /** 媒体租约：可选 expected_revision 做 CAS；有引用/不完整/进行中/已删除分别表达 */
+  beginDeletionLease(attachmentId: string, expectedRevision?: number): Promise<YayaMediaDeletionLeaseResult>;
   completeDeletion(
     attachmentId: string,
     leaseToken: string,
@@ -869,7 +892,7 @@ export interface YayaDataRepository {
     client: TransactionClient,
     input: { observation_id: string; attachment_ids: readonly string[]; actor_account_id: string },
   ): Promise<YayaMediaObservationReferencesResult>;
-  /** 归档追加 CAS（R2）：expected_revision 不匹配抛 revision_conflict */
+  /** 归档追加 CAS（R2）：expected_revision 与宿主确认来源前提不匹配即拒绝 */
   addObservationAttachmentRefsAtRevision(
     client: TransactionClient,
     input: {
@@ -877,6 +900,7 @@ export interface YayaDataRepository {
       attachment_ids: readonly string[];
       actor_account_id: string;
       expected_attachment_revision: number;
+      source_confirmed_at: string | null;
     },
   ): Promise<YayaMediaObservationReferencesResult>;
   getObservationAttachmentRevisionNumber(client: TransactionClient, observationId: string): Promise<number>;
@@ -886,7 +910,11 @@ export interface YayaDataRepository {
     client: TransactionClient,
     input: { conversation_id: string; message_ids: readonly string[]; owner_account_id: string },
   ): Promise<number>;
-  acquireAttachmentDeletionLease(client: TransactionClient, attachmentId: string): Promise<YayaMediaDeletionLeaseResult>;
+  acquireAttachmentDeletionLease(
+    client: TransactionClient,
+    attachmentId: string,
+    expectedRevision?: number,
+  ): Promise<YayaMediaDeletionLeaseResult>;
   completeAttachmentDeletionByLease(
     client: TransactionClient,
     input: { attachment_id: string; lease_token: string; outcome: "deleted" | "unknown" | "failed" },

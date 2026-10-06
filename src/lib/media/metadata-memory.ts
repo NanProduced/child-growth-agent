@@ -264,14 +264,31 @@ export class MemoryAttachmentMetadata implements AttachmentMetadataPort {
   async beginDeletionLease(input: {
     attachment_id: string;
     expected_revision: number;
+    actor_account_id?: string;
   }): Promise<DeletionLeaseResult> {
     this.consumeFailpoint("beginDeletionLease");
     const record = this.records.get(input.attachment_id);
     if (!record) return { outcome: "not_found" };
-    // 共同原子边界：引用集合重查与租约 CAS 之间不得插入引用写入。
-    for (const ref of this.references.values()) {
-      if (ref.attachment_id === input.attachment_id) return { outcome: "referenced" };
+    if (
+      input.actor_account_id !== undefined &&
+      record.owner_account_id !== input.actor_account_id
+    ) {
+      throw new MediaError("not_owner", "只能回收自己上传的图片。");
     }
+    // 共同原子边界：引用集合重查与租约 CAS 之间不得插入引用写入。
+    // 悬空观察引用（宿主不存在）按查询不完整保守拒绝，不折叠为“有引用”。
+    let referenced = false;
+    let incomplete = false;
+    for (const ref of this.references.values()) {
+      if (ref.attachment_id !== input.attachment_id) continue;
+      if (ref.ref_kind === "observation" && !this.observationStatuses.has(ref.ref_id)) {
+        incomplete = true;
+        continue;
+      }
+      referenced = true;
+    }
+    if (incomplete) return { outcome: "reference_incomplete" };
+    if (referenced) return { outcome: "referenced" };
     if (record.status !== "ready") return { outcome: "not_ready", status: record.status };
     if (record.revision !== input.expected_revision) return { outcome: "revision_conflict" };
     record.status = "deleting";

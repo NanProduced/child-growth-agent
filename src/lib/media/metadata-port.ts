@@ -24,9 +24,14 @@ import type { MediaContentType } from "./limits";
  *    为同一时刻；把来源写进审计**不等于**前提成立。服务层预检只用于快速失败；
  * 8. `linkObservationReferences` 供创建观察事务内关联；不递增 revision、不写审计；
  * 9. 不允许默认 ready、伪造 checksum、空引用或类型强转填平字段差异。
+ *
+ * 整合 R2 增量（YAYA-CORE-INTEGRATE1）：
+ * 10. `beginDeletionLease` 有引用 / 引用不完整 / 版本冲突 / 进行中 / 已删除分别表达；
+ *     操作者身份由可信调用上下文提供（生产 DATA 适配器要求必须提供并核对为上传者本人）；
+ * 11. `pending` 为遗留/未就绪记录的真实状态：可见但不得当 ready 消费。
  */
 
-export const ATTACHMENT_STATUSES = ["ready", "deleting", "deleted"] as const;
+export const ATTACHMENT_STATUSES = ["pending", "ready", "deleting", "deleted"] as const;
 export type AttachmentStatus = (typeof ATTACHMENT_STATUSES)[number];
 
 export type AttachmentDeleteResult = "deleted" | "unknown" | null;
@@ -103,6 +108,7 @@ export interface AttachmentAuditEntry {
 export type DeletionLeaseResult =
   | { outcome: "acquired"; record: AttachmentRecord }
   | { outcome: "referenced" }
+  | { outcome: "reference_incomplete" }
   | { outcome: "revision_conflict" }
   | { outcome: "not_ready"; status: AttachmentStatus }
   | { outcome: "not_found" };
@@ -138,6 +144,12 @@ export interface AttachmentMetadataPort {
   beginDeletionLease(input: {
     attachment_id: string;
     expected_revision: number;
+    /**
+     * 可信调用上下文中的回收操作者账号（不从请求体自报）。
+     * 生产 DATA 适配器要求必须提供并核对为附件上传者本人；
+     * 进程内替身留空时保持既有测试语义。
+     */
+    actor_account_id?: string;
   }): Promise<DeletionLeaseResult>;
   commitDeletion(input: {
     attachment_id: string;

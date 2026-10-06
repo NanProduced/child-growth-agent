@@ -28,6 +28,7 @@ export interface RecycleResult {
     | "deleted"
     | "deletion_unknown"
     | "referenced"
+    | "reference_query_incomplete"
     | "already_deleted"
     | "not_found"
     | "lease_busy"
@@ -121,10 +122,16 @@ async function finishDeletion(
 
 export async function recycleAttachment(
   deps: MediaServiceDeps,
-  input: { attachment_id: string },
+  input: { attachment_id: string; actor_account_id?: string },
 ): Promise<RecycleResult> {
   const record = await deps.metadata.get(input.attachment_id);
   if (record === null) return { status: "not_found", objects: [] };
+  if (
+    input.actor_account_id !== undefined &&
+    record.owner_account_id !== input.actor_account_id
+  ) {
+    throw new MediaError("not_owner", "只能回收自己上传的图片。");
+  }
   if (record.status === "deleted") return { status: "already_deleted", objects: [] };
   if (record.status === "deleting") {
     if (record.delete_result !== "unknown") {
@@ -144,10 +151,13 @@ export async function recycleAttachment(
   const lease = await deps.metadata.beginDeletionLease({
     attachment_id: input.attachment_id,
     expected_revision: record.revision,
+    ...(input.actor_account_id === undefined ? {} : { actor_account_id: input.actor_account_id }),
   });
   switch (lease.outcome) {
     case "referenced":
       return { status: "referenced", objects: [] };
+    case "reference_incomplete":
+      return { status: "reference_query_incomplete", objects: [] };
     case "revision_conflict":
       return { status: "revision_conflict", objects: [] };
     case "not_ready":

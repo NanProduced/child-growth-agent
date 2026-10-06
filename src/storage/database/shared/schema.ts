@@ -471,6 +471,8 @@ export const yayaAttachments = pgTable(
     checksum_sha256: varchar("checksum_sha256", { length: 128 }).notNull(),
     thumbnail_checksum: varchar("thumbnail_checksum", { length: 128 }),
     model_checksum: varchar("model_checksum", { length: 128 }),
+    /** 原始上传字节 SHA-256（与处理后对象 checksum 区分）；缺失/不可核验不得推测或伪造 */
+    source_checksum: varchar("source_checksum", { length: 128 }),
     width: integer("width"),
     height: integer("height"),
     client_upload_id: varchar("client_upload_id", { length: 128 }),

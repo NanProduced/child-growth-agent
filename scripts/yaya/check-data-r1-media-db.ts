@@ -80,7 +80,8 @@ interface R1Repo {
   acquireAttachmentDeletionLease(
     client: TransactionClient,
     attachmentId: string,
-  ): Promise<{ outcome: string; lease_token?: string }>;
+    expectedRevision?: number,
+  ): Promise<{ outcome: string; lease_token?: string; status?: string; record?: unknown }>;
   completeAttachmentDeletionByLease(
     client: TransactionClient,
     input: { attachment_id: string; lease_token: string; outcome: string },
@@ -720,7 +721,10 @@ async function main(): Promise<void> {
       const lease = await withRawTransaction(database, (tx) => repo.acquireAttachmentDeletionLease(tx, attL));
       check("D ready 可获取租约令牌", lease.outcome === "acquired" && typeof lease.lease_token === "string");
       const busy = await withRawTransaction(database, (tx) => repo.acquireAttachmentDeletionLease(tx, attL));
-      check("D 租约进行中不可重取", busy.outcome === "already_deleting");
+      check(
+        "D 租约进行中不可重取（not_ready + deleting）",
+        busy.outcome === "not_ready" && busy.status === "deleting",
+      );
       await expectCode(
         () =>
           withRawTransaction(database, (tx) =>
@@ -752,7 +756,10 @@ async function main(): Promise<void> {
       );
       check("D deleted 终态", deletedRecord.status === "deleted" && deletedRecord.deletion_lease_id === null);
       const deletedLease = await withRawTransaction(database, (tx) => repo.acquireAttachmentDeletionLease(tx, attL));
-      check("D 已删除不可再取租约", deletedLease.outcome === "already_deleted");
+      check(
+        "D 已删除不可再取租约（not_ready + deleted）",
+        deletedLease.outcome === "not_ready" && deletedLease.status === "deleted",
+      );
 
       // 聚合审计
       const auditId = randomUUID();
@@ -791,6 +798,7 @@ async function main(): Promise<void> {
           attachment_ids: readonly string[];
           actor_account_id: string;
           expected_attachment_revision?: number;
+          source_confirmed_at?: string | null;
         }): Promise<{ added: number; attachment_revision: number }>;
         getObservationAttachmentRevision(observationId: string): Promise<number>;
       }
@@ -871,7 +879,7 @@ async function main(): Promise<void> {
         const leaseAfterRef = await withRawTransaction(database, (tx) =>
           repo.acquireAttachmentDeletionLease(tx, attLeaseRef),
         );
-        check("R2 租约取得时锁后核引用：已有引用必须拒绝", leaseAfterRef.outcome !== "acquired");
+        check("R2 租约取得时锁后核引用：已有引用必须拒绝", leaseAfterRef.outcome === "referenced");
         const statusAfterRef = await poolQueryFor<{ status: string }>(
           url,
           "SELECT status FROM yaya_attachments WHERE id = $1",
@@ -890,14 +898,15 @@ async function main(): Promise<void> {
         const leaseDangling = await withRawTransaction(database, (tx) =>
           repo.acquireAttachmentDeletionLease(tx, attDanglingLease),
         );
-        check("R2 引用查询不完整必须拒绝租约", leaseDangling.outcome !== "acquired");
+        check("R2 引用查询不完整必须拒绝租约", leaseDangling.outcome === "reference_incomplete");
 
         // P1：归档追加携带 expected_revision（端口同签名传 expected 时走 CAS）
         const obsCas = randomUUID();
+        const obsCasConfirmedAt = "2026-04-01T00:00:00Z";
         await database.query(
-          `INSERT INTO observations (id,child_id,class_id,observed_at,raw_text,status)
-           VALUES ($1,$2,$3,'2026-04-01','R2 CAS 夹具。','confirmed')`,
-          [obsCas, childA, classA],
+          `INSERT INTO observations (id,child_id,class_id,observed_at,raw_text,status,confirmed_at)
+           VALUES ($1,$2,$3,'2026-04-01','R2 CAS 夹具。','confirmed',$4)`,
+          [obsCas, childA, classA, obsCasConfirmedAt],
         );
         const attCasA = randomUUID();
         const attCasB = randomUUID();
@@ -908,6 +917,7 @@ async function main(): Promise<void> {
           attachment_ids: [attCasA],
           actor_account_id: teacherA.accountId,
           expected_attachment_revision: 0,
+          source_confirmed_at: obsCasConfirmedAt,
         });
         check("R2 归档追加首个 expected=0 成功", casFirst.added === 1 && casFirst.attachment_revision === 1);
         let casSecondError: unknown = null;
@@ -917,6 +927,7 @@ async function main(): Promise<void> {
             attachment_ids: [attCasB],
             actor_account_id: teacherA.accountId,
             expected_attachment_revision: 0,
+            source_confirmed_at: obsCasConfirmedAt,
           });
         } catch (error) {
           casSecondError = error;

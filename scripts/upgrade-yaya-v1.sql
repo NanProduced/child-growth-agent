@@ -277,3 +277,8 @@ ALTER TABLE yaya_attachment_appends ADD CONSTRAINT yaya_attachment_appends_actio
   CHECK (action IS NULL OR action IN ('attach_observation_images', 'create_observation_attachments'));
 CREATE INDEX IF NOT EXISTS yaya_attachment_appends_audit_idx
   ON yaya_attachment_appends (audit_id) WHERE audit_id IS NOT NULL;
+
+-- ============================ 整合：媒体原始字节校验 ============================
+-- MEDIA 无键上传的内容绑定需要原始字节 SHA-256；与处理后对象 checksum 区分。
+-- 既有行允许为空（保留不可核验语义，不补造）；新的媒体登记记录必须带值。
+ALTER TABLE yaya_attachments ADD COLUMN IF NOT EXISTS source_checksum varchar(128);

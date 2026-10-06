@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import { buildObjectKey } from "./config";
 import { MediaError } from "./errors";
@@ -93,6 +93,58 @@ export function deterministicAttachmentId(ownerAccountId: string, clientUploadId
  */
 export function contentAttachmentId(ownerAccountId: string, sourceChecksum: string): string {
   return uuidShapedHash(`yaya-media1:content:${ownerAccountId}\u0000${sourceChecksum}`);
+}
+
+/**
+ * 回收后重传的确定性回退身份：内容身份已被回收（主键不可复用）时，
+ * 由 (owner, 原始字节 checksum, 被回收附件 id) 派生新的稳定身份。
+ * 同一输入在每一步重试都派生出同一身份，因此注册结果未知时重试按原身份读回，
+ * 不会因随机兜底不断产生新附件对象；若该回退身份也被回收，再按同一规则向后链式派生。
+ */
+export function recycledContentAttachmentId(
+  ownerAccountId: string,
+  sourceChecksum: string,
+  recycledAttachmentId: string,
+): string {
+  return uuidShapedHash(
+    `yaya-media1:recycled:${ownerAccountId}\u0000${sourceChecksum}\u0000${recycledAttachmentId}`,
+  );
+}
+
+/**
+ * 无键上传的稳定身份链解析：沿“原始内容身份 → 回收回退身份 → …”逐级读回，
+ * 返回可直接复用的已登记记录、继续写入的身份，或读取不可用的未知态。
+ * 每一步都由确定性输入派生，重试必然收敛到同一身份。
+ */
+const MAX_RECYCLED_CHAIN = 8;
+
+async function resolveStableContentIdentity(
+  deps: MediaServiceDeps,
+  ownerAccountId: string,
+  sourceChecksum: string,
+  contentId: string,
+): Promise<
+  | { state: "restored"; record: AttachmentRecord }
+  | { state: "write"; attachment_id: string }
+  | { state: "unavailable"; attachment_id: string }
+> {
+  let candidateId = contentId;
+  for (let depth = 0; depth < MAX_RECYCLED_CHAIN; depth += 1) {
+    const existing = await readBackRegistered(deps, candidateId);
+    if (existing.state === "unavailable") {
+      return { state: "unavailable", attachment_id: candidateId };
+    }
+    if (existing.state === "absent") {
+      return { state: "write", attachment_id: candidateId };
+    }
+    if (existing.record.status !== "deleted") {
+      return { state: "restored", record: existing.record };
+    }
+    candidateId = recycledContentAttachmentId(ownerAccountId, sourceChecksum, candidateId);
+  }
+  throw new MediaError("upload_unknown", "上传身份链无法收敛，请稍后重试。", {
+    attachment_id: candidateId,
+  });
 }
 
 function uuidShapedHash(seed: string): string {
@@ -219,21 +271,34 @@ async function uploadOne(
 
   // 幂等前置：显式键与内容派生身份都可按“同一输入重试”读回原记录；
   // 读回失败保留未知语义，不进入新写入，也不产生新身份。
-  {
-    const preflightId = keyedId ?? contentId;
-    const existing = await readBackRegistered(deps, preflightId);
+  // 内容身份已被回收时不使用随机身份，而按确定性回退身份链继续核对/写入，
+  // 使注册结果未知后的重试始终绑定同一身份，不因兜底分支不断产生新对象。
+  if (keyedId !== null) {
+    const existing = await readBackRegistered(deps, keyedId);
     if (existing.state === "found") {
-      if (existing.record.status === "deleted" && clientUploadId === null) {
-        // 内容身份已被回收：主键不可复用，为本次新上传分配新身份（窄边界，见 R2 交付文档）。
-        attachmentId = randomUUID();
-      } else {
-        return restoreRegistered(existing.record, ownerAccountId, sourceChecksum, preflightId);
-      }
-    } else if (existing.state === "unavailable") {
+      return restoreRegistered(existing.record, ownerAccountId, sourceChecksum, keyedId);
+    }
+    if (existing.state === "unavailable") {
       throw new MediaError("upload_unknown", "无法核对上次上传结果，请稍后重试。", {
-        attachment_id: preflightId,
+        attachment_id: keyedId,
       });
     }
+  } else {
+    const resolved = await resolveStableContentIdentity(deps, ownerAccountId, sourceChecksum, contentId);
+    if (resolved.state === "restored") {
+      return restoreRegistered(
+        resolved.record,
+        ownerAccountId,
+        sourceChecksum,
+        resolved.record.attachment_id,
+      );
+    }
+    if (resolved.state === "unavailable") {
+      throw new MediaError("upload_unknown", "无法核对上次上传结果，请稍后重试。", {
+        attachment_id: resolved.attachment_id,
+      });
+    }
+    attachmentId = resolved.attachment_id;
   }
 
   if (file.body.length > MEDIA_MAX_IMAGE_BYTES) {

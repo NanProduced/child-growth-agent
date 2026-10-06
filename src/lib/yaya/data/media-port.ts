@@ -32,6 +32,7 @@ export function bindYayaAttachmentMetadataPort(client: TransactionClient): YayaA
             attachment_ids: input.attachment_ids,
             actor_account_id: input.actor_account_id,
             expected_attachment_revision: input.expected_attachment_revision,
+            source_confirmed_at: input.source_confirmed_at ?? null,
           })
         : attachments.addObservationAttachmentRefs(client, input),
     addObservationReferencesAtRevision: (input) =>
@@ -49,7 +50,8 @@ export function bindYayaAttachmentMetadataPort(client: TransactionClient): YayaA
     },
     releaseConversationReferences: (input) =>
       attachments.releaseConversationAttachmentRefs(client, input),
-    beginDeletionLease: (attachmentId) => attachments.acquireAttachmentDeletionLease(client, attachmentId),
+    beginDeletionLease: (attachmentId, expectedRevision) =>
+      attachments.acquireAttachmentDeletionLease(client, attachmentId, expectedRevision),
     completeDeletion: (attachmentId, leaseToken, outcome) =>
       attachments.completeAttachmentDeletionByLease(client, {
         attachment_id: attachmentId,
@@ -81,6 +83,7 @@ export function createYayaAttachmentMetadataPort(
               attachment_ids: input.attachment_ids,
               actor_account_id: input.actor_account_id,
               expected_attachment_revision: expectedRevision,
+              source_confirmed_at: input.source_confirmed_at ?? null,
             }),
           )
         : run((client) => attachments.addObservationAttachmentRefs(client, input));
@@ -101,8 +104,8 @@ export function createYayaAttachmentMetadataPort(
       }),
     releaseConversationReferences: (input) =>
       run((client) => attachments.releaseConversationAttachmentRefs(client, input)),
-    beginDeletionLease: (attachmentId) =>
-      run((client) => attachments.acquireAttachmentDeletionLease(client, attachmentId)),
+    beginDeletionLease: (attachmentId, expectedRevision) =>
+      run((client) => attachments.acquireAttachmentDeletionLease(client, attachmentId, expectedRevision)),
     completeDeletion: (attachmentId, leaseToken, outcome) =>
       run((client) =>
         attachments.completeAttachmentDeletionByLease(client, {

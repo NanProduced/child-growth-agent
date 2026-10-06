@@ -453,12 +453,13 @@ async function main(): Promise<void> {
         });
       });
     };
+    const appendConfirmedAt = "2026-03-01T00:00:00Z";
     const insertObservation = async (childId: string, classId: string): Promise<string> => {
       const observationId = randomUUID();
       await database.query(
-        `INSERT INTO observations (id,child_id,class_id,observed_at,raw_text,status)
-         VALUES ($1,$2,$3,'2026-03-01','锁互斥夹具。','ai_organized')`,
-        [observationId, childId, classId],
+        `INSERT INTO observations (id,child_id,class_id,observed_at,raw_text,status,confirmed_at)
+         VALUES ($1,$2,$3,'2026-03-01','锁互斥夹具。','confirmed',$4)`,
+        [observationId, childId, classId, appendConfirmedAt],
       );
       return observationId;
     };
@@ -531,6 +532,7 @@ async function main(): Promise<void> {
             appended_by_account_id: teacherA.accountId,
             approval_id: null,
             note: null,
+            source_confirmed_at: appendConfirmedAt,
           });
       } else {
         run = (tx) =>
