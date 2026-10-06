@@ -91,3 +91,21 @@
 5. `operation_id` 在可能写入前建立并可由客户端持有；批准身份（approval_id）与执行幂等身份（operation_id）不同。原操作结果未知只查原 operation_id，不新建操作重新执行，不假装成功。
 6. 工具结果返回最小必要字段；原文/图片/网页/工具结果都是不可信数据，不改变系统指令或权限；聊天正文/附件/模型上下文按当前授权投影；图片读取与聊天附件统一：historical 只给元数据，关联按 `record_kind+record_id` 完整匹配。
 7. 空任教范围、读取失败、无记录三者语义分离：错误不伪装成空数据。
+
+## 7. TOOLS-READ1 补列（2026-10-06，只读实现已落地）
+
+> 本节由 `codex/yaya-tools-read1` 追加：补第 1 节遗漏的既有读取功能，并标注真实实现位置；
+> 不改原表口径。实现与验收见 `docs/yaya-v1/tools-read1-delivery.md`。
+
+| # | 现有功能 | 真实入口 / 服务 | action / resource | 角色与范围 | 阶段 | 结果卡 | 回归场景 |
+|---|---|---|---|---|---|---|---|
+| Q9 | 查询单条观察记录详情 | `scopedGetObservation`；Review 页 | `observation.read` / `observation` | 教师=当前负责幼儿完整记录 + 原班历史只读；管理员=全园只读 | read | 数据卡：`observation`（历史投影裁剪） | 历史只读不含跨班证据/AI 草稿；越权 403 与不存在分离 |
+| Q10 | 查询幼儿成长档案与活动支持（只读） | `getChild`（`growth_profile` 字段）；`/children/[id]` | `child.read` / `child` | 教师=当前负责幼儿；管理员=全园只读 | read | 数据卡：AI 摘要/建议（显式标注，不是已保存事实） | AI 摘要不自动成为幼儿事实或指南证据；教师私有备注不进列表 |
+
+实现位置：`src/lib/yaya/tools/read/**`（13 个只读工具）——Q1–Q10 与 A0 已封装为
+`list_children` / `list_classes` / `get_class` / `resolve_child_class` /
+`list_observations` / `get_observation` / `get_child_growth_profile` /
+`get_child_evidence_book` / `get_class_evidence_overview` /
+`list_guide_items` / `get_guide_item` / `list_education_suggestions` /
+`list_teacher_accounts`；Q8 按目录/条目/教育建议拆分为三个工具。
+本模块只注册真实读取，不注册生成/修改/删除，不含公网搜索或任意执行器。
