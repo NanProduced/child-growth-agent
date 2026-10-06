@@ -26,6 +26,7 @@ import {
   type YayaAttachmentStatus,
   type YayaItemResourceRef,
   type YayaMediaAttachmentStatus,
+  type YayaProposalItemAccess,
   type YayaStoredFragment,
 } from "../storage-types";
 
@@ -387,6 +388,22 @@ export function redactProvenanceForVisibility(
   provenance: YayaSourceRef | null,
 ): YayaSourceRef | null {
   return visibility === "full" ? provenance : null;
+}
+
+/**
+ * 同一提案内多个匹配条目共享同一附件时取最佳合法投影：
+ * full > historical_read_only > 无（denied/unavailable/broken 不覆盖其他条目的合法投影），
+ * 结果与条目顺序无关。
+ */
+export function aggregateProposalRecordAccess(
+  accesses: readonly YayaProposalItemAccess[],
+): "full" | "historical_read_only" | null {
+  let best: "full" | "historical_read_only" | null = null;
+  for (const access of accesses) {
+    if (access === "full") return "full";
+    if (access === "historical_read_only") best = "historical_read_only";
+  }
+  return best;
 }
 
 /** 附件引用写入的稳定锁序：去重后按 attachment_id 排序（同一事务内统一顺序防死锁） */

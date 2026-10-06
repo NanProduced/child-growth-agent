@@ -757,6 +757,18 @@ export interface YayaAttachmentMetadataPort {
     observation_id: string;
     attachment_ids: readonly string[];
     actor_account_id: string;
+    /**
+     * 归档追加（R2）：提供该字段时走观察附件 revision CAS（等价
+     * addObservationReferencesAtRevision）；创建关联不提供，不做版本前提。
+     */
+    expected_attachment_revision?: number;
+  }): Promise<YayaMediaObservationReferencesResult>;
+  /** 归档追加的显式 CAS 入口：必须携带 expected_revision，复用 appendObservationAttachments 同一原语 */
+  addObservationReferencesAtRevision(input: {
+    observation_id: string;
+    attachment_ids: readonly string[];
+    actor_account_id: string;
+    expected_attachment_revision: number;
   }): Promise<YayaMediaObservationReferencesResult>;
   getObservationAttachmentRevision(observationId: string): Promise<number>;
   getReferenceFacts(attachmentId: string): Promise<YayaMediaReferenceFacts>;
@@ -856,6 +868,16 @@ export interface YayaDataRepository {
   addObservationAttachmentRefs(
     client: TransactionClient,
     input: { observation_id: string; attachment_ids: readonly string[]; actor_account_id: string },
+  ): Promise<YayaMediaObservationReferencesResult>;
+  /** 归档追加 CAS（R2）：expected_revision 不匹配抛 revision_conflict */
+  addObservationAttachmentRefsAtRevision(
+    client: TransactionClient,
+    input: {
+      observation_id: string;
+      attachment_ids: readonly string[];
+      actor_account_id: string;
+      expected_attachment_revision: number;
+    },
   ): Promise<YayaMediaObservationReferencesResult>;
   getObservationAttachmentRevisionNumber(client: TransactionClient, observationId: string): Promise<number>;
   /** 三种引用完整返回；悬空引用/损坏按 reference_incomplete 抛错，调用方保守禁止回收 */

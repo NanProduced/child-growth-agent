@@ -25,6 +25,7 @@ import {
   type YayaSourceAccess,
 } from "../types";
 import type { YayaItemResourceRef, YayaProposalItemAccess } from "../storage-types";
+import { aggregateProposalRecordAccess } from "./invariants";
 import { parseResourceRef } from "./rows";
 
 /** 与 AUTH `resourceFacts` 相同的读取语义；缺失资源返回 null，不伪造事实 */
@@ -281,24 +282,24 @@ export async function evaluateAttachmentAccess(
           if (decision.allowed) recordAccess.push({ record_kind: "observation", record_id: record.record_id, projection: decision.projection });
         } else if (record.record_kind === "proposal") {
           // 提案引用必须按**当前业务来源**投影：仅凭“提案属于本人”不足以 full。
+          // 同一提案内可能多条匹配同一附件：评估全部条目并取最佳合法投影（顺序无关）。
           const proposalItems = await client.query<ProposalItemAccessRow>(
             `SELECT action, resource, resource_ref, attachment_associations
                FROM yaya_proposal_items WHERE proposal_id = $1`,
             [record.record_id],
           );
+          const accesses: YayaProposalItemAccess[] = [];
           for (const item of proposalItems.rows) {
             if (!associationIds(item.attachment_associations).includes(attachmentId)) continue;
-            const access = await evaluateProposalItemAccess(client, principal, schoolId, item);
-            if (access === "full") {
-              recordAccess.push({ record_kind: "proposal", record_id: record.record_id, projection: "full" });
-            } else if (access === "historical_read_only") {
-              recordAccess.push({
-                record_kind: "proposal",
-                record_id: record.record_id,
-                projection: "historical_read_only",
-              });
-            }
-            break;
+            accesses.push(await evaluateProposalItemAccess(client, principal, schoolId, item));
+          }
+          const best = aggregateProposalRecordAccess(accesses);
+          if (best !== null) {
+            recordAccess.push({
+              record_kind: "proposal",
+              record_id: record.record_id,
+              projection: best,
+            });
           }
         }
       }

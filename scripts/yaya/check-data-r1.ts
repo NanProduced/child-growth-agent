@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
+  aggregateProposalRecordAccess,
   attachmentLeaseTransition,
   conversationTitleSourceState,
   mapMediaAttachmentStatus,
@@ -202,6 +203,16 @@ check("媒体端口租约完成：令牌核对；unknown 不恢复 ready，faile
     ok: true,
     next: { status: "deleted", delete_result: "deleted", deletion_lease_id: null },
   });
+});
+
+check("提案图片业务投影取最佳且与条目顺序无关（R2）", () => {
+  requireFunction("aggregateProposalRecordAccess", aggregateProposalRecordAccess);
+  assert.equal(aggregateProposalRecordAccess(["denied", "full"]), "full");
+  assert.equal(aggregateProposalRecordAccess(["full", "denied"]), "full");
+  assert.equal(aggregateProposalRecordAccess(["denied", "historical_read_only"]), "historical_read_only");
+  assert.equal(aggregateProposalRecordAccess(["historical_read_only", "denied"]), "historical_read_only");
+  assert.equal(aggregateProposalRecordAccess(["denied", "broken", "unavailable"]), null);
+  assert.equal(aggregateProposalRecordAccess([]), null);
 });
 
 check("harness blob 保持 6702f2ddf3b436e79f8c92ae8756c33f611a8503", () => {

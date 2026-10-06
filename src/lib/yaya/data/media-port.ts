@@ -25,7 +25,17 @@ export function bindYayaAttachmentMetadataPort(client: TransactionClient): YayaA
     markReady: (attachmentId) => attachments.markAttachmentReady(client, attachmentId),
     removePending: (attachmentId) => attachments.removePendingAttachment(client, attachmentId),
     get: (attachmentId) => attachments.getMediaAttachment(client, attachmentId),
-    addObservationReferences: (input) => attachments.addObservationAttachmentRefs(client, input),
+    addObservationReferences: (input) =>
+      typeof input.expected_attachment_revision === "number"
+        ? attachments.addObservationAttachmentRefsAtRevision(client, {
+            observation_id: input.observation_id,
+            attachment_ids: input.attachment_ids,
+            actor_account_id: input.actor_account_id,
+            expected_attachment_revision: input.expected_attachment_revision,
+          })
+        : attachments.addObservationAttachmentRefs(client, input),
+    addObservationReferencesAtRevision: (input) =>
+      attachments.addObservationAttachmentRefsAtRevision(client, input),
     getObservationAttachmentRevision: (observationId) =>
       attachments.getObservationAttachmentRevisionNumber(client, observationId),
     getReferenceFacts: async (attachmentId) => {
@@ -62,7 +72,21 @@ export function createYayaAttachmentMetadataPort(
     markReady: (attachmentId) => run((client) => attachments.markAttachmentReady(client, attachmentId)),
     removePending: (attachmentId) => run((client) => attachments.removePendingAttachment(client, attachmentId)),
     get: (attachmentId) => run((client) => attachments.getMediaAttachment(client, attachmentId)),
-    addObservationReferences: (input) => run((client) => attachments.addObservationAttachmentRefs(client, input)),
+    addObservationReferences: (input) => {
+      const expectedRevision = input.expected_attachment_revision;
+      return typeof expectedRevision === "number"
+        ? run((client) =>
+            attachments.addObservationAttachmentRefsAtRevision(client, {
+              observation_id: input.observation_id,
+              attachment_ids: input.attachment_ids,
+              actor_account_id: input.actor_account_id,
+              expected_attachment_revision: expectedRevision,
+            }),
+          )
+        : run((client) => attachments.addObservationAttachmentRefs(client, input));
+    },
+    addObservationReferencesAtRevision: (input) =>
+      run((client) => attachments.addObservationAttachmentRefsAtRevision(client, input)),
     getObservationAttachmentRevision: (observationId) =>
       run((client) => attachments.getObservationAttachmentRevisionNumber(client, observationId)),
     getReferenceFacts: (attachmentId) =>

@@ -69,7 +69,7 @@ owner：YAYA-DATA1（`yaya_*` DDL、SQL、repository 唯一 owner）。
 
 - `insertPending`：仅 `pending`，`client_upload_id` 冲突 → `object_conflict` 语义；
 - `markReady`：仅 `pending → ready`（CAS，revision+1）；其他状态 → `metadata_conflict` 语义；
-- `beginDeletionLease`：`ready` 或 `deletion_unknown` → `deleting`（新 `deletion_lease_id`，`delete_result` 清空，revision+1）；`deleting`/`deleted`/`pending`/缺失分别返回 `already_deleting`/`already_deleted`/`not_ready`/`not_found`；
+- `beginDeletionLease`：先锁附件行，**锁后重新核查完整引用**（不依赖调用方的前置 `getReferenceFacts`）：`ready` 或 `deletion_unknown` 且引用查询完整且零引用 → `deleting`（新 `deletion_lease_id`，`delete_result` 清空，revision+1）；已有任何引用或引用查询不完整 → 返回 `not_ready`（状态保持原值，不进入 deleting）；`deleting`/`deleted`/`pending`/缺失分别返回 `already_deleting`/`already_deleted`/`not_ready`/`not_found`；
 - `completeDeletion(id, lease_token, outcome)`：锁行并核对令牌与 `deleting` 状态；`deleted → deleted`，`unknown → deleting+unknown`，`failed → ready`（清空租约与 delete_result）；
 - 端口读到的 `deletion_unknown` 允许再次 `beginDeletionLease`；任何路径不得把 `unknown` 直接变回 `ready`。
 
@@ -89,15 +89,17 @@ DATA1 发布两类入口（`src/lib/yaya/data/media-port.ts`，随实现提交�
 | `markReady(id)` | `markAttachmentReady(client, id)` | pending→ready CAS，revision+1，返回记录 |
 | `removePending(id)` | `removePendingAttachment(client, id)` | 仅 pending 可删；返回是否删除 |
 | `get(id)` | `getMediaAttachment(client, id)` | 端口记录映射（含派生 key/宽高/租约） |
-| `addObservationReferences({observation_id, attachment_ids, actor_account_id})` | `addObservationAttachmentRefs(client, input)` | **先锁附件（稳定排序）核 ready+owner**，再锁 `yaya_observation_attachment_meta`，跳过已存在引用，`added` 计数，revision += added，返回 `{added, attachment_revision}` |
+| `addObservationReferences({observation_id, attachment_ids, actor_account_id})` | `addObservationAttachmentRefs(client, input)` | **创建关联**：先锁附件（稳定排序）核 ready+owner，再锁 `yaya_observation_attachment_meta`，跳过已存在引用，`added` 计数，revision += added。不带版本前提 |
+| `addObservationReferences({…, expected_attachment_revision})`（R2 可选字段） | `addObservationAttachmentRefsAtRevision(client, input)` | **归档追加**：提供 expected 时走同一 CAS 原语；不匹配抛 `revision_conflict` |
+| `addObservationReferencesAtRevision({observation_id, attachment_ids, actor_account_id, expected_attachment_revision})` | `addObservationAttachmentRefsAtRevision(client, input)` | 归档追加的显式 CAS 入口（推荐；与 `appendObservationAttachments` 同一核心，revision+1，不写逐附件审计） |
 | `getObservationAttachmentRevision(observation_id)` | `getObservationAttachmentRevisionNumber(client, observationId)` | 无 meta 行按 0 |
 | `getReferenceFacts(attachment_id)` | `queryAttachmentLifecycle(client, attachmentId)` | 三种引用完整返回；悬空引用/查询失败 → 抛错（调用方按“引用查询不完整”保守拒绝回收） |
 | `releaseConversationReferences({conversation_id, message_ids, owner_account_id})` | `releaseConversationAttachmentRefs(client, input)` | 先核会话 owner 属于该账号；只删指定消息在自己会话内的消息引用；返回删除条数 |
-| `beginDeletionLease(id)` | `acquireAttachmentDeletionLease(client, id)` | 锁附件行并查完整引用；无引用且状态允许才发租约；有引用 → 调用方先走 `getReferenceFacts` 判定（本方法不再二次拒绝，保持端口语义） |
+| `beginDeletionLease(id)` | `acquireAttachmentDeletionLease(client, id)` | 锁附件行后**重新核查完整引用**：零引用才发租约；有引用/查询不完整 → `not_ready`（不进入 deleting）。与旧 `beginAttachmentDeletion` 共用同一锁内引用核查原语 |
 | `completeDeletion(id, lease_token, outcome)` | `completeAttachmentDeletionByLease(client, input)` | 令牌核对；三态映射见 §3 |
 | `appendAttachmentAudit(entry)` | `appendMediaAttachmentAudit(client, entry)` | 独立审计行；不改 raw_text/confirmed_content |
 
-> 说明：`beginDeletionLease` 与 `getReferenceFacts` 分开是 MEDIA 的冻结口径（recycleAttachment 先查引用、后取租约）。DATA1 的旧 `beginAttachmentDeletion`（带 expected_revision，且自身拒绝有引用）保留，供 DATA1 内部与既有检查使用；两者最终都锁同一附件行。
+> 说明：`getReferenceFacts` 与 `beginDeletionLease` 的分工是“先判断能否回收、后取租约”，但**租约取得时仍必须在同一锁内重新核查引用**（R2 修正）：前置查询只用于快速路径，不能作为租约的保护。DATA1 的旧 `beginAttachmentDeletion`（带 expected_revision）与媒体端口租约共用同一锁内引用核查原语，语义一致。
 
 ## 5. 错误映射（组合候选适配器必须按此表转换）
 

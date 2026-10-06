@@ -280,7 +280,24 @@ export async function queryAttachmentLifecycle(
   };
 }
 
-/** 删除租约：无有效引用且 CAS 通过才进入 deleting；不物理删除对象 */
+/**
+ * 租约引用核查（必须在附件行锁内调用）：
+ * - safe：引用查询完整且无任何引用；
+ * - referenced：完整查询下仍有观察/消息/提案引用；
+ * - incomplete：悬空/损坏引用，按查询不完整保守处理（同样禁止回收）。
+ */
+async function attachmentLeaseReferenceState(
+  client: TransactionClient,
+  attachmentId: string,
+): Promise<"safe" | "referenced" | "incomplete"> {
+  const facts = await queryAttachmentLifecycle(client, attachmentId);
+  if (!facts.reference_query_complete) return "incomplete";
+  const count =
+    facts.observation_refs.length + facts.message_refs.length + facts.proposal_refs.length;
+  return count === 0 ? "safe" : "referenced";
+}
+
+/** 删除租约：锁后核完整引用且 CAS 通过才进入 deleting；不物理删除对象 */
 export async function beginAttachmentDeletion(
   client: TransactionClient,
   input: YayaAttachmentLeaseInput,
@@ -291,12 +308,12 @@ export async function beginAttachmentDeletion(
   );
   const row = result.rows[0];
   if (!row) throw new YayaDataError("attachment_missing", "附件不存在。");
-  const refs = await client.query<{ count: string | number }>(
-    "SELECT count(*) AS count FROM yaya_attachment_refs WHERE attachment_id = $1",
-    [input.attachment_id],
-  );
-  if (Number(refs.rows[0]?.count ?? 0) > 0) {
+  const referenceState = await attachmentLeaseReferenceState(client, input.attachment_id);
+  if (referenceState === "referenced") {
     throw new YayaDataError("attachment_referenced", "附件仍被引用，不能进入删除租约。");
+  }
+  if (referenceState === "incomplete") {
+    throw new YayaDataError("reference_incomplete", "附件引用查询不完整，不能进入删除租约。");
   }
   const transition = attachmentLeaseTransition(
     { status: row.status, revision: row.revision, delete_result: row.delete_result },
@@ -450,17 +467,29 @@ export async function listAttachmentRefs(
   return result.rows.map(toRefView);
 }
 
+interface YayaObservationRefsCasInput {
+  observation_id: string;
+  attachment_ids: readonly string[];
+  actor_account_id: string;
+  expected_attachment_revision: number;
+  /** 是否写 DATA1 逐附件追加审计行（归档资料追加用；媒体端口另有聚合审计） */
+  write_attachment_audit: boolean;
+  approval_id?: string | null;
+  note?: string | null;
+}
+
 /**
- * 归档后资料追加：观察级 revision CAS + 独立追加审计；不改 raw_text/confirmed_content。
- * 授权（当前教师写权限、人工批准）由调用方在业务边界完成；本函数只做存储原子性。
+ * 观察附件引用的 CAS 核心（创建关联与归档追加共用存储原子性）：
+ * 锁附件（稳定排序、ready+owner）→ 锁 meta → expected_revision 比对 →
+ * 拒绝重复引用 → 插引用并 revision+1。
  */
-export async function appendObservationAttachments(
+async function casObservationAttachmentRefs(
   client: TransactionClient,
-  input: YayaAttachmentAppendInput,
-): Promise<YayaAttachmentAppendResult> {
+  input: YayaObservationRefsCasInput,
+): Promise<{ observation_id: string; attachment_revision: number; attachment_ids: string[]; updated_at: Date | string }> {
   const ids = [...input.attachment_ids];
   if (ids.length === 0 || new Set(ids).size !== ids.length) {
-    throw new YayaDataError("invalid_request", "追加附件集合不合法。");
+    throw new YayaDataError("invalid_request", "附件集合不合法。");
   }
   if (!Number.isInteger(input.expected_attachment_revision) || input.expected_attachment_revision < 0) {
     throw new YayaDataError("invalid_request", "附件修订前提不合法。");
@@ -470,7 +499,7 @@ export async function appendObservationAttachments(
   ]);
   if (!observation.rowCount) throw new YayaDataError("not_found", "观察记录不存在。");
   // 统一锁序：先附件（稳定排序），再观察附件 meta；锁后核 ready+owner。
-  await lockAttachmentsForReference(client, input.appended_by_account_id, ids);
+  await lockAttachmentsForReference(client, input.actor_account_id, ids);
   await client.query(
     `INSERT INTO yaya_observation_attachment_meta (observation_id, attachment_revision)
      VALUES ($1, 0) ON CONFLICT (observation_id) DO NOTHING`,
@@ -500,21 +529,23 @@ export async function appendObservationAttachments(
     await client.query(
       `INSERT INTO yaya_attachment_refs (attachment_id, record_kind, record_id, linked_by_account_id)
        VALUES ($1, 'observation', $2, $3)`,
-      [attachmentId, input.observation_id, input.appended_by_account_id],
+      [attachmentId, input.observation_id, input.actor_account_id],
     );
-    await client.query(
-      `INSERT INTO yaya_attachment_appends
-         (attachment_id, observation_id, attachment_revision, appended_by_account_id, approval_id, note)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        attachmentId,
-        input.observation_id,
-        nextRevision,
-        input.appended_by_account_id,
-        input.approval_id,
-        input.note,
-      ],
-    );
+    if (input.write_attachment_audit) {
+      await client.query(
+        `INSERT INTO yaya_attachment_appends
+           (attachment_id, observation_id, attachment_revision, appended_by_account_id, approval_id, note)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          attachmentId,
+          input.observation_id,
+          nextRevision,
+          input.actor_account_id,
+          input.approval_id ?? null,
+          input.note ?? null,
+        ],
+      );
+    }
   }
   const updated = await client.query<{ updated_at: Date | string }>(
     `UPDATE yaya_observation_attachment_meta
@@ -526,9 +557,57 @@ export async function appendObservationAttachments(
   return {
     observation_id: input.observation_id,
     attachment_revision: nextRevision,
-    appended_attachment_ids: ids,
-    appended_at: isoRequired(updated.rows[0]?.updated_at ?? new Date()),
+    attachment_ids: ids,
+    updated_at: updated.rows[0]?.updated_at ?? new Date(),
   };
+}
+
+/**
+ * 归档后资料追加：观察级 revision CAS + 独立追加审计；不改 raw_text/confirmed_content。
+ * 授权（当前教师写权限、人工批准）由调用方在业务边界完成；本函数只做存储原子性。
+ */
+export async function appendObservationAttachments(
+  client: TransactionClient,
+  input: YayaAttachmentAppendInput,
+): Promise<YayaAttachmentAppendResult> {
+  const result = await casObservationAttachmentRefs(client, {
+    observation_id: input.observation_id,
+    attachment_ids: input.attachment_ids,
+    actor_account_id: input.appended_by_account_id,
+    expected_attachment_revision: input.expected_attachment_revision,
+    write_attachment_audit: true,
+    approval_id: input.approval_id,
+    note: input.note,
+  });
+  return {
+    observation_id: result.observation_id,
+    attachment_revision: result.attachment_revision,
+    appended_attachment_ids: result.attachment_ids,
+    appended_at: isoRequired(result.updated_at),
+  };
+}
+
+/**
+ * 媒体端口归档追加：携带 expected_revision 的独立入口，复用同一 CAS 核心；
+ * 聚合审计由 MEDIA 通过 appendMediaAttachmentAudit 单独写入。
+ */
+export async function addObservationAttachmentRefsAtRevision(
+  client: TransactionClient,
+  input: {
+    observation_id: string;
+    attachment_ids: readonly string[];
+    actor_account_id: string;
+    expected_attachment_revision: number;
+  },
+): Promise<YayaMediaObservationReferencesResult> {
+  const result = await casObservationAttachmentRefs(client, {
+    observation_id: input.observation_id,
+    attachment_ids: input.attachment_ids,
+    actor_account_id: input.actor_account_id,
+    expected_attachment_revision: input.expected_attachment_revision,
+    write_attachment_audit: false,
+  });
+  return { added: result.attachment_ids.length, attachment_revision: result.attachment_revision };
 }
 
 export async function getObservationAttachmentRevision(
@@ -818,7 +897,11 @@ export async function releaseConversationAttachmentRefs(
   return result.rowCount ?? 0;
 }
 
-/** 媒体端口租约：ready / deletion_unknown 可取得；租约令牌写入同一行 */
+/**
+ * 媒体端口租约：ready / deletion_unknown 可取得；租约令牌写入同一行。
+ * 必须在附件行锁内**重新核查完整引用**（不依赖调用方的前置 getReferenceFacts）：
+ * 已有任何引用或引用查询不完整 → 拒绝（not_ready），状态保持 ready/deletion_unknown。
+ */
 export async function acquireAttachmentDeletionLease(
   client: TransactionClient,
   attachmentId: string,
@@ -837,6 +920,11 @@ export async function acquireAttachmentDeletionLease(
   if (!transition.ok) {
     if (transition.reason === "already_deleting") return { outcome: "already_deleting" };
     if (transition.reason === "already_deleted") return { outcome: "already_deleted" };
+    return { outcome: "not_ready" };
+  }
+  const referenceState = await attachmentLeaseReferenceState(client, attachmentId);
+  if (referenceState !== "safe") {
+    // 有引用/查询不完整：不得取得租约，也不得进入 deleting
     return { outcome: "not_ready" };
   }
   await client.query(

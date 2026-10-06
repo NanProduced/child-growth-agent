@@ -58,6 +58,7 @@ export const yayaDataRepository = {
   removePendingAttachment: attachments.removePendingAttachment,
   getMediaAttachment: attachments.getMediaAttachment,
   addObservationAttachmentRefs: attachments.addObservationAttachmentRefs,
+  addObservationAttachmentRefsAtRevision: attachments.addObservationAttachmentRefsAtRevision,
   getObservationAttachmentRevisionNumber: attachments.getObservationAttachmentRevisionNumber,
   getMediaAttachmentReferenceFacts: attachments.getMediaAttachmentReferenceFacts,
   releaseConversationAttachmentRefs: attachments.releaseConversationAttachmentRefs,

@@ -406,6 +406,63 @@ async function main(): Promise<void> {
     check("C 双引用：另有有效 full 观察引用时图片仍可读", bothAfter.text.includes('"readable":true'));
     stage("c-both");
 
+    // R2：同一提案内共享照片必须评估全部匹配条目并取最佳合法投影（与条目顺序无关）
+    const attShared = randomUUID();
+    await registerAttachment(teacherD, attShared);
+    const sharedItem = (key: string, observationId: string) => ({
+      item_key: key,
+      target_id: observationId,
+      action: "observation.confirm",
+      resource: "observation",
+      resource_ref: { kind: "observation", observation_id: observationId },
+      payload: { kind: "organize_observation", observation_id: observationId },
+      attachment_associations: [{ attachment_id: attShared, target_id: observationId }],
+      business_revision: null,
+    });
+    const prepareSharedOrder = async (order: "deny-first" | "allow-first"): Promise<Record<string, unknown>> => {
+      const conversationId = await createConversation(teacherD);
+      const items =
+        order === "deny-first"
+          ? [sharedItem("a-deny", obsA), sharedItem("z-allow", obsB)]
+          : [sharedItem("a-allow", obsB), sharedItem("z-deny", obsA)];
+      const prepared = await respond(
+        proposalsPost(
+          req(
+            teacherD.token,
+            "POST",
+            {
+              conversation_id: conversationId,
+              proposal_origin: "teacher_card",
+              auth: { kind: "action", action: "observation.confirm", resource: "observation" },
+              items,
+            },
+            "/api/yaya/proposals",
+          ),
+        ),
+      );
+      check(`R2 共享照片提案准备 201（${order}）`, prepared.status === 201);
+      const proposalId = (prepared.json.proposal as { proposal_id: string }).proposal_id;
+      const projected = await getProposalHttp(teacherD, proposalId);
+      return projected.json.proposal as Record<string, unknown>;
+    };
+    const denyFirst = await prepareSharedOrder("deny-first");
+    const allowFirst = await prepareSharedOrder("allow-first");
+    const readableOf = (proposal: Record<string, unknown>): boolean =>
+      ((proposal.attachments as { readable: boolean }[]) ?? []).some((entry) => entry.readable === true);
+    check("R2 共享照片投影与条目顺序无关（无权条目在前仍可读）", readableOf(denyFirst));
+    check("R2 共享照片投影与条目顺序无关（有权条目在前仍可读）", readableOf(allowFirst));
+    const payloadOf = (proposal: Record<string, unknown>, key: string): unknown =>
+      ((proposal.items as { item_key: string; access: string; payload: unknown }[]) ?? []).find(
+        (entry) => entry.item_key === key,
+      )?.payload;
+    check(
+      "R2 无权条目 payload 仍扣留、有权条目 payload 保留",
+      payloadOf(denyFirst, "a-deny") === null &&
+        payloadOf(denyFirst, "z-allow") !== null &&
+        payloadOf(allowFirst, "a-allow") !== null &&
+        payloadOf(allowFirst, "z-deny") === null,
+    );
+
     // 历史只读：消息附件仅元数据（用未被撤权的独立账号 teacherH）
     const attHistory = randomUUID();
     await registerAttachment(teacherH, attHistory);
@@ -728,6 +785,14 @@ async function main(): Promise<void> {
       interface R1Port {
         get(id: string): Promise<Record<string, unknown> | null>;
         markReady(id: string): Promise<Record<string, unknown>>;
+        insertPending(record: Record<string, unknown>): Promise<void>;
+        addObservationReferences(input: {
+          observation_id: string;
+          attachment_ids: readonly string[];
+          actor_account_id: string;
+          expected_attachment_revision?: number;
+        }): Promise<{ added: number; attachment_revision: number }>;
+        getObservationAttachmentRevision(observationId: string): Promise<number>;
       }
       const bindFactory = looseIndex.bindYayaAttachmentMetadataPort as (client: TransactionClient) => R1Port;
       const createFactory = looseIndex.createYayaAttachmentMetadataPort as (connect?: unknown) => R1Port;
@@ -767,6 +832,98 @@ async function main(): Promise<void> {
         );
         const marked = await (shortPort.markReady as (id: string) => Promise<Record<string, unknown>>)(pid);
         check("D 短事务端口 markReady 可用", marked.status === "ready");
+
+        /* -------- R2：媒体端口剩余缺口（租约引用核查 / 追加版本条件） -------- */
+        const uploadReadyViaRepo = async (attachmentId: string): Promise<void> => {
+          await withRawTransaction(database, (tx) =>
+            repo.insertPendingAttachment(tx, {
+              attachment_id: attachmentId,
+              owner_account_id: teacherA.accountId,
+              status: "pending",
+              object_key: `${RUN}/r2-${attachmentId}-original`,
+              thumbnail_key: `${RUN}/r2-${attachmentId}-thumb`,
+              model_key: `${RUN}/r2-${attachmentId}-model`,
+              content_type: "image/png",
+              byte_size: 10,
+              checksum_sha256: "1".repeat(64),
+              thumbnail_checksum: "2".repeat(64),
+              model_checksum: "3".repeat(64),
+              width: 10,
+              height: 10,
+              client_upload_id: `r2-${attachmentId}`,
+              created_at: new Date().toISOString(),
+              deletion_lease_id: null,
+            }),
+          );
+          await withRawTransaction(database, (tx) => repo.markAttachmentReady(tx, attachmentId));
+        };
+
+        // P1：租约取得时锁后核完整引用（有引用必须拒绝且不进入 deleting）
+        const attLeaseRef = randomUUID();
+        await uploadReadyViaRepo(attLeaseRef);
+        await withRawTransaction(database, (tx) =>
+          repo.addObservationAttachmentRefs(tx, {
+            observation_id: obsA,
+            attachment_ids: [attLeaseRef],
+            actor_account_id: teacherA.accountId,
+          }),
+        );
+        const leaseAfterRef = await withRawTransaction(database, (tx) =>
+          repo.acquireAttachmentDeletionLease(tx, attLeaseRef),
+        );
+        check("R2 租约取得时锁后核引用：已有引用必须拒绝", leaseAfterRef.outcome !== "acquired");
+        const statusAfterRef = await poolQueryFor<{ status: string }>(
+          url,
+          "SELECT status FROM yaya_attachments WHERE id = $1",
+          [attLeaseRef],
+        );
+        check("R2 有引用附件不得进入 deleting", statusAfterRef[0]?.status === "ready");
+
+        // P1：引用查询不完整（悬空引用）同样必须拒绝租约
+        const attDanglingLease = randomUUID();
+        await uploadReadyViaRepo(attDanglingLease);
+        await database.query(
+          `INSERT INTO yaya_attachment_refs (attachment_id, record_kind, record_id, linked_by_account_id)
+           VALUES ($1, 'observation', $2, $3)`,
+          [attDanglingLease, randomUUID(), teacherA.accountId],
+        );
+        const leaseDangling = await withRawTransaction(database, (tx) =>
+          repo.acquireAttachmentDeletionLease(tx, attDanglingLease),
+        );
+        check("R2 引用查询不完整必须拒绝租约", leaseDangling.outcome !== "acquired");
+
+        // P1：归档追加携带 expected_revision（端口同签名传 expected 时走 CAS）
+        const obsCas = randomUUID();
+        await database.query(
+          `INSERT INTO observations (id,child_id,class_id,observed_at,raw_text,status)
+           VALUES ($1,$2,$3,'2026-04-01','R2 CAS 夹具。','confirmed')`,
+          [obsCas, childA, classA],
+        );
+        const attCasA = randomUUID();
+        const attCasB = randomUUID();
+        await uploadReadyViaRepo(attCasA);
+        await uploadReadyViaRepo(attCasB);
+        const casFirst = await shortPort.addObservationReferences({
+          observation_id: obsCas,
+          attachment_ids: [attCasA],
+          actor_account_id: teacherA.accountId,
+          expected_attachment_revision: 0,
+        });
+        check("R2 归档追加首个 expected=0 成功", casFirst.added === 1 && casFirst.attachment_revision === 1);
+        let casSecondError: unknown = null;
+        try {
+          await shortPort.addObservationReferences({
+            observation_id: obsCas,
+            attachment_ids: [attCasB],
+            actor_account_id: teacherA.accountId,
+            expected_attachment_revision: 0,
+          });
+        } catch (error) {
+          casSecondError = error;
+        }
+        check("R2 归档追加过期前提必须拒绝", errorCode(casSecondError) === "revision_conflict");
+        const casRevision = await shortPort.getObservationAttachmentRevision(obsCas);
+        check("R2 归档追加最终 revision 只递增一次", casRevision === 1);
       }
     }
 
