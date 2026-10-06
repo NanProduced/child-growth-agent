@@ -83,4 +83,34 @@ harness blob `6702f2ddf3b436e79f8c92ae8756c33f611a8503` 未改；RTK.md 不存�
 NOT_RUN：真实 provider 请求与真实模型对 JSON Schema 的理解/抗注入质量；真实搜索/S3/DB；
 真实 AUTH/DATA/MEDIA 对 `revalidateProjectedContext` 的装配（依赖端第二波）；
 浏览器/UI/业务 routes；`check-ai-quality.ts`（会读 `.env` 并占用真实预算）。
-停止点：R1 核心完成，不自行开始 TOOLS1/UI1。
+
+## 6. R1-P1 收尾（主评审复核后）
+
+复核结论：参数协议通过；动态重核缺"重核 await 完成后再次核 run/身份"。修复提交
+**`394e8ce411eb7f2fa9584104862d8ecb75bc3a39`**（本文档提交只含文档）。
+
+共享函数 `revalidateContextOrStop` 现在在重核等待结束、verdict 通过后再次 `guardRun`
+（run/取消/deadline/会话/账号/身份服务全查），并返回核验后的当前身份；
+`enforceRunAndContext` 直接返回该身份。模型、read、提案、检索的派发/消费/发布共用此边界。
+
+时序反例 RED→GREEN（真实引擎 + 替身；RED=修复前 21/29，GREEN=修复后 29/29）：
+
+| 交错 | RED | GREEN |
+|---|---|---|
+| 派发前重核期间 run 替换 | model=1 后才 run_replaced | model=0，run_replaced |
+| 发布前重核期间 run 替换 | answered，answer_emitted=true | run_replaced，answer=0 |
+| 发布前重核期间会话失效 | answered，answer_emitted=true | session_invalid，answer=0 |
+| 发布前重核期间身份服务不可用 | answered，answer_emitted=true | identity_unavailable，answer=0 |
+| read 派发期间 run 替换 | read=1 后才停止 | read=0，run_replaced |
+| read 消费期间 run 替换 | tool_result 已消费 | 结果丢弃，tool_result=0 |
+| 提案派发期间会话失效 | propose=1 后才停止 | propose=0，session_invalid |
+| 提案发布期间会话失效 | proposal 已发布 | proposal_prepared=0 |
+
+独立复核：主评审探针 `yaya-agent1-r1-review-20261006/probes.ts` 四类交错复跑全部为
+model_calls=0/1、`stopped` 对应 `run_replaced`/`session_invalid`/`identity_unavailable`、
+`answer_emitted=false`。
+
+复跑（修复后）：engine **29/29**（原 21 保留）、prompt 10/10、llm 7/7、ts-check/lint 0、
+核心 68/68、preflight 15/15、技术 PoC 38 项、SDK 表面 OK、旧 AI 回归 30/19/13/14/8/9/13/3。
+替身计数：model=47、read=16、propose=4、query=4；真实请求 0。未读 `.env`，预算未动。
+停止点：等复核；不自行开始 TOOLS1/UI1。
