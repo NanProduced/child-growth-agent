@@ -149,3 +149,89 @@
   保存前在**同一 TransactionClient** 调 `assertYayaRunActive(client, run_id, owner_instance)`。
 - UI1：只消费 API0 协议与三条路由，不自行放宽事件解析；`unverifiable` / `service_failure` 必须如实展示。
 - 本任务到此停止：不实现 TOOLS1 / UI1，不部署、不 push、不合并 `main`，等主评审。
+
+## 9. R1 返修：动态投影、终态发布与恢复核验边界
+
+起点 `813d656c2480b2b1fe1172bdee10e070c46a9e79`（主评审结论见 `REVIEW.md` 的 P1-A/P1-B/P2-C/P2-D）。
+只改 APP1 runtime、专属检查与本文件；**DDL 未改**（投影/快照放在既有 `dependencies` jsonb 内）；
+未改 TOOLS1/DATA 审批/UI/冻结 types/API0/内核/gateway/llm/AUTH/MEDIA/READ1/harness/package/lock。
+
+### 9.1 修复内容与 RED→GREEN
+
+**A（P1-A）投影等级快照，降级不得继续消费旧完整数据**
+
+- `YayaRunDependency` 增加 `projection: full | historical_read_only | any`；READ1 负载
+  （`get_observation` 观察行 / `list_observations` 逐条，穿透内层 `data` 信封）记录实际加载投影。
+- 重核：要求 `full` 的观察引用在当前只剩 `historical_read_only` 时判 `context_revoked`；
+  合法历史只读最小查询保持可用；运行消费、终态查询、终态回放共用同一重核。
+- 缺 `projection` 的旧 run 快照一律保守不可核验，不补造历史。
+- RED（原候选）：full 加载 → 转班仅剩历史只读 → 仍 `answered`，查询恢复返回旧 AI 工作流标记
+  （`answer_emitted=true / private_marker_returned=true`）。
+- GREEN：运行中降级 → `stopped(context_revoked)`、无 answer 事件、模型调用关闭；
+  完整回答完成后再撤权 → 查询 `unverifiable(terminal_unreadable)`、同键回放 409 `source_conflict` 且 0 次重派发；
+  恢复授权后查询/回放恢复；历史只读正例照常回答且模型上下文中不含完整私有字段；
+  旧快照缺 `projection` 时查询不可核验，恢复快照后重新可读。
+
+**B（P1-B）终局事件在持久化裁决后才发布**
+
+- 引擎终局事件（`answer`/`clarify`/`proposal_prepared`/`stopped`）暂存不发，非终局进度照常逐条 flush。
+- `finalizeYayaRun` 改为同一短事务：`verify(client)` 身份重核 + 条件更新原子核对
+  `state='active' AND owner_instance`、取消、替换、deadline；取消/替换/到期时成功候选改落
+  `stopped(cancelled|run_replaced|deadline)`。
+- 落账成功后只从**已持久化终态**构造终局事件与唯一 `run_end`；写失败 → 中断标记 + 协议停止终态，
+  绝不先显示成功再改失败；已持久化终态后的取消只记标记，不回溯改写。
+- RED（主评审探针）：answer 已发送、终态 UPDATE 被真实 PG 触发器拒绝后又发 stopped run_end，
+  冻结 API0 判 `contradictory_terminal`。
+- GREEN：整条 NDJSON 逐行 API0 校验通过、无 answer、唯一 `stopped(model_failed)` run_end、DB `interrupted`、
+  查询 `unverifiable`；保存边界取消/替换/到期的成功候选一律不落账，合法停止原样落账；
+  身份重核在落账事务内可见 `session_invalid`/`account_disabled`；正常候选成功对照通过。
+
+**C（P2-C）历史重核脱离 20 条分页窗口**
+
+- 模型历史加载仍保留 20 条上限；重核改为按本 run 登记的 `message_id/fragment_id` 精确读取，
+  用 DATA `projectMessageRow` 重跑当前投影。
+- RED：追加 21 条正常消息后，原可读片段被误判不可核验（`ok=false`）。
+- GREEN：分页窗口外但未删、未坏、未撤权的片段继续通过；模型注入仍 ≤20 条；
+  删除 / 片段损坏 / 来源撤权分别保守拒绝，恢复后重新通过。
+
+**D（P2-D）损坏依赖不再吞成空集合**
+
+- 依赖逐条严格校验：来源 kind 必须在冻结枚举、字段类型正确、`message_id`/`fragment_id` 成对、
+  `projection` 必填；任一条坏 → 整组 `dependencies_corrupt`（不丢条后假装完整）。
+- 行存在但不可读（依赖损坏/缺快照、核心字段不可解析）→ `unverifiable`，不归 `missing`；
+  仍只用既有 `service_failure`/`unverifiable` 语义，未新增第六种查询状态。
+- `appendYayaRunDependencies` 检测到损坏时不再覆盖写入，绝不“修复式”抹掉损坏证据。
+- RED：`dependencies=[{unexpected:true}]` 被解析成 0 依赖且重核 `ok=true`。
+- GREEN：解析标记损坏、查询不可核验、append 拒绝覆盖（DB 原样保留），恢复合法依赖后重新可读；
+  合法空集合与损坏集合严格区分。
+
+### 9.2 R1 文件清单（在原 13 个交付文件基础上）
+
+| 文件 | 变更 |
+|---|---|
+| `src/lib/yaya/agent/runtime/store.ts` | 依赖投影快照 + 严格解析/损坏标记；行三态；append 损坏保护；finalize 同事务边界（verify + 取消/替换/到期裁决） |
+| `src/lib/yaya/agent/runtime/identity.ts` | 抽出池/事务共用的边界身份重核；`verifyYayaRunBoundaryIdentity` |
+| `src/lib/yaya/agent/runtime/context.ts` | 投影等级重核；历史片段精确读取重投影；损坏依赖保守停止 |
+| `src/lib/yaya/agent/runtime/deps.ts` | READ1 负载投影等级登记（含内层 data 信封） |
+| `src/lib/yaya/agent/runtime/service.ts` | 终局事件暂存/持久化后发布；finalize 边界；不可读行查询语义 |
+| `scripts/yaya/check-agent-app1.ts` | 原 78 项保留 + 46 项 R1 正反例 |
+| `docs/yaya-v1/agent-app1-delivery.md` | 本 R1 章节 |
+
+未改 DDL：`scripts/upgrade-yaya-runs-v1.sql` 与表结构不变。
+
+### 9.3 R1 验收（本候选实跑）
+
+| 检查 | 结果 |
+|---|---|
+| 专属验收 `pnpm exec tsx scripts/yaya/check-agent-app1.ts` | **124/124**（原 78 全部保留 + R1 新增 46），`failures: []`，清理闸门通过 |
+| `pnpm validate` | 通过 |
+| `pwsh scripts/build.ps1`（Next build + tsup） | 通过 |
+| check-preflight / check-contract / check-api-contract | 15/15 / 68/68 / 57/57 |
+| check-agent-engine / check-agent-llm | 29/29 / 7/7（`real_model_requests: 0`） |
+| check-tools-read / check-data / check-media | 189/189 / 27/27 / 28/28 |
+
+分层（同 9 节）：真实 next dev HTTP、真实 AUTH 登录/会话/CSRF、一次性隔离 PG、真实 DATA/READ1/sharp+本地对象根、
+真实 PG 触发器故障注入；模型替身为本地 StepFun 协议服务（真实 `llm.ts` 路径）；真实 provider/搜索/S3/托管库请求 0。
+未新增真实模型额度消耗。生成物已还原、容器/媒体根/进程树清理闸门通过。
+
+NOT_RUN 同 §7：真实模型质量、真实浏览器、生产迁移/部署、代理长连接仍不在本轮。

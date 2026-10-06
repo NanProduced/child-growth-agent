@@ -10,20 +10,27 @@
  */
 import { createHash } from 'node:crypto';
 
-import { query, queryOne, type TransactionClient } from '@/storage/database/pg-client';
+import { query, queryOne, withTransaction, type TransactionClient } from '@/storage/database/pg-client';
 
 import { validateMessageAttachments } from '../../data/invariants';
 import { YayaDataError, canonicalizeYayaValue } from '../../storage-types';
-import type { YayaSourceRef } from '../../types';
+import { YAYA_PROVENANCE_KINDS, type YayaSourceRef } from '../../types';
 
 export const YAYA_RUN_STATES = ['active', 'terminal', 'interrupted'] as const;
 export type YayaRunState = (typeof YAYA_RUN_STATES)[number];
 
+/** 已加载数据所需的投影等级；`any` = 无投影等级要求（仅资源级授权） */
+export const YAYA_RUN_PROJECTION_REQUIREMENTS = ['full', 'historical_read_only', 'any'] as const;
+export type YayaRunProjectionRequirement = (typeof YAYA_RUN_PROJECTION_REQUIREMENTS)[number];
+
 /**
- * run 级重核依赖（只增不覆盖）：
+ * run 级重核依赖（只增不覆盖，逐条严格校验）：
  * - tool 非空：由该只读工具产生的来源引用（按原工具动作重核）；
- * - message_id/fragment_id 非空：已装载的历史片段（重跑 DATA 当前投影比对可见性）；
- * - image_id 非空：已装载的授权图片（走 MEDIA 当前授权判定）。
+ * - message_id/fragment_id 非空：已装载的历史片段（按精确 id 重跑 DATA 当前投影）；
+ * - image_id 非空：已装载的授权图片（走 MEDIA 当前授权判定）；
+ * - projection：已加载数据所需的投影等级。`full` 记录要求当前仍为完整投影，
+ *   当前只剩 historical_read_only 时不得继续消费/发布旧完整 payload。
+ *   缺失该字段（旧 run 或损坏存储）一律保守不可核验，不补造历史。
  */
 export interface YayaRunDependency {
   ref: YayaSourceRef | null;
@@ -31,6 +38,7 @@ export interface YayaRunDependency {
   image_id: string | null;
   message_id: string | null;
   fragment_id: string | null;
+  projection: YayaRunProjectionRequirement | null;
 }
 
 export interface YayaRunRecord {
@@ -47,6 +55,8 @@ export interface YayaRunRecord {
   state: YayaRunState;
   outcome: unknown;
   dependencies: YayaRunDependency[];
+  /** 持久化依赖存在损坏/缺快照条目：行仍在，但依赖不可用，内容终态保守不可核验 */
+  dependencies_corrupt: boolean;
   cancel_requested_at: string | null;
   replaced_by: string | null;
   deadline_at: string;
@@ -86,36 +96,84 @@ function stringArray(value: unknown): string[] | null {
   return value.every((entry) => typeof entry === 'string') ? [...value] : null;
 }
 
-function parseDependency(value: unknown): YayaRunDependency | null {
+function parseOptionalNonEmptyString(
+  value: unknown,
+): { ok: true; value: string | null } | { ok: false } {
+  if (value === null || value === undefined) return { ok: true, value: null };
+  if (typeof value === 'string' && value.length > 0) return { ok: true, value };
+  return { ok: false };
+}
+
+function parseStoredSourceRef(value: unknown): YayaSourceRef | null {
   if (!isRecord(value)) return null;
-  const nullableString = (entry: unknown): string | null =>
-    typeof entry === 'string' && entry.length > 0 ? entry : null;
-  const ref = value.ref;
-  let parsedRef: YayaSourceRef | null = null;
-  if (isRecord(ref) && typeof ref.kind === 'string') {
-    parsedRef = {
-      kind: ref.kind as YayaSourceRef['kind'],
-      ref_id: typeof ref.ref_id === 'string' ? ref.ref_id : null,
-      label: typeof ref.label === 'string' ? ref.label : null,
-      derived_from: typeof ref.derived_from === 'string' ? ref.derived_from : null,
-    };
-  }
-  const parsed: YayaRunDependency = {
-    ref: parsedRef,
-    tool: nullableString(value.tool),
-    image_id: nullableString(value.image_id),
-    message_id: nullableString(value.message_id),
-    fragment_id: nullableString(value.fragment_id),
-  };
   if (
-    parsed.ref === null &&
-    parsed.tool === null &&
-    parsed.image_id === null &&
-    parsed.message_id === null
+    typeof value.kind !== 'string' ||
+    !(YAYA_PROVENANCE_KINDS as readonly string[]).includes(value.kind)
   ) {
     return null;
   }
-  return parsed;
+  const refId = value.ref_id;
+  if (refId !== null && (typeof refId !== 'string' || refId.length === 0)) return null;
+  const label = value.label;
+  if (label !== null && typeof label !== 'string') return null;
+  const derivedFrom = value.derived_from;
+  if (derivedFrom !== null && typeof derivedFrom !== 'string') return null;
+  return {
+    kind: value.kind as YayaSourceRef['kind'],
+    ref_id: refId === null || refId === undefined ? null : refId,
+    label: label === null || label === undefined ? null : label,
+    derived_from: derivedFrom === null || derivedFrom === undefined ? null : derivedFrom,
+  };
+}
+
+/**
+ * 逐条严格校验；任一条不符合形状即整组损坏（不丢坏条后假装完整）。
+ * 必要字段：ref / image_id / message_id 至少其一；message_id 与 fragment_id 成对；
+ * projection 必须显式给出（旧 run 缺快照 = 损坏，不可核验）。
+ */
+function parseStrictDependency(value: unknown): YayaRunDependency | null {
+  if (!isRecord(value)) return null;
+  const ref = parseStoredSourceRef(value.ref);
+  const tool = parseOptionalNonEmptyString(value.tool);
+  const imageId = parseOptionalNonEmptyString(value.image_id);
+  const messageId = parseOptionalNonEmptyString(value.message_id);
+  const fragmentId = parseOptionalNonEmptyString(value.fragment_id);
+  if (!tool.ok || !imageId.ok || !messageId.ok || !fragmentId.ok) return null;
+  if ((messageId.value === null) !== (fragmentId.value === null)) return null;
+  if (ref === null && imageId.value === null && messageId.value === null) return null;
+  const projection = value.projection;
+  if (
+    typeof projection !== 'string' ||
+    !(YAYA_RUN_PROJECTION_REQUIREMENTS as readonly string[]).includes(projection)
+  ) {
+    return null;
+  }
+  return {
+    ref,
+    tool: tool.value,
+    image_id: imageId.value,
+    message_id: messageId.value,
+    fragment_id: fragmentId.value,
+    projection: projection as YayaRunProjectionRequirement,
+  };
+}
+
+export interface YayaRunStoredDependencies {
+  dependencies: YayaRunDependency[];
+  corrupt: boolean;
+}
+
+/** 依赖组严格解析：合法空数组与损坏/部分不可读严格区分 */
+export function parseStoredDependencies(value: unknown): YayaRunStoredDependencies {
+  if (value === null || value === undefined) return { dependencies: [], corrupt: false };
+  if (!Array.isArray(value)) return { dependencies: [], corrupt: true };
+  const dependencies: YayaRunDependency[] = [];
+  for (const raw of value) {
+    const parsed = parseStrictDependency(raw);
+    if (parsed === null) return { dependencies: [], corrupt: true };
+    dependencies.push(parsed);
+  }
+  return { dependencies, corrupt: false };
 }
 
 export function parseYayaRunRecord(data: unknown): YayaRunRecord | null {
@@ -130,12 +188,7 @@ export function parseYayaRunRecord(data: unknown): YayaRunRecord | null {
   }
   const attachments = stringArray(data.attachment_ids);
   if (attachments === null) return null;
-  const rawDependencies = Array.isArray(data.dependencies) ? data.dependencies : [];
-  const dependencies: YayaRunDependency[] = [];
-  for (const raw of rawDependencies) {
-    const parsed = parseDependency(raw);
-    if (parsed !== null) dependencies.push(parsed);
-  }
+  const parsedDependencies = parseStoredDependencies(data.dependencies);
   const stringOrNull = (entry: unknown): string | null =>
     typeof entry === 'string' && entry.length > 0 ? entry : null;
   return {
@@ -151,7 +204,8 @@ export function parseYayaRunRecord(data: unknown): YayaRunRecord | null {
     owner_instance: data.owner_instance,
     state: data.state as YayaRunState,
     outcome: data.outcome ?? null,
-    dependencies,
+    dependencies: parsedDependencies.dependencies,
+    dependencies_corrupt: parsedDependencies.corrupt,
     cancel_requested_at: stringOrNull(data.cancel_requested_at),
     replaced_by: stringOrNull(data.replaced_by),
     deadline_at: typeof data.deadline_at === 'string' ? data.deadline_at : '',
@@ -159,6 +213,19 @@ export function parseYayaRunRecord(data: unknown): YayaRunRecord | null {
     updated_at: typeof data.updated_at === 'string' ? data.updated_at : '',
     terminal_at: stringOrNull(data.terminal_at),
   };
+}
+
+/** 行级三态：缺失 / 行存在但不可读 / 可读；行存在但不可读不得当作 missing */
+export type YayaRunStoredRow =
+  | { kind: 'missing' }
+  | { kind: 'unreadable'; run_id: string }
+  | { kind: 'ok'; run: YayaRunRecord };
+
+function toStoredRow(data: unknown): YayaRunStoredRow {
+  const run = parseYayaRunRecord(data);
+  if (run !== null) return { kind: 'ok', run };
+  const runId = isRecord(data) && typeof data.id === 'string' && data.id.length > 0 ? data.id : null;
+  return runId === null ? { kind: 'missing' } : { kind: 'unreadable', run_id: runId };
 }
 
 export interface YayaRunRegistrationInput {
@@ -230,11 +297,16 @@ export async function registerYayaRun(
 }
 
 export async function loadYayaRun(runId: string): Promise<YayaRunRecord | null> {
+  const stored = await loadYayaRunStoredRow(runId);
+  return stored.kind === 'ok' ? stored.run : null;
+}
+
+export async function loadYayaRunStoredRow(runId: string): Promise<YayaRunStoredRow> {
   const row = await queryOne<{ data: unknown }>(
     `SELECT ${RUN_SELECT} FROM yaya_runs r WHERE r.id = $1`,
     [runId],
   );
-  return row === null ? null : parseYayaRunRecord(row.data);
+  return row === null ? { kind: 'missing' } : toStoredRow(row.data);
 }
 
 export async function findYayaRunByClientRequest(
@@ -242,75 +314,134 @@ export async function findYayaRunByClientRequest(
   conversationId: string,
   clientRequestId: string,
 ): Promise<YayaRunRecord | null> {
+  const stored = await findYayaRunStoredRowByClientRequest(
+    ownerAccountId,
+    conversationId,
+    clientRequestId,
+  );
+  return stored.kind === 'ok' ? stored.run : null;
+}
+
+export async function findYayaRunStoredRowByClientRequest(
+  ownerAccountId: string,
+  conversationId: string,
+  clientRequestId: string,
+): Promise<YayaRunStoredRow> {
   const row = await queryOne<{ data: unknown }>(
     `SELECT ${RUN_SELECT} FROM yaya_runs r
       WHERE r.owner_account_id = $1 AND r.conversation_id = $2 AND r.client_request_id = $3`,
     [ownerAccountId, conversationId, clientRequestId],
   );
-  return row === null ? null : parseYayaRunRecord(row.data);
+  return row === null ? { kind: 'missing' } : toStoredRow(row.data);
 }
 
-/** 依赖唯一键：同一引用/图片/历史片段只保留一份（只增不覆盖） */
+/** 依赖唯一键：同一引用/图片/历史片段/投影要求只保留一份（只增不覆盖） */
 export function yayaRunDependencyKey(dependency: YayaRunDependency): string {
   return JSON.stringify(dependency);
+}
+
+export interface YayaRunDependenciesAppendResult {
+  dependencies: YayaRunDependency[];
+  /** 持久化依赖已损坏/缺快照：不覆盖写入，调用方必须保守停止 */
+  corrupt: boolean;
 }
 
 /**
  * 按 run 累积重核依赖：读当前值、合并去重后整写；只增不覆盖。
  * 每个 run 只有唯一派发者写这一列，先读后写即可；查询路径不写。
+ * 当前存储若已损坏，绝不“修复式”覆盖抹掉损坏证据。
  */
 export async function appendYayaRunDependencies(
   runId: string,
   additions: readonly YayaRunDependency[],
-): Promise<YayaRunDependency[]> {
-  const current = await queryOne<{ dependencies: unknown }>(
-    'SELECT dependencies FROM yaya_runs WHERE id = $1',
+): Promise<YayaRunDependenciesAppendResult> {
+  const current = await queryOne<{ dependencies: unknown; state: string }>(
+    'SELECT dependencies, state FROM yaya_runs WHERE id = $1',
     [runId],
   );
-  const merged: YayaRunDependency[] = [];
-  const seen = new Set<string>();
-  const absorb = (raw: unknown): void => {
-    const entry = parseDependency(raw);
-    if (entry === null) return;
-    const key = yayaRunDependencyKey(entry);
-    if (seen.has(key)) return;
+  if (current === null) return { dependencies: [], corrupt: false };
+  const existing = parseStoredDependencies(current.dependencies);
+  if (existing.corrupt) return { dependencies: [], corrupt: true };
+  const merged: YayaRunDependency[] = [...existing.dependencies];
+  const seen = new Set(merged.map((entry) => yayaRunDependencyKey(entry)));
+  let fresh = 0;
+  for (const addition of additions) {
+    const key = yayaRunDependencyKey(addition);
+    if (seen.has(key)) continue;
     seen.add(key);
-    merged.push(entry);
-  };
-  if (current !== null && Array.isArray(current.dependencies)) {
-    for (const raw of current.dependencies) absorb(raw);
+    merged.push(addition);
+    fresh += 1;
   }
-  for (const addition of additions) absorb(addition);
-  if (current !== null && merged.length > 0) {
+  if (fresh > 0 && current.state === 'active') {
     await query(
       `UPDATE yaya_runs SET dependencies = $2::jsonb, updated_at = now()
         WHERE id = $1 AND state = 'active'`,
       [runId, JSON.stringify(merged)],
     );
   }
-  return merged;
+  return { dependencies: merged, corrupt: false };
+}
+
+const CANCELLED_OUTCOME = { kind: 'stopped', reason: 'cancelled', detail: null } as const;
+const REPLACED_OUTCOME = { kind: 'stopped', reason: 'run_replaced', detail: null } as const;
+const DEADLINE_OUTCOME = { kind: 'stopped', reason: 'deadline', detail: null } as const;
+
+export interface YayaRunFinalizeOptions {
+  /**
+   * 同一保存边界内的当前身份重核（使用同一 TransactionClient）：
+   * 返回非空停止终态候选时，最终裁决优先按停止落账（取消/替换/到期仍优先）。
+   */
+  verify?: (client: TransactionClient) => Promise<unknown | null>;
 }
 
 /**
- * 终态落库（迟到结果守卫）：
- * - 仅 `state='active' AND owner_instance=$` 的当前运行可写；已被外部终态化/替换/中断的行拒绝覆盖；
- * - 取消与替换在引擎的每个异步边界生效（`resolveYayaRunCurrentIdentity` 返回取消/替换停止）；
- *   引擎已完成并发布终态后才到达的取消/替换不回溯改写已发布结果，保证流与库一致；
- * - 写入失败（返回 null）表示该结果已被取代，调用方不得把它当作当前终态发布。
+ * 终态落库（最后保存边界）：
+ * - 在同一短事务内先做可选身份重核，再用条件更新原子核对
+ *   `state='active' AND owner_instance=$`、取消、替换与 deadline；
+ * - 已被取消 / 替换 / 到期时，成功候选不得落账，改落对应的合法停止终态；
+ * - 行已被外部终态化时返回其已存终态（可核准），否则返回 null（不得当作当前结果发布）。
  */
 export async function finalizeYayaRun(
   runId: string,
   ownerInstance: string,
   outcome: unknown,
+  options: YayaRunFinalizeOptions = {},
 ): Promise<YayaRunRecord | null> {
-  const row = await queryOne<{ data: unknown }>(
-    `UPDATE yaya_runs r
-        SET state = 'terminal', outcome = $3::jsonb, terminal_at = now(), updated_at = now()
-      WHERE r.id = $1 AND r.state = 'active' AND r.owner_instance = $2
-      RETURNING ${RUN_SELECT}`,
-    [runId, ownerInstance, JSON.stringify(outcome ?? null)],
-  );
-  return row === null ? null : parseYayaRunRecord(row.data);
+  return withTransaction(async (client) => {
+    let candidate = outcome;
+    if (options.verify !== undefined) {
+      const forced = await options.verify(client);
+      if (forced !== null && forced !== undefined) candidate = forced;
+    }
+    const updated = await client.query<{ data: unknown }>(
+      `UPDATE yaya_runs
+          SET state = 'terminal',
+              outcome = CASE
+                WHEN yaya_runs.cancel_requested_at IS NOT NULL THEN $3::jsonb
+                WHEN yaya_runs.replaced_by IS NOT NULL THEN $4::jsonb
+                WHEN yaya_runs.deadline_at <= now() THEN $5::jsonb
+                ELSE $6::jsonb
+              END,
+              terminal_at = now(), updated_at = now()
+        WHERE yaya_runs.id = $1 AND yaya_runs.state = 'active' AND yaya_runs.owner_instance = $2
+        RETURNING ${RUN_RETURNING}`,
+      [
+        runId,
+        ownerInstance,
+        JSON.stringify(CANCELLED_OUTCOME),
+        JSON.stringify(REPLACED_OUTCOME),
+        JSON.stringify(DEADLINE_OUTCOME),
+        JSON.stringify(candidate ?? null),
+      ],
+    );
+    if (updated.rows[0]) return parseYayaRunRecord(updated.rows[0].data);
+    const fallback = await client.query<{ data: unknown }>(
+      `SELECT ${RUN_SELECT} FROM yaya_runs r WHERE r.id = $1`,
+      [runId],
+    );
+    const record = fallback.rows[0] ? parseYayaRunRecord(fallback.rows[0].data) : null;
+    return record !== null && record.state === 'terminal' ? record : null;
+  });
 }
 
 /** 中断恢复标记：不可核验的异常终止；不产生终态 outcome（查询按不可核验返回） */

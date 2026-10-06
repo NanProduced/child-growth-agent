@@ -34,7 +34,11 @@ import {
 import { YayaDataError } from '@/lib/yaya/storage-types';
 
 import { runYayaAgent } from '../engine';
-import { DEFAULT_YAYA_AGENT_LIMITS, type YayaRunOutcome } from '../types';
+import {
+  DEFAULT_YAYA_AGENT_LIMITS,
+  type YayaAgentEvent,
+  type YayaRunOutcome,
+} from '../types';
 
 import {
   createYayaRunRuntimeState,
@@ -42,7 +46,7 @@ import {
   revalidateYayaRunContext,
 } from './context';
 import { createYayaRunDependencies, type YayaRunDependencyOptions } from './deps';
-import { isYayaRunOwnedByThisProcess } from './identity';
+import { isYayaRunOwnedByThisProcess, verifyYayaRunBoundaryIdentity } from './identity';
 import {
   abortYayaRunProcess,
   getYayaRunProcessInstanceId,
@@ -51,8 +55,9 @@ import {
 } from './registry';
 import {
   assertYayaRunAttachments,
-  findYayaRunByClientRequest,
   finalizeYayaRun,
+  findYayaRunStoredRowByClientRequest,
+  loadYayaRun,
   markYayaRunInterrupted,
   registerYayaRun,
   requestYayaRunCancel,
@@ -199,6 +204,28 @@ async function runTerminalPresentable(
   return verdict.ok;
 }
 
+/** 终局事件只能从**已持久化裁决**的终态构造，保证事件流与库逐字一致 */
+function canonicalTerminalEvents(outcome: YayaRunOutcome): YayaAgentEvent[] {
+  switch (outcome.kind) {
+    case 'answered':
+      return [{ type: 'answer', content: outcome.content, sources: outcome.sources }];
+    case 'clarified':
+      return [{ type: 'clarify', question: outcome.question }];
+    case 'proposed':
+      return outcome.proposals.map((proposal) => ({ type: 'proposal_prepared', proposal }));
+    case 'stopped':
+      return [{ type: 'stopped', reason: outcome.reason, detail: null }];
+  }
+}
+
+/** 引擎已产生的终局候选事件（answer/clarify/proposal_prepared/stopped）暂存不发 */
+const TERMINAL_AGENT_EVENT_TYPES: ReadonlySet<YayaAgentEvent['type']> = new Set([
+  'answer',
+  'clarify',
+  'proposal_prepared',
+  'stopped',
+]);
+
 function buildReplayResponse(run: YayaRunRecord): Response {
   const parsed = yayaRunOutcomeSchema.safeParse(run.outcome);
   if (!parsed.success) {
@@ -207,25 +234,12 @@ function buildReplayResponse(run: YayaRunRecord): Response {
   const outcome = parsed.data;
   const wire: YayaRunWireEvent[] = [];
   let seq = 0;
-  const push = (event: Parameters<typeof projectYayaAgentEvent>[0]): void => {
+  const push = (event: YayaAgentEvent): void => {
     seq += 1;
     wire.push(projectYayaAgentEvent(event, { run_id: run.run_id, seq }));
   };
   push({ type: 'run_started', run_id: run.run_id });
-  switch (outcome.kind) {
-    case 'answered':
-      push({ type: 'answer', content: outcome.content, sources: outcome.sources });
-      break;
-    case 'clarified':
-      push({ type: 'clarify', question: outcome.question });
-      break;
-    case 'proposed':
-      for (const proposal of outcome.proposals) push({ type: 'proposal_prepared', proposal });
-      break;
-    case 'stopped':
-      push({ type: 'stopped', reason: outcome.reason, detail: null });
-      break;
-  }
+  for (const event of canonicalTerminalEvents(outcome)) push(event);
   seq += 1;
   wire.push(projectYayaRunEnd(outcome, { run_id: run.run_id, seq }));
   const body = wire.map((event) => encodeYayaRunEventLine(event)).join('');
@@ -284,28 +298,66 @@ async function driveRun(input: {
   });
   const deps = createYayaRunDependencies(state, options);
   let seq = 0;
+  const writeAgent = (event: YayaAgentEvent): void => {
+    seq += 1;
+    write(projectYayaAgentEvent(event, { run_id: run.run_id, seq }));
+  };
+  const writeEnd = (outcome: YayaRunOutcome): void => {
+    seq += 1;
+    write(projectYayaRunEnd(outcome, { run_id: run.run_id, seq }));
+  };
+  const publishPersistedOutcome = (outcome: YayaRunOutcome): void => {
+    for (const event of canonicalTerminalEvents(outcome)) writeAgent(event);
+    writeEnd(outcome);
+  };
   try {
     const result = await runYayaAgent(deps, {
       run_id: run.run_id,
       user_text: run.user_text,
       attachment_ids: run.attachment_ids,
       signal: entry.controller.signal,
+      // 非终局进度仍逐条及时流出；终局候选（answer/clarify/proposal/stopped）暂存，
+      // 等持久化裁决后只发布与最终结果一致的终局事件与唯一 run_end。
       onEvent: (event) => {
-        seq += 1;
-        write(projectYayaAgentEvent(event, { run_id: run.run_id, seq }));
+        if (TERMINAL_AGENT_EVENT_TYPES.has(event.type)) return;
+        writeAgent(event);
       },
     });
-    const stored = await finalizeYayaRun(run.run_id, ownerInstance, result.outcome);
-    const storedOutcome = stored === null ? null : yayaRunOutcomeSchema.safeParse(stored.outcome);
-    const outcome =
-      storedOutcome !== null && storedOutcome.success ? storedOutcome.data : stoppedOutcome('run_replaced');
-    seq += 1;
-    write(projectYayaRunEnd(outcome, { run_id: run.run_id, seq }));
+    let stored: YayaRunRecord | null = null;
+    let finalizeThrew = false;
+    try {
+      stored = await finalizeYayaRun(run.run_id, ownerInstance, result.outcome, {
+        verify: (client) => verifyYayaRunBoundaryIdentity(client, { run, token }),
+      });
+    } catch {
+      finalizeThrew = true;
+    }
+    if (stored !== null) {
+      const parsed = yayaRunOutcomeSchema.safeParse(stored.outcome);
+      publishPersistedOutcome(parsed.success ? parsed.data : stoppedOutcome('model_failed'));
+      return;
+    }
+    if (finalizeThrew) {
+      // 持久化失败/结果未知：绝不先显示成功再改失败；标记中断，流以协议停止终态结束。
+      await markYayaRunInterrupted(run.run_id, ownerInstance).catch(() => null);
+      publishPersistedOutcome(stoppedOutcome('model_failed'));
+      return;
+    }
+    const fallback = await loadYayaRun(run.run_id).catch(() => null);
+    if (fallback !== null && fallback.state === 'terminal') {
+      const parsed = yayaRunOutcomeSchema.safeParse(fallback.outcome);
+      publishPersistedOutcome(parsed.success ? parsed.data : stoppedOutcome('model_failed'));
+      return;
+    }
+    publishPersistedOutcome(
+      fallback !== null && fallback.state === 'active'
+        ? stoppedOutcome('run_replaced')
+        : stoppedOutcome('model_failed'),
+    );
   } catch {
     // 非预期内部失败：不把内部异常文本/模型原始 JSON 写进事件；持久化中断恢复标记，查询按不可核验返回。
     await markYayaRunInterrupted(run.run_id, ownerInstance).catch(() => null);
-    seq += 1;
-    write(projectYayaRunEnd(stoppedOutcome('model_failed'), { run_id: run.run_id, seq }));
+    publishPersistedOutcome(stoppedOutcome('model_failed'));
   } finally {
     unregisterYayaRunProcess(run.run_id, entry);
   }
@@ -338,9 +390,9 @@ export async function lookupYayaRun(request: Request, conversationId: string): P
         return classifyYayaRunLookup({ kind: 'query_failed' });
       }
       if (conversation === null) throw new YayaDataError('not_found', '会话不存在。');
-      let run: YayaRunRecord | null;
+      let stored;
       try {
-        run = await findYayaRunByClientRequest(
+        stored = await findYayaRunStoredRowByClientRequest(
           principal.account_id,
           conversationId,
           clientRequestId,
@@ -348,7 +400,17 @@ export async function lookupYayaRun(request: Request, conversationId: string): P
       } catch {
         return classifyYayaRunLookup({ kind: 'query_failed' });
       }
-      if (run === null) return classifyYayaRunLookup({ kind: 'not_found' });
+      if (stored.kind === 'missing') return classifyYayaRunLookup({ kind: 'not_found' });
+      if (stored.kind === 'unreadable') {
+        // 行存在但不可读：不是 missing，也不冒充进行中；按不可核验返回。
+        return classifyYayaRunLookup({
+          kind: 'found',
+          run_id: stored.run_id,
+          owner_verified: true,
+          state: { kind: 'terminal', outcome: null },
+        });
+      }
+      const run = stored.run;
       if (run.state === 'active') {
         return classifyYayaRunLookup({
           kind: 'found',

@@ -43,10 +43,16 @@ import {
   revalidateYayaRunContext,
 } from '../../src/lib/yaya/agent/runtime/context';
 import { resolveYayaRunCurrentIdentity } from '../../src/lib/yaya/agent/runtime/identity';
+import { verifyYayaRunBoundaryIdentity } from '../../src/lib/yaya/agent/runtime/identity';
 import {
+  appendYayaRunDependencies,
   assertYayaRunActive,
   computeYayaRunRequestDigest,
+  finalizeYayaRun,
   loadYayaRun,
+  parseStoredDependencies,
+  parseYayaRunRecord,
+  registerYayaRun,
 } from '../../src/lib/yaya/agent/runtime/store';
 import { loadAttachmentContent } from '../../src/lib/media/content-service';
 import { mediaRuntimeOrThrow } from '../../src/lib/media/runtime';
@@ -706,6 +712,22 @@ async function main(): Promise<void> {
       { hold: crossCancelGate.promise },
       { content: actionAnswer('跨进程取消后不应发布。') },
     ]);
+    const full2histGate = deferred();
+    gates.push(full2histGate.resolve);
+    const histreadScenario = stub.register('[app1:histread]', [
+      { content: actionRead('get_observation', { observation_id: facts.observationA }) },
+      { content: actionAnswer('历史只读最小查询。', [`observation:${facts.observationA}`]) },
+    ]);
+    const full2histScenario = stub.register('[app1:full2hist]', [
+      { content: actionRead('get_observation', { observation_id: facts.observationA }) },
+      { hold: full2histGate.promise, content: actionAnswer('投影降级后不应发布。') },
+    ]);
+    stub.register('[app1:fullanswer]', [
+      { content: actionRead('get_observation', { observation_id: facts.observationA }) },
+      { content: actionAnswer('完整投影回答。', [`observation:${facts.observationA}`]) },
+    ]);
+    stub.register('[app1:persistfail]', [{ content: actionAnswer('落账失败前不应发布。') }]);
+    stub.register('[app1:depcorrupt]', [{ content: actionAnswer('依赖完整性对照回答。') }]);
     const lostGate = deferred();
     gates.push(lostGate.resolve);
     stub.register('[app1:lost]', [
@@ -1643,6 +1665,698 @@ async function main(): Promise<void> {
         !('url' in projectedImage) &&
         !('key' in projectedImage),
     );
+
+    /* ============================== R1-A：投影降级不得继续消费旧数据 ============================== */
+
+    const PRIVATE_MARKER = 'APP1_AI_PRIVATE_MARKER';
+    await database.query('UPDATE observations SET ai_draft = $2::jsonb WHERE id = $1', [
+      facts.observationA,
+      JSON.stringify({ app1_private_marker: PRIVATE_MARKER }),
+    ]);
+    const moveChildA = async (classId: string): Promise<void> => {
+      const db = database;
+      if (db === null) throw new Error('database unavailable');
+      await db.query(
+        'UPDATE child_class_enrollments SET end_date = current_date WHERE child_id = $1 AND end_date IS NULL',
+        [facts.childA],
+      );
+      await db.query(
+        'INSERT INTO child_class_enrollments (child_id, class_id, start_date) VALUES ($1,$2,current_date)',
+        [facts.childA, classId],
+      );
+    };
+    // 正例：原班历史只读的合法最小查询保留（幼儿转入教师无权班级，原班仍在范围内）。
+    await moveChildA(facts.classB);
+    const histreadId = `histread-${randomUUID()}`;
+    const histreadResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: histreadId,
+        user_text: '[app1:histread] 历史最小查询',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const histreadParsed = parseLines(await openNdjson(histreadResponse).collect());
+    check(
+      'R1-A 合法历史只读最小查询仍可回答',
+      histreadParsed.verdict.ok && histreadParsed.verdict.outcome.kind === 'answered',
+    );
+    check(
+      'R1-A 历史只读投影不含完整私有字段（AI 草稿标记未进入模型）',
+      !(histreadScenario.bodies[1] ?? '').includes(PRIVATE_MARKER),
+    );
+    const histreadRunId = histreadParsed.verdict.ok ? histreadParsed.verdict.run_id : '';
+    const histreadRow = await loadYayaRun(histreadRunId);
+    check(
+      'R1-A 历史只读依赖记录投影等级 historical_read_only',
+      (histreadRow?.dependencies ?? []).some(
+        (entry) => entry.ref?.ref_id === `observation:${facts.observationA}` &&
+          entry.projection === 'historical_read_only',
+      ),
+    );
+    const histreadLookup = await lookupRun(base, authA, convA.conversation_id, histreadId);
+    check(
+      'R1-A 历史只读 run 终态查询可读（授权不变）',
+      ((await histreadLookup.json()) as { status?: string }).status === 'finished',
+    );
+    await moveChildA(facts.classA);
+
+    // 运行中降级：完整投影加载后转入无权班级 → 停止且不发布旧完整内容。
+    const full2histId = `full2hist-${randomUUID()}`;
+    const full2histPromise = postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: full2histId,
+        user_text: '[app1:full2hist] 投影降级',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:full2hist]', 2);
+    check(
+      'R1-A 完整投影内容确已装载（第二模型请求含私有标记）',
+      (full2histScenario.bodies[1] ?? '').includes(PRIVATE_MARKER),
+    );
+    await moveChildA(facts.classB);
+    full2histGate.resolve();
+    const full2histParsed = parseLines(await openNdjson(await full2histPromise).collect());
+    check(
+      'R1-A 运行中 full→historical 降级 → context_revoked 且不发布回答',
+      full2histParsed.verdict.ok &&
+        full2histParsed.verdict.outcome.kind === 'stopped' &&
+        full2histParsed.verdict.outcome.reason === 'context_revoked' &&
+        !full2histParsed.events.some((event) => event.type === 'answer'),
+    );
+    const full2histRunId = full2histParsed.verdict.ok ? full2histParsed.verdict.run_id : '';
+    const full2histRow = await loadYayaRun(full2histRunId);
+    check(
+      'R1-A full 降级 run 依赖要求完整投影',
+      (full2histRow?.dependencies ?? []).some(
+        (entry) => entry.ref?.ref_id === `observation:${facts.observationA}` && entry.projection === 'full',
+      ),
+    );
+    const full2histLookup = await lookupRun(base, authA, convA.conversation_id, full2histId);
+    const full2histBody = (await full2histLookup.json()) as {
+      status?: string;
+      outcome?: { kind?: string; reason?: string };
+    };
+    check(
+      'R1-A 降级 run 终态查询只返回协议停止语义（无旧内容）',
+      full2histBody.status === 'finished' &&
+        full2histBody.outcome?.kind === 'stopped' &&
+        full2histBody.outcome?.reason === 'context_revoked',
+    );
+    await moveChildA(facts.classA);
+
+    // 终态投影：完整回答完成后撤权 → 查询不可核验、回放拒绝；恢复授权后重新可读。
+    const fullAnswerId = `fullanswer-${randomUUID()}`;
+    const fullAnswerResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: fullAnswerId,
+        user_text: '[app1:fullanswer] 完整投影回答',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const fullAnswerParsed = parseLines(await openNdjson(fullAnswerResponse).collect());
+    check(
+      'R1-A 完整投影 run 正常回答（基线）',
+      fullAnswerParsed.verdict.ok && fullAnswerParsed.verdict.outcome.kind === 'answered',
+    );
+    const fullAnswerRunId = fullAnswerParsed.verdict.ok ? fullAnswerParsed.verdict.run_id : '';
+    const fullAnswerCount = stub.requestCount('[app1:fullanswer]');
+    await moveChildA(facts.classB);
+    const fullAnswerGated = await lookupRun(base, authA, convA.conversation_id, fullAnswerId);
+    const fullAnswerGatedBody = (await fullAnswerGated.json()) as { status?: string; reason?: string };
+    check(
+      'R1-A 撤权后完整终态查询不可核验（不返回旧 AI 工作流内容）',
+      fullAnswerGatedBody.status === 'unverifiable' &&
+        fullAnswerGatedBody.reason === 'terminal_unreadable',
+    );
+    const fullAnswerReplay = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: fullAnswerId,
+        user_text: '[app1:fullanswer] 完整投影回答',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    check(
+      'R1-A 撤权后终态回放被拒（409 source_conflict，不重派发）',
+      fullAnswerReplay.status === 409 && stub.requestCount('[app1:fullanswer]') === fullAnswerCount,
+    );
+    await moveChildA(facts.classA);
+    const fullAnswerRestored = await lookupRun(base, authA, convA.conversation_id, fullAnswerId);
+    check(
+      'R1-A 恢复授权后终态查询重新可读',
+      ((await fullAnswerRestored.json()) as { status?: string }).status === 'finished',
+    );
+    const fullAnswerReplayOk = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: fullAnswerId,
+        user_text: '[app1:fullanswer] 完整投影回答',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const fullAnswerReplayParsed = parseLines(await openNdjson(fullAnswerReplayOk).collect());
+    check(
+      'R1-A 恢复授权后回放原 run（同 run_id，0 次重派发）',
+      fullAnswerReplayOk.status === 200 &&
+        fullAnswerReplayParsed.verdict.ok &&
+        fullAnswerReplayParsed.verdict.run_id === fullAnswerRunId &&
+        stub.requestCount('[app1:fullanswer]') === fullAnswerCount,
+    );
+
+    // 旧快照（缺 projection）保守不可核验，不补造历史。
+    const histreadDepsBefore = histreadRow?.dependencies ?? [];
+    await database.query(
+      `UPDATE yaya_runs SET dependencies = (
+         SELECT COALESCE(jsonb_agg(entry - 'projection'), '[]'::jsonb)
+           FROM jsonb_array_elements($2::jsonb) AS entry
+       ) WHERE id = $1`,
+      [histreadRunId, JSON.stringify(histreadDepsBefore)],
+    );
+    const legacyLookup = await lookupRun(base, authA, convA.conversation_id, histreadId);
+    const legacyBody = (await legacyLookup.json()) as { status?: string; reason?: string };
+    check(
+      'R1-A 旧 run 缺投影快照 → 保守不可核验',
+      legacyBody.status === 'unverifiable' && legacyBody.reason === 'terminal_unreadable',
+    );
+    await database.query('UPDATE yaya_runs SET dependencies = $2::jsonb WHERE id = $1', [
+      histreadRunId,
+      JSON.stringify(histreadDepsBefore),
+    ]);
+    const restoredLegacy = await lookupRun(base, authA, convA.conversation_id, histreadId);
+    check(
+      'R1-A 恢复快照后重新可读（对照）',
+      ((await restoredLegacy.json()) as { status?: string }).status === 'finished',
+    );
+
+    /* ============================== R1-B：终态持久化裁决后才发布 ============================== */
+
+    // 最后保存边界：取消/替换/到期时成功候选不得落账，合法停止仍按协议记录。
+    const boundarySession = await directSession(database, facts.teacherA.id);
+    const boundarySessionId =
+      (
+        await database.query<{ id: string }>('SELECT id FROM app_sessions WHERE token_hash = $1', [
+          hashSessionToken(boundarySession.token),
+        ])
+      ).rows[0]?.id ?? '';
+    const makeBoundaryRun = async () => {
+      const registration = await withTransaction((client) =>
+        registerYayaRun(client, {
+          run_id: randomUUID(),
+          owner_account_id: facts.teacherA.id,
+          conversation_id: convA.conversation_id,
+          client_request_id: `boundary-${randomUUID()}`,
+          user_text: '[app1:boundary] 合成',
+          attachment_ids: [],
+          expected_conversation_revision: convA.revision,
+          session_id: boundarySessionId,
+          owner_instance: 'app1-check-boundary',
+          deadline_at: new Date(Date.now() + 90_000).toISOString(),
+        }),
+      );
+      if (registration.kind !== 'created') throw new Error('boundary run not created');
+      return registration.run;
+    };
+    const outcomeOf = (stored: Awaited<ReturnType<typeof finalizeYayaRun>>): { kind?: string; reason?: string } =>
+      (stored?.outcome ?? {}) as { kind?: string; reason?: string };
+    const candidateAnswered = { kind: 'answered', content: 'BOUNDARY_LATE', sources: [] };
+
+    const normalBoundary = await makeBoundaryRun();
+    const normalStored = await finalizeYayaRun(normalBoundary.run_id, 'app1-check-boundary', candidateAnswered);
+    check('R1-B 正常候选成功落账（对照）', outcomeOf(normalStored).kind === 'answered');
+
+    const cancelBoundary = await makeBoundaryRun();
+    await database.query('UPDATE yaya_runs SET cancel_requested_at = now() WHERE id = $1', [
+      cancelBoundary.run_id,
+    ]);
+    const cancelStored = await finalizeYayaRun(cancelBoundary.run_id, 'app1-check-boundary', candidateAnswered);
+    check(
+      'R1-B 已取消后成功候选不落账（记 stopped cancelled）',
+      outcomeOf(cancelStored).kind === 'stopped' && outcomeOf(cancelStored).reason === 'cancelled',
+    );
+
+    const replaceBoundary = await makeBoundaryRun();
+    await database.query('UPDATE yaya_runs SET replaced_by = $2 WHERE id = $1', [
+      replaceBoundary.run_id,
+      randomUUID(),
+    ]);
+    const replaceStored = await finalizeYayaRun(replaceBoundary.run_id, 'app1-check-boundary', candidateAnswered);
+    check(
+      'R1-B 已替换后成功候选不落账（记 stopped run_replaced）',
+      outcomeOf(replaceStored).kind === 'stopped' && outcomeOf(replaceStored).reason === 'run_replaced',
+    );
+
+    const deadlineBoundary = await makeBoundaryRun();
+    await database.query("UPDATE yaya_runs SET deadline_at = now() - interval '1 second' WHERE id = $1", [
+      deadlineBoundary.run_id,
+    ]);
+    const deadlineStored = await finalizeYayaRun(deadlineBoundary.run_id, 'app1-check-boundary', candidateAnswered);
+    check(
+      'R1-B 已到期后成功候选不落账（记 stopped deadline）',
+      outcomeOf(deadlineStored).kind === 'stopped' && outcomeOf(deadlineStored).reason === 'deadline',
+    );
+
+    const stopBoundary = await makeBoundaryRun();
+    const stopStored = await finalizeYayaRun(stopBoundary.run_id, 'app1-check-boundary', {
+      kind: 'stopped',
+      reason: 'source_mismatch',
+      detail: null,
+    });
+    check(
+      'R1-B 正常停止流程不被锁死（stopped 原样落账）',
+      outcomeOf(stopStored).kind === 'stopped' && outcomeOf(stopStored).reason === 'source_mismatch',
+    );
+
+    const verifyOkBoundary = await makeBoundaryRun();
+    const verifyOkStored = await finalizeYayaRun(verifyOkBoundary.run_id, 'app1-check-boundary', candidateAnswered, {
+      verify: (client) =>
+        verifyYayaRunBoundaryIdentity(client, { run: verifyOkBoundary, token: boundarySession.token }),
+    });
+    check('R1-B 保存边界身份重核通过（对照）', outcomeOf(verifyOkStored).kind === 'answered');
+
+    const sessionInvalidBoundary = await makeBoundaryRun();
+    await database.query("UPDATE app_sessions SET revoked_at = now() WHERE id = $1", [boundarySessionId]);
+    const sessionInvalidStored = await finalizeYayaRun(
+      sessionInvalidBoundary.run_id,
+      'app1-check-boundary',
+      candidateAnswered,
+      {
+        verify: (client) =>
+          verifyYayaRunBoundaryIdentity(client, {
+            run: sessionInvalidBoundary,
+            token: boundarySession.token,
+          }),
+      },
+    );
+    check(
+      'R1-B 保存边界会话失效 → 成功候选改为 stopped session_invalid',
+      outcomeOf(sessionInvalidStored).kind === 'stopped' &&
+        outcomeOf(sessionInvalidStored).reason === 'session_invalid',
+    );
+    await database.query('UPDATE app_sessions SET revoked_at = NULL WHERE id = $1', [boundarySessionId]);
+
+    const disabledBoundary = await makeBoundaryRun();
+    await database.query("UPDATE app_accounts SET status = 'disabled' WHERE id = $1", [facts.teacherA.id]);
+    const disabledStored = await finalizeYayaRun(disabledBoundary.run_id, 'app1-check-boundary', candidateAnswered, {
+      verify: (client) =>
+        verifyYayaRunBoundaryIdentity(client, { run: disabledBoundary, token: boundarySession.token }),
+    });
+    check(
+      'R1-B 保存边界账号停用 → 成功候选改为 stopped account_disabled',
+      outcomeOf(disabledStored).kind === 'stopped' && outcomeOf(disabledStored).reason === 'account_disabled',
+    );
+    await database.query("UPDATE app_accounts SET status = 'active' WHERE id = $1", [facts.teacherA.id]);
+
+    // 损坏依赖不得被 append 抹掉或吞成空集合。
+    const corruptAppendBoundary = await makeBoundaryRun();
+    await database.query(
+      `UPDATE yaya_runs SET dependencies = '[{"unexpected":true}]'::jsonb WHERE id = $1`,
+      [corruptAppendBoundary.run_id],
+    );
+    const appendResult = await appendYayaRunDependencies(corruptAppendBoundary.run_id, [
+      { ref: null, tool: null, image_id: 'app1-image-x', message_id: null, fragment_id: null, projection: 'any' },
+    ]);
+    const corruptRows = await database.query<{ dependencies: unknown }>(
+      'SELECT dependencies FROM yaya_runs WHERE id = $1',
+      [corruptAppendBoundary.run_id],
+    );
+    check(
+      'R1-D 损坏依赖 append 不覆盖、不吞成空集合',
+      appendResult.corrupt === true &&
+        appendResult.dependencies.length === 0 &&
+        JSON.stringify(corruptRows.rows[0]?.dependencies) === '[{"unexpected":true}]',
+    );
+    await finalizeYayaRun(corruptAppendBoundary.run_id, 'app1-check-boundary', {
+      kind: 'stopped',
+      reason: 'model_failed',
+      detail: null,
+    });
+
+    // 真实 PG 终态保存失败：整条 NDJSON 必须通过冻结 API0 校验，且不得先发成功再改失败。
+    await database.query(
+      `CREATE OR REPLACE FUNCTION app1_fail_terminal() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.state = 'terminal' AND NEW.user_text LIKE '%app1_persist_failure%' THEN
+             RAISE EXCEPTION 'app1 synthetic terminal persistence failure';
+           END IF;
+           RETURN NEW;
+         END $$;
+       DROP TRIGGER IF EXISTS app1_fail_terminal_trigger ON yaya_runs;
+       CREATE TRIGGER app1_fail_terminal_trigger BEFORE UPDATE ON yaya_runs
+         FOR EACH ROW EXECUTE FUNCTION app1_fail_terminal();`,
+    );
+    const persistFailId = `persistfail-${randomUUID()}`;
+    const persistFailResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: persistFailId,
+        user_text: '[app1:persistfail] app1_persist_failure',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const persistFailParsed = parseLines(await openNdjson(persistFailResponse).collect());
+    const persistFailEnd = persistFailParsed.events.find((event) => event.type === 'run_end');
+    const persistFailRow = await database.query<{ state: string }>(
+      'SELECT state FROM yaya_runs WHERE client_request_id = $1',
+      [persistFailId],
+    );
+    check(
+      'R1-B 真实 PG 终态写失败：整条流通过 API0、无成功终局、唯一 run_end',
+      persistFailResponse.status === 200 &&
+        persistFailParsed.allParsed &&
+        persistFailParsed.verdict.ok &&
+        !persistFailParsed.events.some((event) => event.type === 'answer') &&
+        persistFailEnd !== undefined &&
+        persistFailEnd.type === 'run_end' &&
+        persistFailEnd.outcome.kind === 'stopped' &&
+        persistFailEnd.outcome.reason === 'model_failed',
+    );
+    check(
+      'R1-B 持久化失败标记为中断且查询不可核验',
+      persistFailRow.rows[0]?.state === 'interrupted',
+    );
+    const persistFailLookup = await lookupRun(base, authA, convA.conversation_id, persistFailId);
+    const persistFailBody = (await persistFailLookup.json()) as { status?: string; reason?: string };
+    check(
+      'R1-B 保存失败行查询不可核验（不返回 missing）',
+      persistFailBody.status === 'unverifiable' && persistFailBody.reason === 'terminal_unreadable',
+    );
+    await database.query('DROP TRIGGER IF EXISTS app1_fail_terminal_trigger ON yaya_runs');
+    await database.query('DROP FUNCTION IF EXISTS app1_fail_terminal()');
+
+    /* ============================== R1-C：历史重核不受 20 条窗口限制 ============================== */
+
+    const principalFull: Principal = {
+      account_id: facts.teacherA.id,
+      username: facts.teacherA.username,
+      display_name: '甲老师',
+      role: 'teacher',
+      account_status: 'active',
+      scope: { kind: 'classes', class_ids: [facts.classA] },
+    };
+    const loginSessionId =
+      (
+        await database.query<{ id: string }>('SELECT id FROM app_sessions WHERE token_hash = $1', [
+          hashSessionToken(loginToken),
+        ])
+      ).rows[0]?.id ?? '';
+    const historyReg = await withTransaction((client) =>
+      registerYayaRun(client, {
+        run_id: randomUUID(),
+        owner_account_id: facts.teacherA.id,
+        conversation_id: historyConv.conversation_id,
+        client_request_id: `history-recheck-${randomUUID()}`,
+        user_text: '[app1:history-recheck]',
+        attachment_ids: [],
+        expected_conversation_revision: savedMessage.revision,
+        session_id: loginSessionId,
+        owner_instance: 'app1-check',
+        deadline_at: new Date(Date.now() + 90_000).toISOString(),
+      }),
+    );
+    assert.equal(historyReg.kind, 'created');
+    const historyRuntime = createYayaRunRuntimeState({
+      run: historyReg.run,
+      token: loginToken,
+      owner_instance: 'app1-check',
+      carrier: { headers: new Headers({ cookie: authA.cookie }) },
+    });
+    const historyIdentity = {
+      run_id: historyReg.run.run_id,
+      identity_state: 'authenticated' as const,
+      principal: principalFull,
+      session_valid: true,
+    };
+    const historyLoaded = await loadYayaRunProjectedContext(historyRuntime, principalFull);
+    check(
+      'R1-C 历史加载含窗口内片段（20 条上限）',
+      historyLoaded.history.some((turn) => turn.content.includes('历史：王一诺在积木区搭了高塔。')),
+    );
+    const beforeWindow = await revalidateYayaRunContext(
+      historyRuntime,
+      { run_id: historyReg.run.run_id, identity: historyIdentity, sources: [], image_ids: [] },
+      { principal: principalFull },
+    );
+    check('R1-C 追加前重核通过（基线）', beforeWindow.ok);
+    for (let index = 0; index < 21; index += 1) {
+      await database.query(
+        `INSERT INTO yaya_messages (id, conversation_id, owner_account_id, role, message_kind, fragments)
+         VALUES ($1,$2,$3,'user','text',$4::jsonb)`,
+        [
+          randomUUID(),
+          historyConv.conversation_id,
+          facts.teacherA.id,
+          JSON.stringify([
+            {
+              fragment_id: randomUUID(),
+              text: `[app1] 追加消息 ${index}`,
+              sources: [],
+              independently_readable: true,
+              provenance: { kind: 'teacher_supplement', ref_id: null, label: '合成', derived_from: null },
+            },
+          ]),
+        ],
+      );
+    }
+    const afterWindow = await revalidateYayaRunContext(
+      historyRuntime,
+      { run_id: historyReg.run.run_id, identity: historyIdentity, sources: [], image_ids: [] },
+      { principal: principalFull },
+    );
+    check(
+      'R1-C 分页窗口外合法片段仍通过（不误判不可核验）',
+      afterWindow.ok,
+    );
+    const freshHistoryRuntime = createYayaRunRuntimeState({
+      run: historyReg.run,
+      token: loginToken,
+      owner_instance: 'app1-check',
+      carrier: { headers: new Headers({ cookie: authA.cookie }) },
+    });
+    const freshHistory = await loadYayaRunProjectedContext(freshHistoryRuntime, principalFull);
+    check(
+      'R1-C 模型历史仍保持 20 条上限（分页外片段不再注入）',
+      freshHistory.history.length <= 20 &&
+        !freshHistory.history.some((turn) => turn.content.includes('历史：王一诺在积木区搭了高塔。')),
+    );
+
+    const historySnapshots = [...historyRuntime.dependencies.values()].filter(
+      (dependency) => dependency.message_id !== null,
+    );
+    const recordedMessageId = historySnapshots[0]?.message_id as string;
+    const recordedFragmentId = historySnapshots[0]?.fragment_id as string;
+    await database.query('UPDATE yaya_messages SET deleted_at = now() WHERE id = $1', [recordedMessageId]);
+    const deletedHistory = await revalidateYayaRunContext(
+      historyRuntime,
+      { run_id: historyReg.run.run_id, identity: historyIdentity, sources: [], image_ids: [] },
+      { principal: principalFull },
+    );
+    check('R1-C 已删除片段保守拒绝', !deletedHistory.ok);
+    await database.query('UPDATE yaya_messages SET deleted_at = NULL WHERE id = $1', [recordedMessageId]);
+    const restoredHistory = await revalidateYayaRunContext(
+      historyRuntime,
+      { run_id: historyReg.run.run_id, identity: historyIdentity, sources: [], image_ids: [] },
+      { principal: principalFull },
+    );
+    check('R1-C 恢复删除后重新通过（对照）', restoredHistory.ok);
+    const fragmentRows = await database.query<{ fragments: unknown }>(
+      'SELECT fragments FROM yaya_messages WHERE id = $1',
+      [recordedMessageId],
+    );
+    const originalFragments = fragmentRows.rows[0]?.fragments ?? [];
+    await database.query(`UPDATE yaya_messages SET fragments = '[1]'::jsonb WHERE id = $1`, [
+      recordedMessageId,
+    ]);
+    const corruptHistory = await revalidateYayaRunContext(
+      historyRuntime,
+      { run_id: historyReg.run.run_id, identity: historyIdentity, sources: [], image_ids: [] },
+      { principal: principalFull },
+    );
+    check('R1-C 损坏片段保守拒绝', !corruptHistory.ok);
+    await database.query('UPDATE yaya_messages SET fragments = $2::jsonb WHERE id = $1', [
+      recordedMessageId,
+      JSON.stringify(originalFragments),
+    ]);
+    const restoredFragment = await revalidateYayaRunContext(
+      historyRuntime,
+      { run_id: historyReg.run.run_id, identity: historyIdentity, sources: [], image_ids: [] },
+      { principal: principalFull },
+    );
+    check('R1-C 恢复片段后重新通过（对照）', restoredFragment.ok);
+    await database.query(
+      'UPDATE teacher_class_assignments SET removed_at = now() WHERE account_id = $1 AND class_id = $2',
+      [facts.teacherA.id, facts.classA],
+    );
+    const revokedHistory = await revalidateYayaRunContext(
+      historyRuntime,
+      { run_id: historyReg.run.run_id, identity: historyIdentity, sources: [], image_ids: [] },
+      { principal: principalFull },
+    );
+    check('R1-C 历史片段来源撤权保守拒绝', !revokedHistory.ok);
+    await database.query(
+      'UPDATE teacher_class_assignments SET removed_at = NULL WHERE account_id = $1 AND class_id = $2',
+      [facts.teacherA.id, facts.classA],
+    );
+    const reauthorizedHistory = await revalidateYayaRunContext(
+      historyRuntime,
+      { run_id: historyReg.run.run_id, identity: historyIdentity, sources: [], image_ids: [] },
+      { principal: principalFull },
+    );
+    check('R1-C 恢复授权后重新通过（对照）', reauthorizedHistory.ok);
+    void recordedFragmentId;
+
+    /* ============================== R1-D：损坏依赖严格区分 ============================== */
+
+    const validDependency = {
+      ref: {
+        kind: 'tool_result',
+        ref_id: `observation:${facts.observationA}`,
+        label: null,
+        derived_from: null,
+      },
+      tool: 'get_observation',
+      image_id: null,
+      message_id: null,
+      fragment_id: null,
+      projection: 'full',
+    };
+    const rawRunRecord = {
+      id: randomUUID(),
+      owner_account_id: facts.teacherA.id,
+      conversation_id: convA.conversation_id,
+      client_request_id: `parser-${randomUUID()}`,
+      request_digest: '0'.repeat(64),
+      user_text: 'parser',
+      attachment_ids: [],
+      expected_conversation_revision: 1,
+      session_id: randomUUID(),
+      owner_instance: 'app1-check',
+      state: 'terminal',
+      outcome: { kind: 'stopped', reason: 'model_failed', detail: null },
+      dependencies: [validDependency],
+      cancel_requested_at: null,
+      replaced_by: null,
+      deadline_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      terminal_at: new Date().toISOString(),
+    };
+    const parsedValid = parseYayaRunRecord(rawRunRecord);
+    check(
+      'R1-D 合法依赖快照可解析（含投影等级）',
+      parsedValid !== null &&
+        !parsedValid.dependencies_corrupt &&
+        parsedValid.dependencies.length === 1 &&
+        parsedValid.dependencies[0]?.projection === 'full',
+    );
+    const emptyDeps = parseYayaRunRecord({ ...rawRunRecord, dependencies: [] });
+    check(
+      'R1-D 合法空集合与损坏集合区分',
+      emptyDeps !== null && !emptyDeps.dependencies_corrupt && emptyDeps.dependencies.length === 0,
+    );
+    const corruptCases: [string, unknown][] = [
+      ['未知条目', [{ unexpected: true }]],
+      ['部分损坏', [validDependency, { unexpected: true }]],
+      [
+        '未知来源 kind',
+        [{ ...validDependency, ref: { kind: 'alien', ref_id: 'x', label: null, derived_from: null } }],
+      ],
+      ['缺投影快照（旧 run）', [{ ...validDependency, projection: undefined }]],
+      ['message/fragment 不成对', [{ ...validDependency, message_id: 'm' }]],
+      ['非数组', 'corrupt'],
+    ];
+    let corruptCasesOk = true;
+    for (const [label, value] of corruptCases) {
+      const record = parseYayaRunRecord({ ...rawRunRecord, dependencies: value });
+      if (record === null || !record.dependencies_corrupt || record.dependencies.length !== 0) {
+        corruptCasesOk = false;
+        console.error(`R1-D 反例未按损坏处理：${label}`);
+      }
+    }
+    check('R1-D 未知/缺字段/旧快照一律判损坏且不丢条假装完整', corruptCasesOk);
+    check(
+      'R1-D parseStoredDependencies 对损坏数组返回 corrupt',
+      parseStoredDependencies([{ unexpected: true }]).corrupt === true &&
+        parseStoredDependencies([]).corrupt === false,
+    );
+
+    // HTTP：损坏依赖的终态查询不可核验（行存在但不可读，不得 missing）。
+    const depCorruptId = `depcorrupt-${randomUUID()}`;
+    const depCorruptResponse = await postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: depCorruptId,
+        user_text: '[app1:depcorrupt] 依赖完整性',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    const depCorruptParsed = parseLines(await openNdjson(depCorruptResponse).collect());
+    check(
+      'R1-D 依赖完整性对照 run 正常回答',
+      depCorruptParsed.verdict.ok && depCorruptParsed.verdict.outcome.kind === 'answered',
+    );
+    const depCorruptRunId = depCorruptParsed.verdict.ok ? depCorruptParsed.verdict.run_id : '';
+    const depCorruptOriginal = (
+      await database.query<{ dependencies: unknown }>('SELECT dependencies FROM yaya_runs WHERE id = $1', [
+        depCorruptRunId,
+      ])
+    ).rows[0]?.dependencies;
+    await database.query(
+      `UPDATE yaya_runs SET dependencies = '[{"unexpected":true}]'::jsonb WHERE id = $1`,
+      [depCorruptRunId],
+    );
+    const corruptLookup = await lookupRun(base, authA, convA.conversation_id, depCorruptId);
+    const corruptLookupBody = (await corruptLookup.json()) as { status?: string; reason?: string };
+    check(
+      'R1-D 损坏依赖终态查询不可核验（非 missing）',
+      corruptLookupBody.status === 'unverifiable' && corruptLookupBody.reason === 'terminal_unreadable',
+    );
+    const corruptParsedRow = await loadYayaRun(depCorruptRunId);
+    check(
+      'R1-D 损坏依赖行解析标记 dependencies_corrupt',
+      corruptParsedRow !== null && corruptParsedRow.dependencies_corrupt === true,
+    );
+    await database.query('UPDATE yaya_runs SET dependencies = $2::jsonb WHERE id = $1', [
+      depCorruptRunId,
+      JSON.stringify(depCorruptOriginal ?? []),
+    ]);
+    const restoredCorruptLookup = await lookupRun(base, authA, convA.conversation_id, depCorruptId);
+    check(
+      'R1-D 恢复依赖后重新可读（对照）',
+      ((await restoredCorruptLookup.json()) as { status?: string }).status === 'finished',
+    );
+    await database.query(`UPDATE yaya_runs SET attachment_ids = '[1]'::jsonb WHERE id = $1`, [depCorruptRunId]);
+    const unreadableLookup = await lookupRun(base, authA, convA.conversation_id, depCorruptId);
+    const unreadableBody = (await unreadableLookup.json()) as { status?: string; reason?: string };
+    check(
+      'R1-D 行存在但不可读 → 不可核验（不归为 missing）',
+      unreadableBody.status === 'unverifiable' && unreadableBody.reason === 'terminal_unreadable',
+    );
+    await database.query(`UPDATE yaya_runs SET attachment_ids = '[]'::jsonb WHERE id = $1`, [depCorruptRunId]);
 
     /* ============================== 中断恢复标记 ============================== */
 

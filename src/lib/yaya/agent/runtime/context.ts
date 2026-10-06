@@ -15,6 +15,8 @@ import { authorizeAction } from '@/lib/accounts/authorize';
 import type { HeaderCarrier } from '@/lib/accounts/guards';
 import type { AccessAction, AccessResource, Principal } from '@/lib/accounts/types';
 import { withPrivateRead, yayaDataRepository } from '@/lib/yaya/data';
+import { projectMessageRow } from '@/lib/yaya/data/projection';
+import type { YayaMessageRow } from '@/lib/yaya/data/rows';
 import { evaluateAttachmentRead, loadAttachmentContent } from '@/lib/media/content-service';
 import { createDatabaseRecordAccessLoader } from '@/lib/media/record-access';
 import { mediaRuntimeOrThrow } from '@/lib/media/runtime';
@@ -39,6 +41,10 @@ import {
 
 export const YAYA_RUN_HISTORY_LIMIT = 20;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /** 单次 run 的运行上下文：原会话令牌、run 级依赖、历史片段快照与图片 id */
 export interface YayaRunRuntimeState {
   run: YayaRunRecord;
@@ -49,6 +55,8 @@ export interface YayaRunRuntimeState {
   image_ids: Set<string>;
   /** 上下文加载不可核验（DATA/MEDIA 失败）：重核必须保守停止 */
   load_failed: boolean;
+  /** 持久化依赖损坏/缺快照（行存在但不可读）：内容终态保守不可核验 */
+  dependencies_unreadable: boolean;
 }
 
 export function createYayaRunRuntimeState(input: {
@@ -65,6 +73,7 @@ export function createYayaRunRuntimeState(input: {
     dependencies: new Map(),
     image_ids: new Set(),
     load_failed: false,
+    dependencies_unreadable: false,
   };
 }
 
@@ -81,6 +90,7 @@ export function createYayaRunRuntimeStateFromRecord(
     dependencies: new Map(),
     image_ids: new Set(),
     load_failed: false,
+    dependencies_unreadable: run.dependencies_corrupt,
   };
   for (const dependency of run.dependencies) {
     state.dependencies.set(yayaRunDependencyKey(dependency), dependency);
@@ -89,7 +99,7 @@ export function createYayaRunRuntimeStateFromRecord(
   return state;
 }
 
-/** 依赖先记入内存（本 run 权威集合），再持久化供跨进程查询；持久化失败保守停 run */
+/** 依赖先记入内存（本 run 权威集合），再持久化供跨进程查询；持久化失败/损坏保守停 run */
 export async function absorbYayaRunDependencies(
   state: YayaRunRuntimeState,
   additions: readonly YayaRunDependency[],
@@ -107,7 +117,8 @@ export async function absorbYayaRunDependencies(
   if (fresh.length === 0) return;
   if (state.run.state !== 'active') return;
   try {
-    await appendYayaRunDependencies(state.run.run_id, fresh);
+    const stored = await appendYayaRunDependencies(state.run.run_id, fresh);
+    if (stored.corrupt) state.dependencies_unreadable = true;
   } catch {
     state.load_failed = true;
   }
@@ -158,6 +169,7 @@ async function loadHistory(
         image_id: null,
         message_id: message.message_id,
         fragment_id: fragment.fragment_id,
+        projection: 'any',
       });
     }
   }
@@ -211,6 +223,7 @@ async function loadImages(
         image_id: attachmentId,
         message_id: null,
         fragment_id: null,
+        projection: 'any',
       });
     } catch {
       denied.push(attachmentId);
@@ -321,9 +334,13 @@ function scopeBoundaryAllows(principal: Principal): boolean {
 }
 
 /**
- * 逐引用按**原工具动作**重核：
+ * 逐引用按**原工具动作 + 已加载投影要求**重核：
  * - 对象引用（child/class/observation）复读真实资源事实后按对应读取动作授权；
  *   `list_classes` / `resolve_child_class` 的班级引用按基础目录（class.catalog.read）核验；
+ * - 已按完整投影加载的数据（`projection='full'`）要求当前仍给完整投影；
+ *   当前只剩 historical_read_only 时停止消费/发布旧完整 payload；
+ *   仅按历史只读加载的数据保持可用（合法最小查询不被全禁）；
+ * - `projection` 缺失（旧 run / 损坏存储）保守拒绝，不补造历史；
  * - scope/目录来源走原 scope 边界；指南引用只要求有效账号（authenticated_reference）；
  * - 教师账号引用要求管理员 + 全园范围；未知引用保守拒绝。
  */
@@ -332,6 +349,8 @@ export async function recheckYayaRunDependency(
   dependency: YayaRunDependency,
 ): Promise<boolean> {
   if (dependency.image_id !== null) return true; // 图片由 MEDIA 当前授权单独判定
+  const requiredProjection = dependency.projection;
+  if (requiredProjection === null) return false;
   const source = dependency.ref;
   if (source === null || source.ref_id === null) return true;
   const refId = source.ref_id;
@@ -370,9 +389,18 @@ export async function recheckYayaRunDependency(
   }
   const facts = await readResourceFacts(prefix as 'child' | 'class' | 'observation', id);
   if (facts === null) return false;
-  return authorizeAction(principal, action, facts).allowed;
+  const decision = authorizeAction(principal, action, facts);
+  if (!decision.allowed) return false;
+  if (requiredProjection === 'full' && decision.projection !== 'full') return false;
+  return true;
 }
 
+/**
+ * 历史片段重核（精确读取，不受最近 20 条模型窗口限制）：
+ * - 按本 run 登记的 message_id/fragment_id 直接读取该行，重跑 DATA 当前投影；
+ * - 只有该片段当前仍为 full 才放行；删除、损坏、来源撤权、会话删除一律保守拒绝；
+ * - 不扩大模型历史加载（loadHistory 仍保留 20 条上限）。
+ */
 async function recheckHistory(
   state: YayaRunRuntimeState,
   denied: string[],
@@ -381,32 +409,65 @@ async function recheckHistory(
     (dependency) => dependency.message_id !== null && dependency.fragment_id !== null,
   );
   if (snapshots.length === 0) return;
-  let messages;
+  const messageIds = [...new Set(snapshots.map((dependency) => dependency.message_id as string))];
+  let deniedKeys: string[];
   try {
-    const view = await withPrivateRead(state.carrier, ({ client, principal, schoolId }) =>
-      yayaDataRepository.listMessages(client, principal, schoolId, state.run.conversation_id, {
-        limit: YAYA_RUN_HISTORY_LIMIT,
-      }),
-    );
-    messages = view.messages;
+    deniedKeys = await withPrivateRead(state.carrier, async ({ client, principal, schoolId }) => {
+      const conversation = await yayaDataRepository.getConversation(
+        client,
+        principal.account_id,
+        state.run.conversation_id,
+      );
+      if (conversation === null) {
+        return snapshots.map(
+          (dependency) => `${dependency.message_id as string}#${dependency.fragment_id as string}`,
+        );
+      }
+      const result = await client.query<{ data: unknown }>(
+        'SELECT to_jsonb(m.*) AS data FROM yaya_messages m WHERE m.id = ANY($1::varchar[])',
+        [messageIds],
+      );
+      const byId = new Map<string, Record<string, unknown>>();
+      for (const row of result.rows) {
+        if (isRecord(row.data) && typeof row.data.id === 'string') byId.set(row.data.id, row.data);
+      }
+      const localDenied: string[] = [];
+      for (const dependency of snapshots) {
+        const messageId = dependency.message_id as string;
+        const fragmentId = dependency.fragment_id as string;
+        const key = `${messageId}#${fragmentId}`;
+        const raw = byId.get(messageId);
+        if (
+          raw === undefined ||
+          (raw.deleted_at !== null && raw.deleted_at !== undefined) ||
+          raw.owner_account_id !== principal.account_id
+        ) {
+          localDenied.push(key);
+          continue;
+        }
+        let visible = false;
+        try {
+          const projection = await projectMessageRow(
+            client,
+            principal,
+            schoolId,
+            raw as unknown as YayaMessageRow,
+          );
+          const fragment = projection.fragments.find((entry) => entry.fragment_id === fragmentId);
+          visible = fragment !== undefined && fragment.visibility === 'full' && fragment.text !== null;
+        } catch {
+          visible = false;
+        }
+        if (!visible) localDenied.push(key);
+      }
+      return localDenied;
+    });
   } catch {
-    for (const dependency of snapshots) denied.push(dependency.message_id ?? 'history');
-    return;
+    deniedKeys = snapshots.map(
+      (dependency) => `${dependency.message_id as string}#${dependency.fragment_id as string}`,
+    );
   }
-  const visibility = new Map<string, Map<string, string>>();
-  for (const message of messages) {
-    const fragments = new Map<string, string>();
-    for (const fragment of message.fragments) fragments.set(fragment.fragment_id, fragment.visibility);
-    visibility.set(message.message_id, fragments);
-  }
-  for (const dependency of snapshots) {
-    const messageId = dependency.message_id as string;
-    const fragmentId = dependency.fragment_id as string;
-    const fragments = visibility.get(messageId);
-    if (fragments === undefined || fragments.get(fragmentId) !== 'full') {
-      denied.push(`${messageId}#${fragmentId}`);
-    }
-  }
+  for (const key of deniedKeys) denied.push(key);
 }
 
 async function recheckImages(state: YayaRunRuntimeState, denied: string[], viewer: Principal): Promise<void> {
@@ -447,6 +508,10 @@ export async function revalidateYayaRunContext(
   if (state.load_failed) {
     return { ok: false, reason: 'context_revoked', denied_refs: ['context_load_failed'] };
   }
+  if (state.dependencies_unreadable) {
+    // 行存在但依赖损坏/缺快照：内容不可核验，不补造历史、不继续消费。
+    return { ok: false, reason: 'context_revoked', denied_refs: ['dependencies_unreadable'] };
+  }
   const principal = identity.principal;
   if (principal === null) {
     return { ok: false, reason: 'context_revoked', denied_refs: ['identity_missing'] };
@@ -466,6 +531,7 @@ export async function revalidateYayaRunContext(
       image_id: null,
       message_id: null,
       fragment_id: null,
+      projection: 'any',
     };
     const key = yayaRunDependencyKey(dependency);
     if (!dependencies.has(key)) dependencies.set(key, dependency);

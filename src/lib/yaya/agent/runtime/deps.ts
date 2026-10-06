@@ -42,6 +42,47 @@ function isSourceRef(value: unknown): value is YayaSourceRef {
   );
 }
 
+function payloadRecord(data: unknown): Record<string, unknown> {
+  return typeof data === 'object' && data !== null && !Array.isArray(data)
+    ? (data as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * 已装载数据所需的投影等级：READ1 的观察负载带 `access_projection`
+ * （get_observation 单条；list_observations 逐条）。完整投影加载过的观察
+ * 在重核时必须仍为完整投影，否则不得继续消费旧完整 payload；
+ * 只有历史只读加载过的观察保持历史只读可核验。
+ */
+function projectionRequirements(data: unknown): Map<string, 'full' | 'historical_read_only'> {
+  const requirements = new Map<string, 'full' | 'historical_read_only'>();
+  const add = (observationId: unknown, projection: unknown): void => {
+    if (typeof observationId !== 'string' || observationId.length === 0) return;
+    if (projection !== 'full' && projection !== 'historical_read_only') return;
+    requirements.set(`observation:${observationId}`, projection);
+  };
+  const outer = payloadRecord(data);
+  // READ1 payload 信封：{ tool, citable_source, recheck_dependencies, data: {...} }；
+  // 观察负载在内层 data（get_observation 单条 / list_observations 逐条），两处都查。
+  for (const record of [outer, payloadRecord(outer.data)]) {
+    const single = record.observation;
+    if (typeof single === 'object' && single !== null && !Array.isArray(single)) {
+      add(
+        (single as Record<string, unknown>).id,
+        (single as Record<string, unknown>).access_projection,
+      );
+    }
+    if (Array.isArray(record.observations)) {
+      for (const item of record.observations) {
+        if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+        const entry = item as Record<string, unknown>;
+        add(entry.observation_id, entry.access_projection);
+      }
+    }
+  }
+  return requirements;
+}
+
 /** 从 READ1 结构化结果提取完整重核依赖（citable_source + recheck_dependencies，只增不覆盖） */
 function extractReadDependencies(
   tool: string,
@@ -49,10 +90,8 @@ function extractReadDependencies(
 ): YayaRunDependency[] {
   if (!outcome.ok) return [];
   const data = outcome.data;
-  const record =
-    typeof data === 'object' && data !== null && !Array.isArray(data)
-      ? (data as Record<string, unknown>)
-      : {};
+  const record = payloadRecord(data);
+  const requirements = projectionRequirements(data);
   const candidates: unknown[] = [];
   if (Array.isArray(record.recheck_dependencies)) candidates.push(...record.recheck_dependencies);
   else candidates.push(outcome.source);
@@ -64,12 +103,17 @@ function extractReadDependencies(
     const key = `${candidate.kind}\u0000${candidate.ref_id ?? ''}\u0000${candidate.derived_from ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const projection =
+      candidate.ref_id !== null && candidate.ref_id.startsWith('observation:')
+        ? (requirements.get(candidate.ref_id) ?? 'any')
+        : 'any';
     dependencies.push({
       ref: candidate,
       tool,
       image_id: null,
       message_id: null,
       fragment_id: null,
+      projection,
     });
   }
   return dependencies;
