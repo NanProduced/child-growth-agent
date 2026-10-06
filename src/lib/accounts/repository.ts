@@ -518,16 +518,18 @@ export async function unassignTeacherClass(
   return safeTransaction((client) => unassignTeacherClassWithClient(client, accountId, classId, actorId));
 }
 
-/** 教师账号当前修订（批准业务版本比较用）；账号不存在返回 null，不伪造版本 */
+/**
+ * 教师账号当前修订（批准业务版本比较用）：`COALESCE(updated_at, created_at)::text`。
+ * 既有 schema 的 updated_at 可空；账号不存在返回 null，不伪造版本。
+ */
 export async function getTeacherAccountRevisionWithClient(
   client: TransactionClient,
   accountId: string,
 ): Promise<string | null> {
-  const result = await client.query<{ updated_at: Date | string | null }>(
-    "SELECT updated_at FROM app_accounts WHERE id = $1 AND role = 'teacher'",
+  const result = await client.query<{ revision: string | null }>(
+    `SELECT COALESCE(updated_at, created_at)::text AS revision
+       FROM app_accounts WHERE id = $1 AND role = 'teacher'`,
     [accountId],
   );
-  const row = result.rows[0];
-  if (!row || row.updated_at === null) return null;
-  return isoDate(row.updated_at);
+  return result.rows[0]?.revision ?? null;
 }

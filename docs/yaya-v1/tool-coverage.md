@@ -144,3 +144,15 @@
 参数校验与模型可见 JSON Schema 同源（`zodToolParams`，strict）；模型不能自报身份/批准/SQL；
 `approved`/`principal`/`role`/`scope`/`password` 一律拒绝。执行入口只认
 `{ approval_id, operation_ids }`，提交者身份/会话/CSRF 由服务端解析。
+
+### 8.1 R1 执行守门（2026-10-06，主评审三 P1 修复）
+
+> 由 `codex/yaya-tools1` R1 追加；细节见 `docs/yaya-v1/tools-write1-r1-delivery.md`。
+
+- **模型前守门**：operations POST 在模型派发前完成可信 Origin / 会话绑定 CSRF / 有效账号
+  与原会话核验，并核验原批准前提；缺 CSRF/错误 Origin/撤会话/停用账号时模型调用 0、业务写 0。
+- **准备态受批准约束**：`needs_prepare` 的准备态写入再次核验 actor/session/批准取消到期/
+  所选操作/内容/归属/业务版本后，用同一 client 的单笔条件 UPDATE 原子保存（不消费正式归档批准）。
+- **锁后版本核对**：执行事务按 children→classes→observations→teacher accounts 稳定锁序取目标行锁，
+  再核对批准版本；版本口径为 `COALESCE(updated_at, created_at)::text`，锁等待后按当前时间复核
+  批准到期与会话有效性。

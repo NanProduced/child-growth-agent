@@ -3,17 +3,19 @@
  *
  * 流程：
  * 1. `parseYayaOperationsExecuteRequest` 只取 approval_id/operation_ids（自报批准/身份被净身拒绝）；
- * 2. 私有读预检：owner 绑定、批准匹配、取回服务端已存 payload（客户端不能自报内容）；
+ * 2. **模型前预检**（共享 executor 入口）：短事务内完成可信 Origin / 会话绑定 CSRF /
+ *    有效账号与原会话核验，并用 DATA `verifyApprovedOperations` 核验原批准前提
+ *    （含目标行锁与锁后版本）；事务结束后才 load/compute，模型等待不持事务；
  * 3. 事务外 compute：模型/依据计算与当前授权读取（withBusinessRead 读事务，不消费批准）；
- *    `needs_prepare` 停在准备态（可选准备态写入经 runBusinessWrite），不消耗批准；
- * 4. 同一 `withPrivateWrite` 事务内：DATA `executeApprovedOperations` 消费批准 +
- *    业务 callback + 回执，全部使用同一个 TransactionClient；
+ *    `needs_prepare` 停在准备态，准备态写入必须再次通过同一 `verifyApprovedOperations`
+ *    并只使用同一 client 的单笔条件 UPDATE，不消费正式归档批准；
+ * 4. 同一 `withPrivateWrite` 事务内：DATA `executeApprovedOperations`（内部复用同一核验）
+ *    消费批准 + 业务 callback + 回执，全部使用同一个 TransactionClient；
  * 5. 重复执行只返回原回执；未知/执行中由 DATA 语义拒绝，客户端按原 operation_id 查询。
  */
 import type { HeaderCarrier } from '@/lib/accounts/guards';
 import { withBusinessRead, type ResourceRef } from '@/lib/accounts/access';
 import { AccountsError } from '@/lib/accounts/errors';
-import { runBusinessWrite } from '@/lib/auth';
 import { ObservationStateConflictError, StaleEvidenceError } from '@/lib/evidence-snapshot';
 import {
   GuideEvidenceBasisExpiredError,
@@ -26,12 +28,23 @@ import { MediaError } from '@/lib/media/errors';
 import type { MediaObjectStore } from '@/lib/media/object-store';
 import { ClassHistoryProtectedError, ObservationContextConflictError } from '@/lib/queries';
 import type { invokeLlm } from '@/lib/llm';
-import { withReadClient } from '@/storage/database/pg-client';
+import { withReadClient, type TransactionClient } from '@/storage/database/pg-client';
 
 import { parseYayaOperationsExecuteRequest } from '../../api-contract';
-import { yayaDataRepository, withPrivateRead, withPrivateWrite } from '../../data';
-import { YAYA_MAX_BATCH_ITEMS, YayaDataError, type YayaPreparedItemView } from '../../storage-types';
-import type { YayaPlannedOperation } from '../../types';
+import {
+  verifyApprovedOperations,
+  yayaDataRepository,
+  withPrivateRead,
+  withPrivateWrite,
+  type YayaPrivateContext,
+} from '../../data';
+import {
+  YAYA_MAX_BATCH_ITEMS,
+  YayaDataError,
+  type YayaExecutionItemContext,
+  type YayaPreparedItemView,
+} from '../../storage-types';
+import type { YayaApprovalSubmitter, YayaPlannedOperation } from '../../types';
 import { createUnavailableMediaStore } from './registry';
 import type {
   YayaOperationsExecutionResult,
@@ -196,6 +209,22 @@ export function createYayaOperationsExecutor(options: {
     });
   }
 
+  const submitterOf = (context: YayaPrivateContext): YayaApprovalSubmitter => ({
+    identity_state: 'authenticated',
+    principal: context.principal,
+    session_id: context.sessionId,
+    session_valid: true,
+    csrf_verified: true,
+    runtime_approved_state: false,
+    execution_at: new Date().toISOString(),
+  });
+  const resolveRevisionWith = (client: TransactionClient) =>
+    async (executionContext: YayaExecutionItemContext): Promise<string | null> => {
+      const entry = options.registry.find(executionContext.proposal_item.payload.kind);
+      if (!entry?.resolveBusinessRevision) return null;
+      return entry.resolveBusinessRevision(client, executionContext);
+    };
+
   async function execute(
     request: HeaderCarrier,
     body: unknown,
@@ -207,6 +236,22 @@ export function createYayaOperationsExecutor(options: {
       });
     }
     const parsedRequest = parsed.value;
+
+    // A+B：任何模型派发或准备态写入之前，先完成私有写守门（可信 Origin、会话绑定 CSRF、
+    // 有效账号/原会话）与批准原始前提核验（含目标行锁与锁后版本）；短事务结束后才进入
+    // load/compute，模型等待不持事务。重复执行（全部已有回执）在此直接按原回执返回。
+    const preflight = await withPrivateWrite(request, async (context) =>
+      verifyApprovedOperations(context.client, {
+        approval_id: parsedRequest.approval_id,
+        operation_ids: parsedRequest.operation_ids,
+        submitter: submitterOf(context),
+        school_id: context.schoolId,
+        resolveBusinessRevision: resolveRevisionWith(context.client),
+      }),
+    );
+    if (preflight.replayed_receipts !== null) {
+      return { kind: 'receipts', receipts: preflight.replayed_receipts };
+    }
     const { loaded, approvalId } = await loadOperations(request, parsedRequest);
 
     // 模型等待不持事务/行锁：先在短读事务内按当前授权读取快照，随后在事务外计算；
@@ -245,8 +290,20 @@ export function createYayaOperationsExecutor(options: {
       }
       if (computed.kind === 'needs_prepare') {
         if (computed.prepare_write) {
+          // 准备态保存也必须绑定可信请求与原批准前提：同一短事务内先复核
+          // actor/session/批准生命周期/所选操作/内容/归属/业务版本，再用同一个 client
+          // 做单笔条件 UPDATE；失败整单回滚且不消费正式归档批准。
           try {
-            await runBusinessWrite(request, operation.item.action, ref, computed.prepare_write);
+            await withPrivateWrite(request, async (context) => {
+              await verifyApprovedOperations(context.client, {
+                approval_id: approvalId,
+                operation_ids: parsedRequest.operation_ids,
+                submitter: submitterOf(context),
+                school_id: context.schoolId,
+                resolveBusinessRevision: resolveRevisionWith(context.client),
+              });
+              await computed.prepare_write!(context.client);
+            });
           } catch (error) {
             mapBusinessFailure(error);
           }
@@ -268,20 +325,8 @@ export function createYayaOperationsExecutor(options: {
           approval_id: approvalId,
           operation_ids: parsedRequest.operation_ids,
           school_id: context.schoolId,
-          submitter: {
-            identity_state: 'authenticated',
-            principal: context.principal,
-            session_id: context.sessionId,
-            session_valid: true,
-            csrf_verified: true,
-            runtime_approved_state: false,
-            execution_at: new Date().toISOString(),
-          },
-          resolveBusinessRevision: async (executionContext) => {
-            const entry = options.registry.find(executionContext.proposal_item.payload.kind);
-            if (!entry?.resolveBusinessRevision) return null;
-            return entry.resolveBusinessRevision(context.client, executionContext);
-          },
+          submitter: submitterOf(context),
+          resolveBusinessRevision: resolveRevisionWith(context.client),
           callback: async (client, executionContext) => {
             const entry = options.registry.find(executionContext.proposal_item.payload.kind);
             if (!entry) throw new YayaDataError('invalid_request', '未注册的写操作。');

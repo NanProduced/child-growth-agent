@@ -64,7 +64,6 @@ import {
   updateChildActivitySupportWithClient,
   updateChildGrowthProfileSummaryWithClient,
   updateClassWithClient,
-  updateObservationAgentContext,
   updateObservationAgentContextWithClient,
   updateObservationAiDraftWithClient,
 } from '@/lib/queries';
@@ -243,6 +242,27 @@ function defineEntry(entry: YayaWriteToolEntry): YayaWriteToolEntry {
   return entry;
 }
 
+type YayaRevisionTable = 'children' | 'classes' | 'observations' | 'app_accounts';
+
+/**
+ * 业务行版本（prepare 快照与执行解析同一口径）：`COALESCE(updated_at, created_at)::text`。
+ * 既有 schema 的 updated_at 可空（新建行未更新），不能把“缺失版本前提”当成可跳过核对；
+ * 返回完整微秒精度的文本，避免 JS Date 毫秒截断掩盖同毫秒更新。
+ */
+export async function entityRevisionWithClient(
+  client: TransactionClient,
+  table: YayaRevisionTable,
+  id: string,
+): Promise<string | null> {
+  const row = (
+    await client.query<{ revision: string | null }>(
+      `SELECT COALESCE(updated_at, created_at)::text AS revision FROM ${table} WHERE id = $1`,
+      [id],
+    )
+  ).rows[0];
+  return row?.revision ?? null;
+}
+
 /* =============================== 写工具定义 =============================== */
 
 function observationPreparation(
@@ -259,7 +279,10 @@ function observationPreparation(
       input.context.school_id,
     );
     authorizeOrThrow(input.context.principal, action, facts);
-    return { observation, revision: observation.updated_at };
+    return {
+      observation,
+      revision: await entityRevisionWithClient(input.context.client, 'observations', observation.id),
+    };
   })();
 }
 
@@ -267,10 +290,8 @@ function defineObservationExecute(
   payloadOf: (payload: YayaDomainPayload) => string,
 ): Pick<YayaWriteToolEntry, 'resolveBusinessRevision'> {
   return {
-    resolveBusinessRevision: async (client, context) => {
-      const observation = await getObservationWithClient(client, payloadOf(context.proposal_item.payload));
-      return observation?.updated_at ?? null;
-    },
+    resolveBusinessRevision: async (client, context) =>
+      entityRevisionWithClient(client, 'observations', payloadOf(context.proposal_item.payload)),
   };
 }
 
@@ -331,7 +352,7 @@ const createObservationEntry = defineEntry({
         attachment_id: imageId,
         target_id: child.id,
       })),
-      business_revision: child.updated_at,
+      business_revision: await entityRevisionWithClient(context.client, 'children', child.id),
     };
   },
   execute: async (input) => {
@@ -395,8 +416,7 @@ const createObservationEntry = defineEntry({
       YayaDomainPayload,
       { kind: 'create_observation' }
     >;
-    const child = await getChildWithClient(client, payload.child_id);
-    return child?.updated_at ?? null;
+    return entityRevisionWithClient(client, 'children', payload.child_id);
   },
 });
 
@@ -750,8 +770,10 @@ const confirmObservationEntry = defineEntry({
         kind: 'needs_prepare',
         message: '已重新复核教师修改，请再次确认后归档。',
         notice: { agentReview: review, requires_agent_confirmation: true },
-        prepare_write: async () => {
-          await updateObservationAgentContext(
+        prepare_write: async (client) => {
+          // 单笔条件 UPDATE：旧 review 清除与新 review 保存在同一语句内原子完成
+          await updateObservationAgentContextWithClient(
+            client,
             observation.id,
             savedContext,
             'ai_organized',
@@ -822,22 +844,11 @@ const confirmObservationEntry = defineEntry({
           ? '已复核教师修改，请再次确认后归档。'
           : '教师修改未通过复核，请先澄清或调整内容。',
       notice: { agentReview: review, requires_agent_confirmation: true },
-      prepare_write: async () => {
-        if (currentReview) {
-          await updateObservationAgentContext(
-            observation.id,
-            reviewContext,
-            'ai_organized',
-            observationWriteGuard(observation),
-          );
-          await updateObservationAgentContext(observation.id, savedContext, 'ai_organized', {
-            expectedStatus: 'ai_organized',
-            expectedAgentContext: reviewContext,
-            expectedAiDraft: observation.ai_draft ?? null,
-          });
-          return;
-        }
-        await updateObservationAgentContext(
+      prepare_write: async (client) => {
+        // 单笔条件 UPDATE（guard = 读取时原始上下文）：有旧 review 时同语句替换，
+        // 第二笔保存失败不再可能留下“旧 review 已被清除”的部分提交。
+        await updateObservationAgentContextWithClient(
+          client,
           observation.id,
           savedContext,
           'ai_organized',
@@ -1051,7 +1062,7 @@ const createChildEntry = defineEntry({
         note: input.note ?? null,
       },
       attachment_associations: [],
-      business_revision: klass.updated_at,
+      business_revision: await entityRevisionWithClient(context.client, 'classes', klass.id),
     };
   },
   execute: async (input) => {
@@ -1070,8 +1081,7 @@ const createChildEntry = defineEntry({
   },
   resolveBusinessRevision: async (client, context) => {
     const payload = context.proposal_item.payload as Extract<YayaDomainPayload, { kind: 'create_child' }>;
-    const klass = await getClassWithClient(client, payload.target_class_id);
-    return klass?.updated_at ?? null;
+    return entityRevisionWithClient(client, 'classes', payload.target_class_id);
   },
 });
 
@@ -1117,7 +1127,7 @@ const transferChildEntry = defineEntry({
         effective_date: input.effective_date ?? null,
       },
       attachment_associations: [],
-      business_revision: child.updated_at,
+      business_revision: await entityRevisionWithClient(context.client, 'children', child.id),
     };
   },
   execute: async (input) => {
@@ -1129,7 +1139,7 @@ const transferChildEntry = defineEntry({
         status: 'unchanged',
         effect: 'committed',
         business_object_id: child.id,
-        business_revision: child.updated_at,
+        business_revision: await entityRevisionWithClient(input.client, 'children', child.id),
       };
     }
     const klass = await getClassWithClient(input.client, payload.target_class_id);
@@ -1145,8 +1155,7 @@ const transferChildEntry = defineEntry({
   },
   resolveBusinessRevision: async (client, context) => {
     const payload = context.proposal_item.payload as Extract<YayaDomainPayload, { kind: 'transfer_child' }>;
-    const child = await getChildWithClient(client, payload.child_id);
-    return child?.updated_at ?? null;
+    return entityRevisionWithClient(client, 'children', payload.child_id);
   },
 });
 
@@ -1215,7 +1224,7 @@ const manageClassEntry = defineEntry({
         is_active: input.is_active ?? klass.is_active,
       },
       attachment_associations: [],
-      business_revision: klass.updated_at,
+      business_revision: await entityRevisionWithClient(context.client, 'classes', klass.id),
     };
   },
   execute: async (input) => {
@@ -1258,8 +1267,7 @@ const manageClassEntry = defineEntry({
   resolveBusinessRevision: async (client, context) => {
     const payload = context.proposal_item.payload as Extract<YayaDomainPayload, { kind: 'manage_class' }>;
     if (payload.operation !== 'update' || !payload.class_id) return null;
-    const klass = await getClassWithClient(client, payload.class_id);
-    return klass?.updated_at ?? null;
+    return entityRevisionWithClient(client, 'classes', payload.class_id);
   },
 });
 
@@ -1312,7 +1320,6 @@ const manageTeacherEntry = defineEntry({
       context.school_id,
     );
     authorizeOrThrow(context.principal, 'teacher.assign', facts);
-    const klass = await getClassWithClient(context.client, input.class_id);
     return {
       item_key: '',
       target_id: input.class_id,
@@ -1330,7 +1337,7 @@ const manageTeacherEntry = defineEntry({
         secret_via_secure_control: true,
       },
       attachment_associations: [],
-      business_revision: klass?.updated_at ?? null,
+      business_revision: await entityRevisionWithClient(context.client, 'classes', input.class_id),
     };
   },
   execute: async (input) => {
@@ -1381,8 +1388,7 @@ const manageTeacherEntry = defineEntry({
     }
     const classId = payload.class_ids[0];
     if (!classId) return null;
-    const klass = await getClassWithClient(client, classId);
-    return klass?.updated_at ?? null;
+    return entityRevisionWithClient(client, 'classes', classId);
   },
 });
 
@@ -1406,12 +1412,11 @@ function childWritePreparation(
   })();
 }
 
-function childBusinessRevision(action: AccessAction) {
+function childBusinessRevision() {
   return async (client: TransactionClient, context: { proposal_item: YayaProposalItem }) => {
     const payload = context.proposal_item.payload as { kind: string; child_id?: string };
     if (!payload.child_id) return null;
-    const child = await getChildWithClient(client, payload.child_id);
-    return child?.updated_at ?? null;
+    return entityRevisionWithClient(client, 'children', payload.child_id);
   };
 }
 
@@ -1434,7 +1439,7 @@ const refreshGrowthProfileEntry = defineEntry({
       resource_ref: { kind: 'child', child_id: child.id },
       payload: { kind: 'refresh_growth_profile', child_id: child.id },
       attachment_associations: [],
-      business_revision: child.updated_at,
+      business_revision: await entityRevisionWithClient(context.client, 'children', child.id),
     };
   },
   load: async (input) => {
@@ -1480,7 +1485,7 @@ const refreshGrowthProfileEntry = defineEntry({
     }
     return successReceipt(saved.id, saved.updated_at);
   },
-  resolveBusinessRevision: childBusinessRevision('growth_profile.write'),
+  resolveBusinessRevision: childBusinessRevision(),
 });
 
 const refreshActivitySupportEntry = defineEntry({
@@ -1502,7 +1507,7 @@ const refreshActivitySupportEntry = defineEntry({
       resource_ref: { kind: 'child', child_id: child.id },
       payload: { kind: 'refresh_activity_support', child_id: child.id },
       attachment_associations: [],
-      business_revision: child.updated_at,
+      business_revision: await entityRevisionWithClient(context.client, 'children', child.id),
     };
   },
   load: async (input) => {
@@ -1556,7 +1561,7 @@ const refreshActivitySupportEntry = defineEntry({
     }
     return successReceipt(saved.id, saved.updated_at);
   },
-  resolveBusinessRevision: childBusinessRevision('activity_support.write'),
+  resolveBusinessRevision: childBusinessRevision(),
 });
 
 /* ------------------------------ 归档后追加资料图片 ------------------------------ */

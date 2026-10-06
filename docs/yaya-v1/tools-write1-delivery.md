@@ -186,3 +186,21 @@ type YayaOperationsExecutionResult =
 - 开发过程中一次 shell 超时留下的同标签容器已按容器 ID + 所有权标签（`yaya.qa-seed1`）核验后删除，
   未按端口/名称前缀误杀其他资源。
 - 未读 `.env`，未连托管库，未调用真实 provider/搜索/S3；模型守门命中 0。
+
+## 8. R1 返修（2026-10-06，主评审三 P1）
+
+主评审判定本候选需 R1；A（模型前写保护）、B（needs_prepare 批准前提）、C（锁后版本核对）
+三个 P1 已在同分支追加修复，语义变化：
+
+- operations POST 在**任何模型派发/准备态写入之前**先用私有写守门核验可信 Origin、
+  会话绑定 CSRF、有效账号与原会话，并用 DATA `verifyApprovedOperations` 核验原批准前提
+  （含目标行锁与锁后版本）；短事务结束后才 load/compute，最终保存仍新鲜重核。
+- `needs_prepare` 的准备态写入必须再次通过同一 `verifyApprovedOperations`，并用同一个
+  client 的单笔带前提 UPDATE 原子完成（清旧 review 与存新 review 同一语句）；
+  失效批准/换会话/同权转班/版本变化一律拒绝且上下文逐字节不变。
+- 业务版本口径改为 `COALESCE(updated_at, created_at)::text`（child/observation/class/teacher），
+  执行前按稳定锁序（children→classes→observations→teacher accounts）取得目标行锁后再核对；
+  锁等待后按当前时间复核批准到期与会话有效性。
+
+RED→GREEN、分层证据、回归与 NOT_RUN 见 `docs/yaya-v1/tools-write1-r1-delivery.md`
+（新增 `scripts/yaya/check-tools-write-r1-db.ts` 85/85；原 112/134 未改断言且全部保留）。

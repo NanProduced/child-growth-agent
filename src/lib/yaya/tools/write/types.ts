@@ -82,10 +82,12 @@ export type YayaWriteComputeResult =
       message: string;
       notice?: Readonly<Record<string, unknown>>;
       /**
-       * 准备态写入（如教师修改复核结果）：在批准不被消费的前提下，
-       * 经现有业务写守门（runBusinessWrite）在同一观察上原子保存。
+       * 准备态写入（如教师修改复核结果）：调用方已在同一短事务内用
+       * `verifyApprovedOperations` 核验原批准与原始前提，并把同一个 client 传入；
+       * 实现必须用单笔条件 UPDATE（清旧 review 与存新 review 原子完成），
+       * 不得自行开事务、不得消费正式归档批准。
        */
-      prepare_write?: () => Promise<void>;
+      prepare_write?: (client: TransactionClient) => Promise<void>;
     };
 
 /** execute 上下文：批准已消费判定通过后，在同一 TransactionClient 内落业务 */
