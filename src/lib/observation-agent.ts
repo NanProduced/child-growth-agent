@@ -12,6 +12,7 @@ import type {
   FollowUpAction,
   FollowUpDecision,
   Observation,
+  ObservationDraft,
 } from "./types";
 
 /**
@@ -93,13 +94,21 @@ type ObservationAgentInput = {
   invoke?: typeof invokeLlm;
 };
 
-export async function processObservationAgent({
+/**
+ * 模型计算（事务外，只读观察快照）：返回应执行的保存意图，不写业务行。
+ * TOOLS1 批准执行时先用本函数在事务外完成模型等待，再按同一 guard 在同一事务内落账。
+ */
+export type ObservationAgentComputation =
+  | { kind: "needs_input"; agent_context: AgentContext }
+  | { kind: "draft"; ai_draft: ObservationDraft; model: string };
+
+export async function computeObservationAgent({
   observation,
   child,
   currentDate,
   forwardHeaders,
   invoke = invokeLlm,
-}: ObservationAgentInput): Promise<Observation> {
+}: ObservationAgentInput): Promise<ObservationAgentComputation> {
   const baseParams = {
     childName: child.name,
     childGender: child.gender,
@@ -112,18 +121,11 @@ export async function processObservationAgent({
     forwardHeaders,
   };
   const context = observation.agent_context;
-  // 服务端快照：模型返回后的写入必须仍匹配它
-  const writeGuard = observationWriteGuard(observation);
 
   if (!shouldProceedToDraft(context)) {
     const judged = await judgeFollowUp({ ...baseParams, agentContext: context }, invoke);
     if (judged.decision.decision === "ask" && (context?.follow_up?.round ?? 0) < 2) {
-      return updateObservationAgentContext(
-        observation.id,
-        nextFollowUpContext(context, judged.decision),
-        "needs_input",
-        writeGuard,
-      );
+      return { kind: "needs_input", agent_context: nextFollowUpContext(context, judged.decision) };
     }
   }
 
@@ -131,5 +133,21 @@ export async function processObservationAgent({
     { ...baseParams, agentContext: context },
     invoke,
   );
-  return updateObservationAiDraft(observation.id, draft, model, writeGuard);
+  return { kind: "draft", ai_draft: draft, model };
+}
+
+export async function processObservationAgent(input: ObservationAgentInput): Promise<Observation> {
+  const { observation } = input;
+  // 服务端快照：模型返回后的写入必须仍匹配它
+  const writeGuard = observationWriteGuard(observation);
+  const computed = await computeObservationAgent(input);
+  if (computed.kind === "needs_input") {
+    return updateObservationAgentContext(
+      observation.id,
+      computed.agent_context,
+      "needs_input",
+      writeGuard,
+    );
+  }
+  return updateObservationAiDraft(observation.id, computed.ai_draft, computed.model, writeGuard);
 }

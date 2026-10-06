@@ -408,29 +408,38 @@ async function lockTeacherAccount(
   }
 }
 
-/** 启停教师：停用原子撤销该账号全部会话；响应不包含任何密码/哈希/令牌 */
-export async function setTeacherStatus(
+/**
+ * 启停教师的显式 client 原语（TOOLS1 批准执行同一事务内使用）：
+ * 停用原子撤销该账号全部会话；响应不包含任何密码/哈希/令牌。
+ */
+export async function setTeacherStatusWithClient(
+  client: TransactionClient,
   accountId: string,
   status: AccountStatus,
 ): Promise<{ teacher: TeacherAccountSummary; revokedSessionCount: number }> {
   asStatus(status);
-  return safeTransaction(async (client) => {
-    await lockTeacherAccount(client, accountId);
-    // $2 只出现一次并显式定型，避免同一参数被推导出 varchar/text 两种类型
-    await client.query(
-      `WITH target AS (SELECT $2::varchar AS status)
-       UPDATE app_accounts a
-          SET status = t.status,
-              disabled_at = CASE WHEN t.status = 'disabled' THEN now() ELSE NULL END,
-              updated_at = now()
-         FROM target t
-        WHERE a.id = $1`,
-      [accountId, status],
-    );
-    const revoked = status === "disabled" ? await revokeAllSessionsWithClient(client, accountId, "disabled") : 0;
-    const teacher = await loadTeacherSummaryWithClient(client, accountId);
-    return { teacher, revokedSessionCount: revoked };
-  });
+  await lockTeacherAccount(client, accountId);
+  // $2 只出现一次并显式定型，避免同一参数被推导出 varchar/text 两种类型
+  await client.query(
+    `WITH target AS (SELECT $2::varchar AS status)
+     UPDATE app_accounts a
+        SET status = t.status,
+            disabled_at = CASE WHEN t.status = 'disabled' THEN now() ELSE NULL END,
+            updated_at = now()
+       FROM target t
+      WHERE a.id = $1`,
+    [accountId, status],
+  );
+  const revoked = status === "disabled" ? await revokeAllSessionsWithClient(client, accountId, "disabled") : 0;
+  const teacher = await loadTeacherSummaryWithClient(client, accountId);
+  return { teacher, revokedSessionCount: revoked };
+}
+
+export async function setTeacherStatus(
+  accountId: string,
+  status: AccountStatus,
+): Promise<{ teacher: TeacherAccountSummary; revokedSessionCount: number }> {
+  return safeTransaction((client) => setTeacherStatusWithClient(client, accountId, status));
 }
 
 /** 重置密码：原子更新哈希并撤销全部会话（哈希在事务外计算，避免长时间持锁） */
@@ -452,27 +461,52 @@ export async function resetTeacherPassword(
   });
 }
 
+/** 分配任教的显式 client 原语：幂等；撤销后重新分配会新增一条当前关系，历史行保留 */
+export async function assignTeacherClassWithClient(
+  client: TransactionClient,
+  accountId: string,
+  classId: string,
+  actorId: string,
+): Promise<TeacherAccountSummary> {
+  await lockTeacherAccount(client, accountId);
+  const klass = await client.query<{ id: string }>(`SELECT id FROM classes WHERE id = $1`, [classId]);
+  if (klass.rowCount === 0) throw new ClassNotFoundError();
+  await client.query(
+    `WITH active AS (
+       SELECT id FROM teacher_class_assignments
+        WHERE account_id = $1 AND class_id = $2 AND removed_at IS NULL
+     )
+     INSERT INTO teacher_class_assignments (account_id, class_id, assigned_by_account_id)
+     SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM active)`,
+    [accountId, classId, actorId],
+  );
+  return loadTeacherSummaryWithClient(client, accountId);
+}
+
 /** 分配任教：幂等；撤销后重新分配会新增一条当前关系，历史行保留 */
 export async function assignTeacherClass(
   accountId: string,
   classId: string,
   actorId: string,
 ): Promise<TeacherAccountSummary> {
-  return safeTransaction(async (client) => {
-    await lockTeacherAccount(client, accountId);
-    const klass = await client.query<{ id: string }>(`SELECT id FROM classes WHERE id = $1`, [classId]);
-    if (klass.rowCount === 0) throw new ClassNotFoundError();
-    await client.query(
-      `WITH active AS (
-         SELECT id FROM teacher_class_assignments
-          WHERE account_id = $1 AND class_id = $2 AND removed_at IS NULL
-       )
-       INSERT INTO teacher_class_assignments (account_id, class_id, assigned_by_account_id)
-       SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM active)`,
-      [accountId, classId, actorId],
-    );
-    return loadTeacherSummaryWithClient(client, accountId);
-  });
+  return safeTransaction((client) => assignTeacherClassWithClient(client, accountId, classId, actorId));
+}
+
+/** 撤销任教的显式 client 原语：只写 removed_at，保留历史；重复撤销幂等 */
+export async function unassignTeacherClassWithClient(
+  client: TransactionClient,
+  accountId: string,
+  classId: string,
+  actorId: string,
+): Promise<TeacherAccountSummary> {
+  await lockTeacherAccount(client, accountId);
+  await client.query(
+    `UPDATE teacher_class_assignments
+        SET removed_at = now(), removed_by_account_id = $3
+      WHERE account_id = $1 AND class_id = $2 AND removed_at IS NULL`,
+    [accountId, classId, actorId],
+  );
+  return loadTeacherSummaryWithClient(client, accountId);
 }
 
 /** 撤销任教：只写 removed_at，保留历史；不改变幼儿归属或观察快照；重复撤销幂等 */
@@ -481,14 +515,19 @@ export async function unassignTeacherClass(
   classId: string,
   actorId: string,
 ): Promise<TeacherAccountSummary> {
-  return safeTransaction(async (client) => {
-    await lockTeacherAccount(client, accountId);
-    await client.query(
-      `UPDATE teacher_class_assignments
-          SET removed_at = now(), removed_by_account_id = $3
-        WHERE account_id = $1 AND class_id = $2 AND removed_at IS NULL`,
-      [accountId, classId, actorId],
-    );
-    return loadTeacherSummaryWithClient(client, accountId);
-  });
+  return safeTransaction((client) => unassignTeacherClassWithClient(client, accountId, classId, actorId));
+}
+
+/** 教师账号当前修订（批准业务版本比较用）；账号不存在返回 null，不伪造版本 */
+export async function getTeacherAccountRevisionWithClient(
+  client: TransactionClient,
+  accountId: string,
+): Promise<string | null> {
+  const result = await client.query<{ updated_at: Date | string | null }>(
+    "SELECT updated_at FROM app_accounts WHERE id = $1 AND role = 'teacher'",
+    [accountId],
+  );
+  const row = result.rows[0];
+  if (!row || row.updated_at === null) return null;
+  return isoDate(row.updated_at);
 }

@@ -114,3 +114,33 @@
 `recheck_dependencies` 仅供服务端按当前授权重核；观察详情不把混合内容整体标为
 `child_fact`，原文/确认稿/AI 草稿/工作流分别标注，`formal_evidence_eligible`
 复用 `basisIsFormalEvidence` 口径；成长小结/活动支持的依据观察并入重核依赖。
+
+## 8. TOOLS1 补列（2026-10-06，真实写工具与批准执行已落地）
+
+> 本节由 `codex/yaya-tools1` 追加：第 2/3 节写工具的**实施状态**；实现与验收见
+> `docs/yaya-v1/tools-write1-delivery.md`。原有阶段/角色/范围口径不变。
+
+实现位置：`src/lib/yaya/tools/write/**`（12 个写工具、prepare/load/compute/execute 适配、
+`createYayaToolkit` 最小工厂）与 `/api/yaya/operations` **POST**（GET 保留）。
+读取直接复用 READ1 `definitions`/`readTool`，不重新实现。
+
+| # | 工具 | 实施状态 | 结果语义 |
+|---|---|---|---|
+| W1 | `create_child` | 已实现（commit） | 准备态提案 → 批准 → 同事务建档；目标班级必须存在且未停用 |
+| W2 | `create_observation` | 已实现（commit） | 发生时班级前提同事务复核；附图与观察同一事务关联；raw_text 不改写 |
+| W3 | `organize_observation` | 已实现（prepare） | 模型事务外；保存带原状态/上下文/草稿 guard；已归档拒绝 |
+| W4 | `follow_up_observation` | 已实现（prepare） | 回答/跳过/停止同一事务先存回答再整理 |
+| W5 | `confirm_observation` | 已实现（commit） | 教师修改需匹配复核 accept；否则 `needs_prepare`（批准不消费、不谎称归档）；指南决定同事务 |
+| W6 | `guide_decision` | 已实现（suggest=prepare，其余 commit） | AI 建议失败仍落 `last_attempt{ok:false}`；决定全有或全无 |
+| W7 | `refresh_growth_profile` | 已实现（commit） | 生成快照与锁后重读依据集比较，变化零写入 |
+| W8 | `refresh_activity_support` | 已实现（commit） | 同上；无已确认观察停在准备态 |
+| A1/A2 | `manage_class` | 已实现（commit） | 仅管理员；历史保护复用原事务 |
+| A3 | `transfer_child` | 已实现（commit） | 仅管理员；已在目标班 `unchanged`，停用班拒绝 |
+| A4/A6 | `manage_teacher` 创建/重置 | **安全控件入口** | 不注册为可执行写工具；密码只进现有管理路由；`projectTeacherSecureControlIntent` 只投影控件与目标，不把打开窗口当已创建/已重置 |
+| A5/A7/A8 | `manage_teacher` 启停/分配/撤销 | 已实现（commit） | 仅管理员；停用原子撤销会话 |
+| — | 观察创建附图 / 归档后追加资料 | 已实现（commit） | 创建附图随业务事务；追加走宿主 confirmed_at + revision CAS + 审计；不改原文/确认稿 |
+| — | 原操作回执查询 | 已实现（GET，DATA1） | 重复执行返回原回执；执行中/未知只按原 operation_id 查询 |
+
+参数校验与模型可见 JSON Schema 同源（`zodToolParams`，strict）；模型不能自报身份/批准/SQL；
+`approved`/`principal`/`role`/`scope`/`password` 一律拒绝。执行入口只认
+`{ approval_id, operation_ids }`，提交者身份/会话/CSRF 由服务端解析。

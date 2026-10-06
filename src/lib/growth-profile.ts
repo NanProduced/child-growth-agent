@@ -126,11 +126,21 @@ export function buildGrowthProfileFallback(
   };
 }
 
-export async function updateGrowthProfileAfterConfirmation(
+export interface GrowthProfileUpdatePlan {
+  growth_profile: GrowthProfile;
+  expected_confirmed_ids: string[];
+}
+
+/**
+ * 成长小结的模型生成与依据集快照（事务外）：返回待保存的计划，不写业务行。
+ * TOOLS1 批准执行时先用本函数完成模型等待，再在同一事务内调用
+ * `updateChildGrowthProfileSummaryWithClient` 落账。
+ */
+export async function generateGrowthProfileUpdate(
   child: Child,
   observations: Observation[],
   options: ProfileUpdateOptions = {},
-): Promise<GrowthProfile> {
+): Promise<GrowthProfileUpdatePlan> {
   const confirmed = confirmedObservations(observations);
   if (confirmed.length === 0) {
     throw new Error("成长档案更新需要至少一条已确认观察");
@@ -157,14 +167,22 @@ export async function updateGrowthProfileAfterConfirmation(
     ai_model: generated.model,
     updated_at: new Date().toISOString(),
   };
+  return { growth_profile: growthProfile, expected_confirmed_ids: expectedIds };
+}
 
+export async function updateGrowthProfileAfterConfirmation(
+  child: Child,
+  observations: Observation[],
+  options: ProfileUpdateOptions = {},
+): Promise<GrowthProfile> {
+  const plan = await generateGrowthProfileUpdate(child, observations, options);
   // 保存层原子条件：写入时数据库中的已确认观察集合必须仍等于本次生成使用的快照
   const saved = await (options.save ?? updateChildGrowthProfileSummary)(
     child.id,
-    growthProfile,
-    expectedIds,
+    plan.growth_profile,
+    plan.expected_confirmed_ids,
   );
-  return saved.growth_profile ?? growthProfile;
+  return saved.growth_profile ?? plan.growth_profile;
 }
 
 export async function updateGrowthProfileSafely(

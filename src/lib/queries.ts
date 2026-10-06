@@ -192,12 +192,56 @@ export async function getClass(id: string): Promise<SchoolClass | null> {
   return row ? mapClass(row.data) : null;
 }
 
+/** 显式 client 原语：同一业务事务内读取班级（与 getClass 同形状） */
+export async function getClassWithClient(
+  client: TransactionClient,
+  id: string
+): Promise<SchoolClass | null> {
+  const row = (await client.query<{ data: Row }>(
+    "SELECT to_jsonb(classes.*) AS data FROM classes WHERE id = $1",
+    [id]
+  )).rows[0];
+  return row ? mapClass(row.data) : null;
+}
+
+/** 显式 client 原语：同一业务事务内读取幼儿（与 getChild 同形状） */
+export async function getChildWithClient(
+  client: TransactionClient,
+  id: string
+): Promise<Child | null> {
+  const row = (await client.query<{ data: Row }>(`${CHILD_SELECT} WHERE c.id = $1`, [id])).rows[0];
+  return row ? mapChild(row.data) : null;
+}
+
+/** 显式 client 原语：同一业务事务内读取观察（与 getObservation 同形状） */
+export async function getObservationWithClient(
+  client: TransactionClient,
+  id: string
+): Promise<Observation | null> {
+  const row = (await client.query<{ data: Row }>(`${OBSERVATION_SELECT} WHERE o.id = $1`, [id]))
+    .rows[0];
+  return row ? mapObservation(row.data) : null;
+}
+
 /** 按名称 + 学年查找班级；同学年重名由校验与唯一索引共同阻止 */
 export async function findClassByName(name: string, schoolYear: string): Promise<SchoolClass | null> {
   const row = await queryOne<{ data: Row }>(
     "SELECT to_jsonb(classes.*) AS data FROM classes WHERE name = $1 AND school_year = $2",
     [name, schoolYear]
   );
+  return row ? mapClass(row.data) : null;
+}
+
+/** 显式 client 原语：同一业务事务内按名称 + 学年查班级 */
+export async function findClassByNameWithClient(
+  client: TransactionClient,
+  name: string,
+  schoolYear: string
+): Promise<SchoolClass | null> {
+  const row = (await client.query<{ data: Row }>(
+    "SELECT to_jsonb(classes.*) AS data FROM classes WHERE name = $1 AND school_year = $2",
+    [name, schoolYear]
+  )).rows[0];
   return row ? mapClass(row.data) : null;
 }
 
@@ -211,14 +255,17 @@ export async function findClassesByName(name: string): Promise<SchoolClass[]> {
   return rows.map((r) => mapClass(r.data));
 }
 
-export async function createClass(input: {
-  name: string;
-  stage: ClassStage;
-  school_year: string;
-  is_active?: boolean;
-}): Promise<SchoolClass> {
+export async function createClassWithClient(
+  client: TransactionClient,
+  input: {
+    name: string;
+    stage: ClassStage;
+    school_year: string;
+    is_active?: boolean;
+  }
+): Promise<SchoolClass> {
   // 每个参数只出现一次并显式定型，避免 Postgres 对同一参数推导出 varchar / text 两种类型
-  const row = await mutationQueryOne<{ data: Row }>(
+  const row = (await client.query<{ data: Row }>(
     `WITH input AS (
        SELECT $1::varchar AS name, $2::varchar AS stage, $3::varchar AS school_year, $4::boolean AS is_active
      )
@@ -230,9 +277,18 @@ export async function createClass(input: {
       )
      RETURNING to_jsonb(classes.*) AS data`,
     [input.name, input.stage, input.school_year, input.is_active ?? true]
-  );
+  )).rows[0];
   if (!row) throw new Error(`同学年下已存在同名班级「${input.name}」`);
   return mapClass(row.data);
+}
+
+export async function createClass(input: {
+  name: string;
+  stage: ClassStage;
+  school_year: string;
+  is_active?: boolean;
+}): Promise<SchoolClass> {
+  return withTransaction((client) => createClassWithClient(client, input));
 }
 
 /**
@@ -256,7 +312,8 @@ export class ClassHistoryProtectedError extends Error {
  * - 事务只覆盖这一次更新，不引入新的锁顺序（children→observations 既有顺序不变）。
  * 无学段/学年变化的改名、停用走普通更新，不额外加锁。
  */
-export async function updateClass(
+export async function updateClassWithClient(
+  client: TransactionClient,
   id: string,
   patch: { name?: string; stage?: ClassStage; school_year?: string; is_active?: boolean }
 ): Promise<SchoolClass | null> {
@@ -270,39 +327,44 @@ export async function updateClass(
   if (patch.stage !== undefined) set("stage", patch.stage);
   if (patch.school_year !== undefined) set("school_year", patch.school_year);
   if (patch.is_active !== undefined) set("is_active", patch.is_active);
-  if (sets.length === 0) return getClass(id);
+  if (sets.length === 0) return getClassWithClient(client, id);
   sets.push("updated_at = now()");
   const updateSql = `UPDATE classes SET ${sets.join(", ")} WHERE id = $1 RETURNING to_jsonb(classes.*) AS data`;
 
   const changesStageOrYear = patch.stage !== undefined || patch.school_year !== undefined;
   if (!changesStageOrYear) {
-    const row = await mutationQueryOne<{ data: Row }>(updateSql, params);
+    const row = (await client.query<{ data: Row }>(updateSql, params)).rows[0];
     return row ? mapClass(row.data) : null;
   }
 
-  return withTransaction(async (client) => {
-    const locked = await client.query<{ stage: string; school_year: string }>(
-      "SELECT stage, school_year FROM classes WHERE id = $1 FOR UPDATE",
+  const locked = await client.query<{ stage: string; school_year: string }>(
+    "SELECT stage, school_year FROM classes WHERE id = $1 FOR UPDATE",
+    [id]
+  );
+  if (locked.rowCount === 0) return null;
+  const current = locked.rows[0];
+  const stageChanged = patch.stage !== undefined && patch.stage !== current.stage;
+  const yearChanged =
+    patch.school_year !== undefined && patch.school_year !== current.school_year;
+  if (stageChanged || yearChanged) {
+    const history = await client.query<{ has_history: boolean }>(
+      `SELECT (
+         EXISTS (SELECT 1 FROM child_class_enrollments WHERE class_id = $1)
+         OR EXISTS (SELECT 1 FROM observations WHERE class_id = $1)
+       ) AS has_history`,
       [id]
     );
-    if (locked.rowCount === 0) return null;
-    const current = locked.rows[0];
-    const stageChanged = patch.stage !== undefined && patch.stage !== current.stage;
-    const yearChanged =
-      patch.school_year !== undefined && patch.school_year !== current.school_year;
-    if (stageChanged || yearChanged) {
-      const history = await client.query<{ has_history: boolean }>(
-        `SELECT (
-           EXISTS (SELECT 1 FROM child_class_enrollments WHERE class_id = $1)
-           OR EXISTS (SELECT 1 FROM observations WHERE class_id = $1)
-         ) AS has_history`,
-        [id]
-      );
-      if (history.rows[0]?.has_history) throw new ClassHistoryProtectedError();
-    }
-    const updated = await client.query<{ data: Row }>(updateSql, params);
-    return updated.rowCount === 0 ? null : mapClass(updated.rows[0].data);
-  });
+    if (history.rows[0]?.has_history) throw new ClassHistoryProtectedError();
+  }
+  const updated = await client.query<{ data: Row }>(updateSql, params);
+  return updated.rowCount === 0 ? null : mapClass(updated.rows[0].data);
+}
+
+export async function updateClass(
+  id: string,
+  patch: { name?: string; stage?: ClassStage; school_year?: string; is_active?: boolean }
+): Promise<SchoolClass | null> {
+  return withTransaction((client) => updateClassWithClient(client, id, patch));
 }
 
 /** 儿童当前（未结束）班级 id；无归属返回 null */
@@ -330,42 +392,51 @@ export async function listEnrollments(childId: string): Promise<ChildClassEnroll
  * 分班 / 转班：单条语句内结束旧归属、建立新归属并同步兼容字段 class_name（原子执行）。
  * 旧归属只写 end_date，历史关系不删除。
  */
+export async function enrollChildInClassWithClient(
+  client: TransactionClient,
+  input: {
+    child_id: string;
+    class_id: string;
+    start_date?: string;
+  }
+): Promise<{ closed: number; opened: number }> {
+  // 默认分班日期按服务端统一口径取亚洲/上海日历日，避免 UTC 跨日导致归属日期错位
+  const startDate = input.start_date ?? isoDateInShanghai();
+  // 与观察保存共用“先锁 children 行”的顺序：保存边界读归属集合时会 FOR SHARE 同一行，
+  // 从而串行化“读集合→写观察”与“结束旧归属→新增归属”，消除新增重叠记录的窗口。
+  const locked = await client.query("SELECT id FROM children WHERE id = $1 FOR UPDATE", [
+    input.child_id,
+  ]);
+  if (locked.rowCount === 0) throw new Error("幼儿档案不存在");
+  const result = await client.query<{ closed: number; opened: number }>(
+    `WITH closed AS (
+       UPDATE child_class_enrollments
+          SET end_date = GREATEST(start_date, ($2::date - 1))
+        WHERE child_id = $1::text AND end_date IS NULL
+        RETURNING id
+     ), opened AS (
+       INSERT INTO child_class_enrollments (child_id, class_id, start_date)
+       VALUES ($1::text, $3::text, $2::date)
+       RETURNING id
+     ), synced AS (
+       UPDATE children
+          SET class_name = (SELECT name FROM classes WHERE id = $3::text), updated_at = now()
+        WHERE id = $1::text
+     )
+     SELECT (SELECT count(*) FROM closed)::int AS closed,
+            (SELECT count(*) FROM opened)::int AS opened`,
+    [input.child_id, startDate, input.class_id]
+  );
+  const row = result.rows[0];
+  return { closed: row?.closed ?? 0, opened: row?.opened ?? 0 };
+}
+
 export async function enrollChildInClass(input: {
   child_id: string;
   class_id: string;
   start_date?: string;
 }): Promise<{ closed: number; opened: number }> {
-  // 默认分班日期按服务端统一口径取亚洲/上海日历日，避免 UTC 跨日导致归属日期错位
-  const startDate = input.start_date ?? isoDateInShanghai();
-  // 与观察保存共用“先锁 children 行”的顺序：保存边界读归属集合时会 FOR SHARE 同一行，
-  // 从而串行化“读集合→写观察”与“结束旧归属→新增归属”，消除新增重叠记录的窗口。
-  return withTransaction(async (client) => {
-    const locked = await client.query("SELECT id FROM children WHERE id = $1 FOR UPDATE", [
-      input.child_id,
-    ]);
-    if (locked.rowCount === 0) throw new Error("幼儿档案不存在");
-    const result = await client.query<{ closed: number; opened: number }>(
-      `WITH closed AS (
-         UPDATE child_class_enrollments
-            SET end_date = GREATEST(start_date, ($2::date - 1))
-          WHERE child_id = $1::text AND end_date IS NULL
-          RETURNING id
-       ), opened AS (
-         INSERT INTO child_class_enrollments (child_id, class_id, start_date)
-         VALUES ($1::text, $3::text, $2::date)
-         RETURNING id
-       ), synced AS (
-         UPDATE children
-            SET class_name = (SELECT name FROM classes WHERE id = $3::text), updated_at = now()
-          WHERE id = $1::text
-       )
-       SELECT (SELECT count(*) FROM closed)::int AS closed,
-              (SELECT count(*) FROM opened)::int AS opened`,
-      [input.child_id, startDate, input.class_id]
-    );
-    const row = result.rows[0];
-    return { closed: row?.closed ?? 0, opened: row?.opened ?? 0 };
-  });
+  return withTransaction((client) => enrollChildInClassWithClient(client, input));
 }
 
 export async function listChildren(): Promise<Child[]> {
@@ -394,17 +465,20 @@ export async function getClassChildren(classId: string): Promise<Child[]> {
   return rows.map((r) => mapChild(r.data));
 }
 
-export async function createChild(input: {
-  name: string;
-  gender: string;
-  birth_date: string;
-  class_id: string;
-  avatar_emoji?: string;
-  note?: string;
-}): Promise<Child> {
+export async function createChildWithClient(
+  client: TransactionClient,
+  input: {
+    name: string;
+    gender: string;
+    birth_date: string;
+    class_id: string;
+    avatar_emoji?: string;
+    note?: string;
+  }
+): Promise<Child> {
   // 首次分班日期与转班、观察默认日期同一口径：亚洲/上海日历日，不用数据库 CURRENT_DATE
   const enrollmentStart = isoDateInShanghai();
-  const row = await mutationQueryOne<{ data: Row }>(
+  const row = (await client.query<{ data: Row }>(
     `WITH klass AS (
        SELECT id, name FROM classes WHERE id = $4
      ), new_child AS (
@@ -426,10 +500,21 @@ export async function createChild(input: {
       input.note ?? null,
       enrollmentStart,
     ]
-  );
+  )).rows[0];
   if (!row) throw new Error("新增幼儿失败：班级不存在或写入后未能读取记录");
   const created = str(row.data.id);
-  return (await getChild(created)) ?? mapChild(row.data);
+  return (await getChildWithClient(client, created)) ?? mapChild(row.data);
+}
+
+export async function createChild(input: {
+  name: string;
+  gender: string;
+  birth_date: string;
+  class_id: string;
+  avatar_emoji?: string;
+  note?: string;
+}): Promise<Child> {
+  return withTransaction((client) => createChildWithClient(client, input));
 }
 
 /**
@@ -497,7 +582,8 @@ async function readConfirmedEvidenceIds(
  * 同时移除旧的 is_fallback 标记。模型调用在事务外；保存时先锁儿童行，
  * 锁后重读证据集合并与生成快照比较，匹配才做 JSONB 定向更新。
  */
-export async function updateChildGrowthProfileSummary(
+export async function updateChildGrowthProfileSummaryWithClient(
+  client: TransactionClient,
   id: string,
   growth_profile: GrowthProfile,
   expectedConfirmedIds: string[],
@@ -506,22 +592,30 @@ export async function updateChildGrowthProfileSummary(
   delete fields.activity_support;
   const now = new Date().toISOString();
   const expected = [...expectedConfirmedIds].sort();
-  return withTransaction(async (client) => {
-    await lockChild(client, id);
-    const currentIds = await readConfirmedEvidenceIds(client, id);
-    if (!sameIdSet(currentIds, expected)) throw new StaleEvidenceError();
-    const row = await client.query<{ data: Row }>(
-      `UPDATE children
-       SET growth_profile = (coalesce(growth_profile, '{}'::jsonb) - 'is_fallback') || $2::jsonb,
-           updated_at = $3
-       WHERE id = $1
-         AND ${confirmedEvidenceMatches(4)}
-       RETURNING to_jsonb(children.*) AS data`,
-      [id, JSON.stringify(fields), now, JSON.stringify(expected)],
-    );
-    if (row.rowCount === 0) throw new StaleEvidenceError();
-    return mapChild(row.rows[0].data);
-  });
+  await lockChild(client, id);
+  const currentIds = await readConfirmedEvidenceIds(client, id);
+  if (!sameIdSet(currentIds, expected)) throw new StaleEvidenceError();
+  const row = await client.query<{ data: Row }>(
+    `UPDATE children
+     SET growth_profile = (coalesce(growth_profile, '{}'::jsonb) - 'is_fallback') || $2::jsonb,
+         updated_at = $3
+     WHERE id = $1
+       AND ${confirmedEvidenceMatches(4)}
+     RETURNING to_jsonb(children.*) AS data`,
+    [id, JSON.stringify(fields), now, JSON.stringify(expected)],
+  );
+  if (row.rowCount === 0) throw new StaleEvidenceError();
+  return mapChild(row.rows[0].data);
+}
+
+export async function updateChildGrowthProfileSummary(
+  id: string,
+  growth_profile: GrowthProfile,
+  expectedConfirmedIds: string[],
+): Promise<Child> {
+  return withTransaction((client) =>
+    updateChildGrowthProfileSummaryWithClient(client, id, growth_profile, expectedConfirmedIds),
+  );
 }
 
 /**
@@ -529,7 +623,8 @@ export async function updateChildGrowthProfileSummary(
  * 仅在档案为空时用保守 fallback 作为底座。
  * 与小结保存共享同一儿童锁事务与锁后重读比较。
  */
-export async function updateChildActivitySupport(
+export async function updateChildActivitySupportWithClient(
+  client: TransactionClient,
   id: string,
   activitySupport: ActivitySupport,
   fallbackProfile: GrowthProfile | null,
@@ -537,33 +632,48 @@ export async function updateChildActivitySupport(
 ): Promise<Child> {
   const now = new Date().toISOString();
   const expected = [...expectedConfirmedIds].sort();
-  return withTransaction(async (client) => {
-    await lockChild(client, id);
-    const currentIds = await readConfirmedEvidenceIds(client, id);
-    if (!sameIdSet(currentIds, expected)) throw new StaleEvidenceError();
-    const row = await client.query<{ data: Row }>(
-      `UPDATE children
-       SET growth_profile = jsonb_set(
-             coalesce(growth_profile, $2::jsonb),
-             '{activity_support}',
-             $3::jsonb,
-             true
-           ),
-           updated_at = $4
-       WHERE id = $1
-         AND ${confirmedEvidenceMatches(5)}
-       RETURNING to_jsonb(children.*) AS data`,
-      [
-        id,
-        JSON.stringify(fallbackProfile ?? {}),
-        JSON.stringify(activitySupport),
-        now,
-        JSON.stringify(expected),
-      ],
-    );
-    if (row.rowCount === 0) throw new StaleEvidenceError();
-    return mapChild(row.rows[0].data);
-  });
+  await lockChild(client, id);
+  const currentIds = await readConfirmedEvidenceIds(client, id);
+  if (!sameIdSet(currentIds, expected)) throw new StaleEvidenceError();
+  const row = await client.query<{ data: Row }>(
+    `UPDATE children
+     SET growth_profile = jsonb_set(
+           coalesce(growth_profile, $2::jsonb),
+           '{activity_support}',
+           $3::jsonb,
+           true
+         ),
+         updated_at = $4
+     WHERE id = $1
+       AND ${confirmedEvidenceMatches(5)}
+     RETURNING to_jsonb(children.*) AS data`,
+    [
+      id,
+      JSON.stringify(fallbackProfile ?? {}),
+      JSON.stringify(activitySupport),
+      now,
+      JSON.stringify(expected),
+    ],
+  );
+  if (row.rowCount === 0) throw new StaleEvidenceError();
+  return mapChild(row.rows[0].data);
+}
+
+export async function updateChildActivitySupport(
+  id: string,
+  activitySupport: ActivitySupport,
+  fallbackProfile: GrowthProfile | null,
+  expectedConfirmedIds: string[],
+): Promise<Child> {
+  return withTransaction((client) =>
+    updateChildActivitySupportWithClient(
+      client,
+      id,
+      activitySupport,
+      fallbackProfile,
+      expectedConfirmedIds,
+    ),
+  );
 }
 
 export async function countObservationsByChild(): Promise<Record<string, number>> {
@@ -659,6 +769,101 @@ export const BROKEN_ENROLLMENTS_SQL = `SELECT count(*)::int AS count
  * 任一项变化抛 ObservationContextConflictError（路由 409），不依赖 INSERT 外键检查，
  * 不静默换班、不伪装 teacher_confirmed。模型调用不在此事务内。
  */
+export async function createObservationWithClient(
+  client: TransactionClient,
+  input: {
+    child_id: string;
+    observed_at: string;
+    context: string | null;
+    raw_text: string;
+    is_demo: boolean;
+    class_context_snapshot: ObservationClassContextSnapshot;
+    premise: ObservationClassPremise;
+  }
+): Promise<Observation> {
+  const snapshot = input.class_context_snapshot;
+  if (snapshot.class_id !== input.premise.class_id) {
+    throw new ObservationContextConflictError("发生时班级前提与快照不一致，请重新核对后再保存。");
+  }
+  const childLocked = await client.query(
+    "SELECT id FROM children WHERE id = $1 FOR SHARE",
+    [input.child_id]
+  );
+  if (childLocked.rowCount === 0) {
+    throw new ObservationContextConflictError("幼儿档案不存在，请重新核对后再保存。");
+  }
+
+  const locked = await client.query<{ data: Row }>(
+    "SELECT to_jsonb(classes.*) AS data FROM classes WHERE id = $1 FOR SHARE",
+    [input.premise.class_id]
+  );
+  if (locked.rowCount === 0) {
+    throw new ObservationContextConflictError("发生时班级不存在或已被删除，请重新核对后再保存。");
+  }
+  const current = parseReliableClass(locked.rows[0].data);
+  if (!current) {
+    throw new ObservationContextConflictError("发生时班级资料无法核实，请重新核对后再保存。");
+  }
+  if (
+    current.name !== input.premise.class_name ||
+    current.stage !== input.premise.stage ||
+    current.school_year !== input.premise.school_year
+  ) {
+    throw new ObservationContextConflictError();
+  }
+
+  if (input.premise.enrollment_id) {
+    const broken = await client.query<{ count: number }>(BROKEN_ENROLLMENTS_SQL, [
+      input.child_id,
+    ]);
+    if ((broken.rows[0]?.count ?? 0) > 0) {
+      throw new ObservationContextConflictError(
+        "这名幼儿的分班历史在核对后出现异常记录，请重新核对后再保存。"
+      );
+    }
+    const matches = await client.query<{ enrollment_data: Row; class_data: Row }>(
+      ENROLLMENT_MATCHES_SQL,
+      [input.child_id, input.observed_at]
+    );
+    if (matches.rowCount !== 1) {
+      throw new ObservationContextConflictError(
+        "这条观察日期的分班归属在核对后不再唯一，请重新核对这条观察的班级后再保存。"
+      );
+    }
+    const matched = matches.rows[0];
+    if (str(matched.enrollment_data.id) !== input.premise.enrollment_id) {
+      throw new ObservationContextConflictError(
+        "这条观察的分班归属在核对后已变化，请重新核对后再保存。"
+      );
+    }
+    if (str(matched.enrollment_data.class_id) !== input.premise.class_id) {
+      throw new ObservationContextConflictError(
+        "这条观察的分班归属在核对后已变化，请重新核对后再保存。"
+      );
+    }
+  }
+
+  const inserted = await client.query<{ data: Row }>(
+    `INSERT INTO observations
+       (child_id, class_id, observed_at, context, raw_text, is_demo, class_context_snapshot)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+     RETURNING to_jsonb(observations.*) AS data`,
+    [
+      input.child_id,
+      snapshot.class_id,
+      input.observed_at,
+      input.context,
+      input.raw_text,
+      input.is_demo,
+      JSON.stringify(snapshot),
+    ]
+  );
+  if (inserted.rowCount === 0) {
+    throw new Error("保存观察记录失败：写入后未能读取记录");
+  }
+  return mapObservation(inserted.rows[0].data);
+}
+
 export async function createObservation(input: {
   child_id: string;
   observed_at: string;
@@ -668,89 +873,7 @@ export async function createObservation(input: {
   class_context_snapshot: ObservationClassContextSnapshot;
   premise: ObservationClassPremise;
 }): Promise<Observation> {
-  const snapshot = input.class_context_snapshot;
-  if (snapshot.class_id !== input.premise.class_id) {
-    throw new ObservationContextConflictError("发生时班级前提与快照不一致，请重新核对后再保存。");
-  }
-  return withTransaction(async (client) => {
-    const childLocked = await client.query(
-      "SELECT id FROM children WHERE id = $1 FOR SHARE",
-      [input.child_id]
-    );
-    if (childLocked.rowCount === 0) {
-      throw new ObservationContextConflictError("幼儿档案不存在，请重新核对后再保存。");
-    }
-
-    const locked = await client.query<{ data: Row }>(
-      "SELECT to_jsonb(classes.*) AS data FROM classes WHERE id = $1 FOR SHARE",
-      [input.premise.class_id]
-    );
-    if (locked.rowCount === 0) {
-      throw new ObservationContextConflictError("发生时班级不存在或已被删除，请重新核对后再保存。");
-    }
-    const current = parseReliableClass(locked.rows[0].data);
-    if (!current) {
-      throw new ObservationContextConflictError("发生时班级资料无法核实，请重新核对后再保存。");
-    }
-    if (
-      current.name !== input.premise.class_name ||
-      current.stage !== input.premise.stage ||
-      current.school_year !== input.premise.school_year
-    ) {
-      throw new ObservationContextConflictError();
-    }
-
-    if (input.premise.enrollment_id) {
-      const broken = await client.query<{ count: number }>(BROKEN_ENROLLMENTS_SQL, [
-        input.child_id,
-      ]);
-      if ((broken.rows[0]?.count ?? 0) > 0) {
-        throw new ObservationContextConflictError(
-          "这名幼儿的分班历史在核对后出现异常记录，请重新核对后再保存。"
-        );
-      }
-      const matches = await client.query<{ enrollment_data: Row; class_data: Row }>(
-        ENROLLMENT_MATCHES_SQL,
-        [input.child_id, input.observed_at]
-      );
-      if (matches.rowCount !== 1) {
-        throw new ObservationContextConflictError(
-          "这条观察日期的分班归属在核对后不再唯一，请重新核对这条观察的班级后再保存。"
-        );
-      }
-      const matched = matches.rows[0];
-      if (str(matched.enrollment_data.id) !== input.premise.enrollment_id) {
-        throw new ObservationContextConflictError(
-          "这条观察的分班归属在核对后已变化，请重新核对后再保存。"
-        );
-      }
-      if (str(matched.enrollment_data.class_id) !== input.premise.class_id) {
-        throw new ObservationContextConflictError(
-          "这条观察的分班归属在核对后已变化，请重新核对后再保存。"
-        );
-      }
-    }
-
-    const inserted = await client.query<{ data: Row }>(
-      `INSERT INTO observations
-         (child_id, class_id, observed_at, context, raw_text, is_demo, class_context_snapshot)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-       RETURNING to_jsonb(observations.*) AS data`,
-      [
-        input.child_id,
-        snapshot.class_id,
-        input.observed_at,
-        input.context,
-        input.raw_text,
-        input.is_demo,
-        JSON.stringify(snapshot),
-      ]
-    );
-    if (inserted.rowCount === 0) {
-      throw new Error("保存观察记录失败：写入后未能读取记录");
-    }
-    return mapObservation(inserted.rows[0].data);
-  });
+  return withTransaction((client) => createObservationWithClient(client, input));
 }
 
 /**
@@ -800,7 +923,8 @@ function observationWriteConditions(
  * 更新语句自身保护 confirmed 状态并比较原状态/上下文/原草稿：
  * 迟到的整理结果不能覆盖较新的草稿，也不能把已确认记录降级。
  */
-export async function updateObservationAiDraft(
+export async function updateObservationAiDraftWithClient(
+  client: TransactionClient,
   id: string,
   ai_draft: ObservationDraft,
   ai_model: string,
@@ -809,13 +933,13 @@ export async function updateObservationAiDraft(
   const now = new Date().toISOString();
   const params: unknown[] = [id, JSON.stringify(ai_draft), ai_model, now];
   const guardSql = observationWriteConditions(guard, params);
-  const row = await mutationQueryOne<{ data: Row }>(
+  const row = (await client.query<{ data: Row }>(
     `UPDATE observations
      SET ai_draft = $2::jsonb, ai_model = $3, ai_organized_at = $4, status = 'ai_organized', updated_at = $4
      WHERE id = $1 AND status <> 'confirmed'${guardSql}
      RETURNING to_jsonb(observations.*) AS data`,
     params,
-  );
+  )).rows[0];
   if (!row) {
     throw new ObservationStateConflictError(
       hasWriteGuard(guard)
@@ -826,12 +950,24 @@ export async function updateObservationAiDraft(
   return mapObservation(row.data);
 }
 
+export async function updateObservationAiDraft(
+  id: string,
+  ai_draft: ObservationDraft,
+  ai_model: string,
+  guard?: ObservationWriteGuard,
+): Promise<Observation> {
+  return withTransaction((client) =>
+    updateObservationAiDraftWithClient(client, id, ai_draft, ai_model, guard),
+  );
+}
+
 /**
  * 保存 Agent 工作流上下文；不修改 raw_text 与 confirmed_content。
  * 更新语句保护 confirmed 状态，并比较原状态/上下文/原草稿快照：
  * 迟到重试不能恢复已结束状态，也不能覆盖另一请求更新的轮次或回答。
  */
-export async function updateObservationAgentContext(
+export async function updateObservationAgentContextWithClient(
+  client: TransactionClient,
   id: string,
   agent_context: AgentContext,
   status: ObservationStatus,
@@ -840,13 +976,13 @@ export async function updateObservationAgentContext(
   const now = new Date().toISOString();
   const params: unknown[] = [id, JSON.stringify(agent_context), status, now];
   const guardSql = observationWriteConditions(guard, params);
-  const row = await mutationQueryOne<{ data: Row }>(
+  const row = (await client.query<{ data: Row }>(
     `UPDATE observations
      SET agent_context = $2::jsonb, status = $3, updated_at = $4
      WHERE id = $1 AND status <> 'confirmed'${guardSql}
      RETURNING to_jsonb(observations.*) AS data`,
     params,
-  );
+  )).rows[0];
   if (!row) {
     throw new ObservationStateConflictError(
       hasWriteGuard(guard)
@@ -855,6 +991,17 @@ export async function updateObservationAgentContext(
     );
   }
   return mapObservation(row.data);
+}
+
+export async function updateObservationAgentContext(
+  id: string,
+  agent_context: AgentContext,
+  status: ObservationStatus,
+  guard?: ObservationWriteGuard,
+): Promise<Observation> {
+  return withTransaction((client) =>
+    updateObservationAgentContextWithClient(client, id, agent_context, status, guard),
+  );
 }
 
 export type ConfirmObservationPremise = {
@@ -902,7 +1049,8 @@ function toDecisionSource(observation: Observation): DecisionSourceObservation {
  * G5 扩展：携带 guide 时，指南证据决定在同一事务内应用（全有或全无）；
  * 当前观察作为依据时，以本次即将归档的 confirmed_content 与实际 confirmed_at 生成快照。
  */
-export async function confirmObservation(
+export async function confirmObservationWithClient(
+  client: TransactionClient,
   id: string,
   childId: string,
   confirmed_content: ObservationDraft,
@@ -910,94 +1058,104 @@ export async function confirmObservation(
   guide?: GuideConfirmPlan,
 ): Promise<Observation> {
   const now = new Date().toISOString();
-  return withTransaction(async (client) => {
-    await lockChild(client, childId);
-    const current = await client.query<{
-      status: string;
-      agent_context: unknown;
-      ai_draft: unknown;
-    }>(
-      `SELECT status, agent_context, ai_draft FROM observations WHERE id = $1 FOR UPDATE`,
+  await lockChild(client, childId);
+  const current = await client.query<{
+    status: string;
+    agent_context: unknown;
+    ai_draft: unknown;
+  }>(
+    `SELECT status, agent_context, ai_draft FROM observations WHERE id = $1 FOR UPDATE`,
+    [id],
+  );
+  if (current.rowCount === 0) throw new Error("确认归档失败：记录不存在");
+  const row = current.rows[0];
+  if (
+    row.status !== premise.status ||
+    canonicalJson(row.agent_context ?? null) !== canonicalJson(premise.agentContext ?? null) ||
+    canonicalJson(row.ai_draft ?? null) !== canonicalJson(premise.aiDraft ?? null)
+  ) {
+    throw new ObservationStateConflictError(
+      "记录在核对后已被更新，请刷新最新记录后重新确认。",
+    );
+  }
+
+  let guideJson: string | null = null;
+  if (guide) {
+    const guideRow = await client.query<{ guide_evidence: unknown }>(
+      "SELECT guide_evidence FROM observations WHERE id = $1",
       [id],
     );
-    if (current.rowCount === 0) throw new Error("确认归档失败：记录不存在");
-    const row = current.rows[0];
-    if (
-      row.status !== premise.status ||
-      canonicalJson(row.agent_context ?? null) !== canonicalJson(premise.agentContext ?? null) ||
-      canonicalJson(row.ai_draft ?? null) !== canonicalJson(premise.aiDraft ?? null)
-    ) {
-      throw new ObservationStateConflictError(
-        "记录在核对后已被更新，请刷新最新记录后重新确认。",
+    const parsed = parseGuideEvidence(guideRow.rows[0]?.guide_evidence ?? null);
+    if (parsed.kind === "unreadable") {
+      throw new GuideEvidenceConflictError(
+        "该观察的指南证据结构无法读取，不能在同一事务中应用关联决定。",
       );
     }
-
-    let guideJson: string | null = null;
-    if (guide) {
-      const guideRow = await client.query<{ guide_evidence: unknown }>(
-        "SELECT guide_evidence FROM observations WHERE id = $1",
-        [id],
+    if (parsed.revision !== guide.expectedRevision) {
+      throw new GuideEvidenceConflictError(
+        "指南证据已在其他操作中更新（revision 过期），请刷新后重新确认。",
       );
-      const parsed = parseGuideEvidence(guideRow.rows[0]?.guide_evidence ?? null);
-      if (parsed.kind === "unreadable") {
-        throw new GuideEvidenceConflictError(
-          "该观察的指南证据结构无法读取，不能在同一事务中应用关联决定。",
-        );
-      }
-      if (parsed.revision !== guide.expectedRevision) {
-        throw new GuideEvidenceConflictError(
-          "指南证据已在其他操作中更新（revision 过期），请刷新后重新确认。",
-        );
-      }
-      const sources = await loadChildObservationsWithClient(client, childId);
-      const sourceById = new Map(sources.map((source) => [source.id, toDecisionSource(source)]));
-      const currentSource = sourceById.get(id);
-      sourceById.set(id, {
-        id,
-        child_id: childId,
-        observed_at: currentSource?.observed_at ?? "",
-        raw_text: currentSource?.raw_text ?? "",
-        status: "confirmed",
-        confirmed_content,
-        confirmed_at: now,
-        class_context_snapshot: currentSource?.class_context_snapshot ?? null,
-      });
-      const ctx: ApplyDecisionsContext = {
-        childId,
-        itemById: guideItemById,
-        sourceById,
-        now,
-        confirmingObservationId: id,
-      };
-      const applied = applyGuideDecisions(parsed, guide.decisions, ctx);
-      if (applied.changed && applied.container) {
-        guideJson = JSON.stringify(applied.container);
-      }
     }
-
-    if (guideJson !== null) {
-      const updated = await client.query<{ data: Row }>(
-        `UPDATE observations
-         SET confirmed_content = $2::jsonb, confirmed_at = $3, status = 'confirmed',
-             guide_evidence = $4::jsonb, updated_at = $3
-         WHERE id = $1
-         RETURNING to_jsonb(observations.*) AS data`,
-        [id, JSON.stringify(confirmed_content), now, guideJson],
-      );
-      if (updated.rowCount === 0) throw new Error("确认归档失败：记录不存在");
-      return mapObservation(updated.rows[0].data);
+    const sources = await loadChildObservationsWithClient(client, childId);
+    const sourceById = new Map(sources.map((source) => [source.id, toDecisionSource(source)]));
+    const currentSource = sourceById.get(id);
+    sourceById.set(id, {
+      id,
+      child_id: childId,
+      observed_at: currentSource?.observed_at ?? "",
+      raw_text: currentSource?.raw_text ?? "",
+      status: "confirmed",
+      confirmed_content,
+      confirmed_at: now,
+      class_context_snapshot: currentSource?.class_context_snapshot ?? null,
+    });
+    const ctx: ApplyDecisionsContext = {
+      childId,
+      itemById: guideItemById,
+      sourceById,
+      now,
+      confirmingObservationId: id,
+    };
+    const applied = applyGuideDecisions(parsed, guide.decisions, ctx);
+    if (applied.changed && applied.container) {
+      guideJson = JSON.stringify(applied.container);
     }
+  }
 
+  if (guideJson !== null) {
     const updated = await client.query<{ data: Row }>(
       `UPDATE observations
-       SET confirmed_content = $2::jsonb, confirmed_at = $3, status = 'confirmed', updated_at = $3
+       SET confirmed_content = $2::jsonb, confirmed_at = $3, status = 'confirmed',
+           guide_evidence = $4::jsonb, updated_at = $3
        WHERE id = $1
        RETURNING to_jsonb(observations.*) AS data`,
-      [id, JSON.stringify(confirmed_content), now],
+      [id, JSON.stringify(confirmed_content), now, guideJson],
     );
     if (updated.rowCount === 0) throw new Error("确认归档失败：记录不存在");
     return mapObservation(updated.rows[0].data);
-  });
+  }
+
+  const updated = await client.query<{ data: Row }>(
+    `UPDATE observations
+     SET confirmed_content = $2::jsonb, confirmed_at = $3, status = 'confirmed', updated_at = $3
+     WHERE id = $1
+     RETURNING to_jsonb(observations.*) AS data`,
+    [id, JSON.stringify(confirmed_content), now],
+  );
+  if (updated.rowCount === 0) throw new Error("确认归档失败：记录不存在");
+  return mapObservation(updated.rows[0].data);
+}
+
+export async function confirmObservation(
+  id: string,
+  childId: string,
+  confirmed_content: ObservationDraft,
+  premise: ConfirmObservationPremise,
+  guide?: GuideConfirmPlan,
+): Promise<Observation> {
+  return withTransaction((client) =>
+    confirmObservationWithClient(client, id, childId, confirmed_content, premise, guide),
+  );
 }
 
 /* ------------------------- 指南证据读写（G5） ------------------------- */
@@ -1187,133 +1345,141 @@ export interface GuideSuggestionPersistInput {
  * 写入前重核生成前提：观察状态/原文/草稿/确认稿与容器 revision 全部一致；
  * 已有任何关联（含拒绝/撤回历史）的条目不再追加；冲突返回 409，不自动重放。
  */
-export async function saveGuideEvidenceSuggestionResult(
+export async function saveGuideEvidenceSuggestionResultWithClient(
+  client: TransactionClient,
   observationId: string,
   input: GuideSuggestionPersistInput,
 ): Promise<GuideMutationResult> {
   const now = new Date().toISOString();
-  return withTransaction(async (client) => {
-    const observation = await lockObservationForGuide(client, observationId);
-    if (
-      observation.status !== input.expectedStatus ||
-      observation.raw_text !== input.expectedRawText ||
-      canonicalJson(observation.ai_draft ?? null) !== canonicalJson(input.expectedAiDraft ?? null) ||
-      canonicalJson(observation.confirmed_content ?? null) !==
-        canonicalJson(input.expectedConfirmedContent ?? null)
-    ) {
-      throw new GuideEvidenceConflictError(
-        "观察在 AI 关联期间已被更新或归档，迟到的建议不会覆盖当前记录。",
-      );
-    }
-    const parsed = parseGuideEvidence(observation.guide_evidence);
-    if (parsed.kind === "unreadable") {
-      if (!input.ok) {
-        return mutationResult(observation, 0, []);
-      }
-      throw new GuideEvidenceConflictError(
-        "该观察的指南证据结构无法读取，不能追加 AI 建议；请先人工核对原始数据。",
-      );
-    }
-    if (parsed.revision !== input.expectedRevision) {
-      throw new GuideEvidenceConflictError(
-        "指南证据已被其他操作更新（revision 过期），迟到的 AI 建议不会覆盖当前状态。",
-      );
-    }
-
-    if (!input.ok) {
-      const container = {
-        ...(parsed.kind === "ok" ? parsed.raw : {}),
-        revision: parsed.revision + 1,
-        links: parsed.kind === "ok" ? parsed.raw.links : [],
-        last_attempt: {
-          at: now,
-          model: input.model ?? "unknown",
-          ok: false,
-          suggested_count: 0,
-          error: input.error ?? "AI 关联失败",
-        },
-      };
-      const updated = await applyGuideUpdate(client, observation, container, now);
-      const links = await buildMutationViews(
-        client,
-        observation.child_id,
-        parsed.kind === "ok"
-          ? parsed.links.map((link) => link.raw as unknown as GuideEvidenceLink)
-          : [],
-      );
-      return mutationResult(updated, parsed.revision + 1, links);
-    }
-
-    const existingItemIds = new Set(
-      (parsed.kind === "ok" ? parsed.links : []).map((link) => link.item_id),
+  const observation = await lockObservationForGuide(client, observationId);
+  if (
+    observation.status !== input.expectedStatus ||
+    observation.raw_text !== input.expectedRawText ||
+    canonicalJson(observation.ai_draft ?? null) !== canonicalJson(input.expectedAiDraft ?? null) ||
+    canonicalJson(observation.confirmed_content ?? null) !==
+      canonicalJson(input.expectedConfirmedContent ?? null)
+  ) {
+    throw new GuideEvidenceConflictError(
+      "观察在 AI 关联期间已被更新或归档，迟到的建议不会覆盖当前记录。",
     );
-    const fresh = input.suggestions.filter((suggestion) => !existingItemIds.has(suggestion.item_id));
-    if (fresh.length === 0) {
-      const links = await buildMutationViews(
-        client,
-        observation.child_id,
-        parsed.kind === "ok"
-          ? parsed.links.map((link) => link.raw as unknown as GuideEvidenceLink)
-          : [],
-      );
-      return mutationResult(observation, parsed.revision, links);
+  }
+  const parsed = parseGuideEvidence(observation.guide_evidence);
+  if (parsed.kind === "unreadable") {
+    if (!input.ok) {
+      return mutationResult(observation, 0, []);
     }
-    // 保存前同步核对所用来源仍符合生成快照：来源日期/版本迟到变化时不写旧建议
-    const sourceObservations = await loadChildObservationsWithClient(client, observation.child_id);
-    const sourceById = new Map(sourceObservations.map((source) => [source.id, source]));
-    for (const suggestion of fresh) {
-      if (!suggestionSourceSnapshotStillMatches(suggestion, sourceById)) {
-        throw new GuideEvidenceConflictError(
-          "AI 建议生成后来源观察已更新，迟到的建议不会写入；请重新生成建议或手动关联。",
-        );
-      }
-    }
-    const newLinks = fresh.map((suggestion) => ({
-      id: randomUUID(),
-      item_id: suggestion.item_id,
-      catalog_version: GUIDE_CATALOG_VERSION,
-      origin: "ai" as const,
-      status: "ai_suggested" as const,
-      support: null,
-      adult_help_used: false,
-      basis: [
-        {
-          observation_id: suggestion.source_observation_id,
-          observed_at: suggestion.observed_at,
-          quote: suggestion.quote,
-          quote_source: suggestion.quote_source,
-          quote_field: suggestion.quote_field,
-          class_context: suggestion.class_context,
-          source_confirmed_at: suggestion.source_confirmed_at,
-        },
-      ],
-      ai_reason: suggestion.reason,
-      teacher_note: null,
-      revision: 1,
-      created_at: now,
-      decided_at: null,
-      withdrawn_at: null,
-      withdrawn_reason: null,
-    }));
+    throw new GuideEvidenceConflictError(
+      "该观察的指南证据结构无法读取，不能追加 AI 建议；请先人工核对原始数据。",
+    );
+  }
+  if (parsed.revision !== input.expectedRevision) {
+    throw new GuideEvidenceConflictError(
+      "指南证据已被其他操作更新（revision 过期），迟到的 AI 建议不会覆盖当前状态。",
+    );
+  }
+
+  if (!input.ok) {
     const container = {
       ...(parsed.kind === "ok" ? parsed.raw : {}),
       revision: parsed.revision + 1,
-      links: [...(parsed.kind === "ok" ? (parsed.raw.links as unknown[]) : []), ...newLinks],
+      links: parsed.kind === "ok" ? parsed.raw.links : [],
       last_attempt: {
         at: now,
         model: input.model ?? "unknown",
-        ok: true,
-        suggested_count: newLinks.length,
+        ok: false,
+        suggested_count: 0,
+        error: input.error ?? "AI 关联失败",
       },
     };
     const updated = await applyGuideUpdate(client, observation, container, now);
-    const allLinks = [
-      ...(parsed.kind === "ok"
+    const links = await buildMutationViews(
+      client,
+      observation.child_id,
+      parsed.kind === "ok"
         ? parsed.links.map((link) => link.raw as unknown as GuideEvidenceLink)
-        : []),
-      ...newLinks,
-    ];
-    const links = await buildMutationViews(client, observation.child_id, allLinks);
+        : [],
+    );
     return mutationResult(updated, parsed.revision + 1, links);
-  });
+  }
+
+  const existingItemIds = new Set(
+    (parsed.kind === "ok" ? parsed.links : []).map((link) => link.item_id),
+  );
+  const fresh = input.suggestions.filter((suggestion) => !existingItemIds.has(suggestion.item_id));
+  if (fresh.length === 0) {
+    const links = await buildMutationViews(
+      client,
+      observation.child_id,
+      parsed.kind === "ok"
+        ? parsed.links.map((link) => link.raw as unknown as GuideEvidenceLink)
+        : [],
+    );
+    return mutationResult(observation, parsed.revision, links);
+  }
+  // 保存前同步核对所用来源仍符合生成快照：来源日期/版本迟到变化时不写旧建议
+  const sourceObservations = await loadChildObservationsWithClient(client, observation.child_id);
+  const sourceById = new Map(sourceObservations.map((source) => [source.id, source]));
+  for (const suggestion of fresh) {
+    if (!suggestionSourceSnapshotStillMatches(suggestion, sourceById)) {
+      throw new GuideEvidenceConflictError(
+        "AI 建议生成后来源观察已更新，迟到的建议不会写入；请重新生成建议或手动关联。",
+      );
+    }
+  }
+  const newLinks = fresh.map((suggestion) => ({
+    id: randomUUID(),
+    item_id: suggestion.item_id,
+    catalog_version: GUIDE_CATALOG_VERSION,
+    origin: "ai" as const,
+    status: "ai_suggested" as const,
+    support: null,
+    adult_help_used: false,
+    basis: [
+      {
+        observation_id: suggestion.source_observation_id,
+        observed_at: suggestion.observed_at,
+        quote: suggestion.quote,
+        quote_source: suggestion.quote_source,
+        quote_field: suggestion.quote_field,
+        class_context: suggestion.class_context,
+        source_confirmed_at: suggestion.source_confirmed_at,
+      },
+    ],
+    ai_reason: suggestion.reason,
+    teacher_note: null,
+    revision: 1,
+    created_at: now,
+    decided_at: null,
+    withdrawn_at: null,
+    withdrawn_reason: null,
+  }));
+  const container = {
+    ...(parsed.kind === "ok" ? parsed.raw : {}),
+    revision: parsed.revision + 1,
+    links: [...(parsed.kind === "ok" ? (parsed.raw.links as unknown[]) : []), ...newLinks],
+    last_attempt: {
+      at: now,
+      model: input.model ?? "unknown",
+      ok: true,
+      suggested_count: newLinks.length,
+    },
+  };
+  const updated = await applyGuideUpdate(client, observation, container, now);
+  const allLinks = [
+    ...(parsed.kind === "ok"
+      ? parsed.links.map((link) => link.raw as unknown as GuideEvidenceLink)
+      : []),
+    ...newLinks,
+  ];
+  const links = await buildMutationViews(client, observation.child_id, allLinks);
+  return mutationResult(updated, parsed.revision + 1, links);
+}
+
+export async function saveGuideEvidenceSuggestionResult(
+  observationId: string,
+  input: GuideSuggestionPersistInput,
+): Promise<GuideMutationResult> {
+  return withTransaction((client) =>
+    saveGuideEvidenceSuggestionResultWithClient(client, observationId, input),
+  );
 }

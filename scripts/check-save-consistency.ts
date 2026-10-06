@@ -65,7 +65,11 @@ function checkStatements(): number {
   );
   passed += 1;
 
-  const draftBody = functionBody(source, 'updateObservationAiDraft');
+  // TOOLS1 抽取显式 WithClient 原语后，权威 SQL 在 WithClient 函数内；
+  // 包装函数仍必须经同一 client 短事务路由。
+  const draftWrapper = functionBody(source, 'updateObservationAiDraft');
+  assert.ok(draftWrapper.includes('withTransaction('), 'AI 整理包装必须使用同一 client 短事务');
+  const draftBody = functionBody(source, 'updateObservationAiDraftWithClient');
   assert.ok(draftBody.includes("status <> 'confirmed'"), 'AI 整理写入必须保护 confirmed 状态');
   assert.ok(
     draftBody.includes('observationWriteConditions(guard, params)'),
@@ -73,7 +77,9 @@ function checkStatements(): number {
   );
   passed += 1;
 
-  const contextBody = functionBody(source, 'updateObservationAgentContext');
+  const contextWrapper = functionBody(source, 'updateObservationAgentContext');
+  assert.ok(contextWrapper.includes('withTransaction('), '追问上下文包装必须使用同一 client 短事务');
+  const contextBody = functionBody(source, 'updateObservationAgentContextWithClient');
   assert.ok(contextBody.includes('observationWriteConditions(guard, params)'), '追问上下文写入必须应用原快照');
   assert.ok(contextBody.includes('ObservationStateConflictError'), '冲突必须抛出状态冲突错误');
   passed += 1;
@@ -97,8 +103,9 @@ function checkStatements(): number {
   passed += 1;
 
   for (const name of ['updateChildGrowthProfileSummary', 'updateChildActivitySupport']) {
-    const body = functionBody(source, name);
-    assert.ok(body.includes('withTransaction('), `${name} 必须使用同一 client 的短事务`);
+    const wrapper = functionBody(source, name);
+    assert.ok(wrapper.includes('withTransaction('), `${name} 必须使用同一 client 的短事务`);
+    const body = functionBody(source, `${name}WithClient`);
     assert.ok(body.includes('lockChild(client'), `${name} 必须锁定儿童行`);
     assert.ok(body.includes('client.query'), `${name} 事务内必须使用同一 client，不得走全局 Pool`);
     assert.ok(
@@ -109,8 +116,9 @@ function checkStatements(): number {
   }
   passed += 1;
 
-  const confirmBody = functionBody(source, 'confirmObservation');
-  assert.ok(confirmBody.includes('withTransaction('), '确认必须与其他保存共享同一儿童锁事务');
+  const confirmWrapper = functionBody(source, 'confirmObservation');
+  assert.ok(confirmWrapper.includes('withTransaction('), '确认必须与其他保存共享同一儿童锁事务');
+  const confirmBody = functionBody(source, 'confirmObservationWithClient');
   assert.ok(
     confirmBody.indexOf('lockChild(client') >= 0 &&
       confirmBody.indexOf('lockChild(client') < confirmBody.indexOf('FROM observations'),
