@@ -83,6 +83,11 @@ export interface YayaMessageRow {
   created_at: Date | string;
   updated_at: Date | string;
   deleted_at: Date | string | null;
+  /** run 终态绑定（CHAT-BIND1）：旧消息 / user 消息为 NULL，读为 unknown */
+  run_id: string | null;
+  binding_state: string | null;
+  /** 恢复标记 jsonb；损坏或缺失时投影为 null */
+  recovery_mark: unknown;
 }
 
 function isSourceRefShaped(value: unknown): boolean {

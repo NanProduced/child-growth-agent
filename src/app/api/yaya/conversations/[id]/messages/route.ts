@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { yayaDataRepository, withPrivateRead, withPrivateWrite, yayaRouteError } from "@/lib/yaya/data";
+import {
+  findForbiddenHttpMessageKeys,
+  yayaDataRepository,
+  withPrivateRead,
+  withPrivateWrite,
+  yayaRouteError,
+} from "@/lib/yaya/data";
 import { parseStoredFragments } from "@/lib/yaya/data/rows";
 import {
   YayaDataError,
@@ -48,6 +54,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const body: unknown = await request.json().catch(() => null);
     const record = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+    // 绑定伪造字段一律拒绝：run 身份 / 绑定状态 / 恢复标记 / 通道声明只存在于内部通道
+    const forbiddenKeys = findForbiddenHttpMessageKeys(record);
+    if (forbiddenKeys.length > 0) {
+      throw new YayaDataError("invalid_request", `HTTP 通道不得携带绑定字段：${forbiddenKeys.join("、")}`);
+    }
     const rawClientId = record.client_message_id;
     if (rawClientId !== null && rawClientId !== undefined && typeof rawClientId !== "string") {
       throw new YayaDataError("invalid_request", "client_message_id 不合法。");
@@ -58,6 +69,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const messageKind = record.message_kind;
     if (typeof role !== "string" || !ROLES.includes(role as YayaMessageRole)) {
       throw new YayaDataError("invalid_request", "消息角色不合法。");
+    }
+    if (role === "assistant" || role === "tool") {
+      throw new YayaDataError("invalid_request", "助手消息只能经内部 run 终态通道写入。");
     }
     if (typeof messageKind !== "string" || !KINDS.includes(messageKind as YayaMessageKind)) {
       throw new YayaDataError("invalid_request", "消息类型不合法。");
@@ -86,16 +100,22 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       throw new YayaDataError("invalid_request", "缺少会话版本前提。");
     }
     const result = await withPrivateWrite(request, ({ client, principal, schoolId }) =>
-      yayaDataRepository.saveMessage(client, principal, schoolId, {
-        conversation_id: id,
-        client_message_id: clientMessageId,
-        role: role as YayaMessageRole,
-        message_kind: messageKind as YayaMessageKind,
-        execution_state: (rawExecution as YayaMessageExecutionState | undefined) ?? "none",
-        fragments: parsedFragments.fragments as readonly YayaStoredFragment[],
-        attachment_ids: rawAttachments as string[],
-        expected_conversation_revision: expectedRevision as number,
-      }),
+      yayaDataRepository.saveMessage(
+        client,
+        principal,
+        schoolId,
+        {
+          conversation_id: id,
+          client_message_id: clientMessageId,
+          role: role as YayaMessageRole,
+          message_kind: messageKind as YayaMessageKind,
+          execution_state: (rawExecution as YayaMessageExecutionState | undefined) ?? "none",
+          fragments: parsedFragments.fragments as readonly YayaStoredFragment[],
+          attachment_ids: rawAttachments as string[],
+          expected_conversation_revision: expectedRevision as number,
+        },
+        "http",
+      ),
     );
     return NextResponse.json(result, { status: 201 });
   } catch (error) {

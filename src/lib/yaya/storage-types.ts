@@ -47,6 +47,11 @@ import type {
   YayaSourceRef,
   YayaToolAuth,
 } from "./types";
+import type {
+  YayaChatRecoveryMark,
+  YayaMessageWriteChannel,
+  YayaRecoveryOperationIdentity,
+} from "./chat-bind-contract";
 
 /* ------------------------------- 错误语义 ------------------------------- */
 
@@ -320,6 +325,15 @@ export interface YayaProjectedMessageView {
   attachment_ids: readonly string[];
   /** 无论投影如何都只含白名单元数据；hidden 时为 null */
   metadata: YayaChatMessageProjection["metadata"];
+  /** 原身份恢复标记（仅 run 终态消息落库）；无标记 / 损坏 / 旧消息为 null */
+  recovery: YayaChatRecoveryMark | null;
+}
+
+/** run 终态通道写入时可携带的恢复身份（服务端据此装配完整恢复标记） */
+export interface YayaRunRecoveryInput {
+  actor_account_id: string;
+  proposal: { proposal_id: string; batch_id: string } | null;
+  operations: readonly YayaRecoveryOperationIdentity[];
 }
 
 export interface YayaSaveMessageInput {
@@ -330,8 +344,31 @@ export interface YayaSaveMessageInput {
   execution_state: YayaMessageExecutionState;
   fragments: readonly YayaStoredFragment[];
   attachment_ids: readonly string[];
-  /** 版本前提：与会话当前 revision 不一致时拒绝追加 */
-  expected_conversation_revision: number;
+  /** 版本前提：与会话当前 revision 不一致时拒绝追加；null/缺省表示跳过（仍取行锁串行） */
+  expected_conversation_revision?: number | null;
+  /** run 终态通道专用（HTTP 通道携带即拒绝）：run 身份与绑定状态 */
+  run?: { run_id: string; client_request_id: string };
+  binding_state?: "bound" | "unknown";
+  recovery?: YayaRunRecoveryInput | null;
+}
+
+/**
+ * run 终态消息（AGENT-APP1 内部通道）写入：`client_message_id` 由
+ * run 身份确定性派生，APP 不自报；不自开事务，与调用方共用同一 TransactionClient。
+ */
+export interface YayaRunTerminalMessageInput {
+  conversation_id: string;
+  role: "assistant" | "tool";
+  message_kind: YayaMessageKind;
+  execution_state: YayaMessageExecutionState;
+  fragments: readonly YayaStoredFragment[];
+  attachment_ids: readonly string[];
+  run: { run_id: string; client_request_id: string };
+  /** 同一 run 内的第 N 条终态消息；缺省按角色本身派生身份 */
+  part?: string;
+  binding_state: "bound" | "unknown";
+  recovery?: YayaRunRecoveryInput | null;
+  expected_conversation_revision?: number | null;
 }
 
 export interface YayaSaveMessageResult {
@@ -833,6 +870,14 @@ export interface YayaDataRepository {
     principal: Principal,
     schoolId: string,
     input: YayaSaveMessageInput,
+    channel?: YayaMessageWriteChannel,
+  ): Promise<YayaSaveMessageResult>;
+  /** 内部 run 终态保存：确定性消息身份 + 绑定状态 + 恢复标记，与调用方同一事务 */
+  saveRunTerminalMessage(
+    client: TransactionClient,
+    principal: Principal,
+    schoolId: string,
+    input: YayaRunTerminalMessageInput,
   ): Promise<YayaSaveMessageResult>;
   listMessages(
     client: TransactionClient,

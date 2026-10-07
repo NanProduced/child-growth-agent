@@ -238,6 +238,8 @@ async function main(): Promise<void> {
     const yayaSql = fs.readFileSync(`${ROOT}scripts/upgrade-yaya-v1.sql`, "utf8");
     await database.query(yayaSql);
     await database.query(yayaSql); // 幂等重复执行
+    await database.query(fs.readFileSync(`${ROOT}scripts/upgrade-yaya-chat-bind-v1.sql`, "utf8"));
+    await database.query(fs.readFileSync(`${ROOT}scripts/upgrade-yaya-chat-bind-v1.sql`, "utf8")); // 幂等重复执行
     for (const table of baselineTables) {
       assert.equal(await columnsOf(table), baseline.get(table), `现有表 ${table} 形状被改动`);
     }
@@ -430,34 +432,28 @@ async function main(): Promise<void> {
       201,
     );
     const deniedConversationId = (convC.conversation as Record<string, unknown>).conversation_id as string;
-    const deniedMessage = await statusOf(
-      messagesPost(
-        req(
-          teacherA.token,
-          "POST",
+    const deniedMessage = await withRawTransaction(db, (tx) =>
+      yayaDataRepository.saveRunTerminalMessage(tx, teacherA.principal, "single-school", {
+        conversation_id: deniedConversationId,
+        role: "assistant",
+        message_kind: "text",
+        execution_state: "none",
+        fragments: [
           {
-            client_message_id: "m-denied",
-            role: "assistant",
-            message_kind: "text",
-            fragments: [
-              {
-                fragment_id: "f-denied",
-                text: "C 班幼儿的秘密正文",
-                sources: [{ kind: "child", child_id: ids.childC, current_class_id: null }],
-                independently_readable: true,
-                provenance: { kind: "child_fact", ref_id: ids.childC, label: null, derived_from: null },
-              },
-            ],
-            attachment_ids: [],
-            expected_conversation_revision: 1,
+            fragment_id: "f-denied",
+            text: "C 班幼儿的秘密正文",
+            sources: [{ kind: "child", child_id: ids.childC, current_class_id: null }],
+            independently_readable: true,
+            provenance: { kind: "child_fact", ref_id: ids.childC, label: null, derived_from: null },
           },
-          `/api/yaya/conversations/${deniedConversationId}/messages`,
-        ),
-        params(deniedConversationId),
-      ),
-      201,
+        ],
+        attachment_ids: [],
+        run: { run_id: `${RUN}-m-denied`, client_request_id: `${RUN}-m-denied-req` },
+        binding_state: "bound",
+        expected_conversation_revision: 1,
+      }),
     );
-    const deniedView = deniedMessage.message as Record<string, unknown>;
+    const deniedView = deniedMessage.message as unknown as Record<string, unknown>;
     check("越权来源正文不外泄", !JSON.stringify(deniedView).includes("C 班幼儿的秘密正文"));
     check(
       "越权来源片段 visibility 非 full",

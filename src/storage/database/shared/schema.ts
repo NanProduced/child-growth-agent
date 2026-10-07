@@ -295,6 +295,11 @@ export const yayaMessages = pgTable(
     created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updated_at: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
     deleted_at: timestamp("deleted_at", { withTimezone: true }),
+    /** run 终态绑定（CHAT-BIND1）：旧消息 / user 消息为 NULL（读为 unknown） */
+    run_id: varchar("run_id", { length: 64 }),
+    binding_state: varchar("binding_state", { length: 16 }),
+    /** 原身份恢复标记（yaya-recovery-v1），无标记为 NULL */
+    recovery_mark: jsonb("recovery_mark"),
   },
   (t) => [
     uniqueIndex("yaya_messages_client_id_unique")
@@ -312,6 +317,10 @@ export const yayaMessages = pgTable(
     check(
       "yaya_messages_execution_check",
       sql`${t.execution_state} IN ('none', 'pending_approval', 'executed', 'unknown')`,
+    ),
+    check(
+      "yaya_messages_binding_state_check",
+      sql`${t.binding_state} IS NULL OR ${t.binding_state} IN ('bound', 'unknown')`,
     ),
   ],
 );

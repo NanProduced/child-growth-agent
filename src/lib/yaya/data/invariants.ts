@@ -16,11 +16,13 @@ import type {
   YayaDomainPayload,
   YayaFragmentProjection,
   YayaImageLifecycleFacts,
+  YayaMessageSourceRef,
   YayaOperationReceipt,
   YayaReceiptEffect,
   YayaReceiptStatus,
   YayaSourceRef,
 } from "../types";
+import type { YayaAssistantFragmentPolicy } from "../chat-bind-contract";
 import {
   YayaDataError,
   type YayaAttachmentStatus,
@@ -507,4 +509,98 @@ export function receiptRowToReceipt(row: YayaOperationRow | null): YayaOperation
     business_revision: row.business_revision,
     recorded_at: new Date(row.recorded_at).toISOString(),
   };
+}
+
+/* ------------------------------- 消息绑定读写（CHAT-BIND1） ------------------------------- */
+
+/** run 终态消息角色：只有 assistant / tool 走内部通道 */
+export type YayaRunTerminalRole = "assistant" | "tool";
+
+function assertIdentityField(name: string, value: string, limit: number): void {
+  if (value.trim() === "" || value.includes(":") || value.length > limit) {
+    throw new YayaDataError("invalid_request", `消息身份字段 ${name} 不合法。`);
+  }
+}
+
+/**
+ * 确定性消息身份（run 终态幂等的根）：`yaya-run:{run_id}:{role}:{part}`。
+ * part 缺省取角色本身，使「省略 part」与「显式 part=role」指向同一行；
+ * run_id / part 不含 `:`（防跨字段拼接歧义）并受长度上限约束（总长 ≤ 128，
+ * 对齐 client_message_id 列）。只依赖 run 身份，重复调用结果一致。
+ */
+export function deriveYayaRunClientMessageId(
+  runId: string,
+  role: YayaRunTerminalRole,
+  part?: string,
+): string {
+  if (role !== "assistant" && role !== "tool") {
+    throw new YayaDataError("invalid_request", "run 终态角色不合法。");
+  }
+  const effectivePart = part ?? role;
+  assertIdentityField("run_id", runId, 64);
+  assertIdentityField("part", effectivePart, 44);
+  const identity = `yaya-run:${runId}:${role}:${effectivePart}`;
+  if (identity.length > 128) {
+    throw new YayaDataError("invalid_request", "派生消息身份超长。");
+  }
+  return identity;
+}
+
+/**
+ * 读侧绑定策略（`projectChatMessage` 之后、正文投影之前消费）：
+ * - 列值非 `bound`（NULL / 旧消息 / 损坏值）一律按 unknown：来源与独立可读均不继承；
+ * - bound 时来源整段继承自片段（服务端落库事实，非客户端自报），
+ *   独立可读取全片段交集（空片段视为无正文可泄漏，不误伤）。
+ */
+export function yayaAssistantReadPolicy(
+  bindingState: string | null | undefined,
+  fragments: readonly YayaStoredFragment[],
+): YayaAssistantFragmentPolicy {
+  if (bindingState !== "bound") {
+    return { binding_state: "unknown", sources: [], independently_readable: false };
+  }
+  const sources: YayaMessageSourceRef[] = [];
+  const seen = new Set<string>();
+  for (const fragment of fragments) {
+    for (const source of fragment.sources) {
+      const key = JSON.stringify(source);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      sources.push(source);
+    }
+  }
+  return {
+    binding_state: "bound",
+    sources,
+    independently_readable: fragments.every((fragment) => fragment.independently_readable),
+  };
+}
+
+/**
+ * HTTP 通道必须拒绝的绑定伪造字段（仅顶层键；片段内的 sources /
+ * independently_readable 属于既有合法 user 输入，不在此列）。
+ */
+export const YAYA_FORBIDDEN_HTTP_MESSAGE_KEYS = [
+  "run_id",
+  "binding_state",
+  "binding",
+  "recovery",
+  "recovery_mark",
+  "channel",
+  "write_channel",
+  "internal_channel",
+  "run",
+  "writer",
+  "sources",
+  "independently_readable",
+  "general_qa_proven",
+  "private_dependency_proven_absent",
+  "resource_dependencies",
+  "unmapped_dependency_count",
+] as const;
+
+export function findForbiddenHttpMessageKeys(body: unknown): string[] {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return [];
+  const record = body as Record<string, unknown>;
+  return YAYA_FORBIDDEN_HTTP_MESSAGE_KEYS.filter((key) => key in record);
 }
