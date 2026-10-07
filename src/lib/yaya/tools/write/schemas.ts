@@ -194,6 +194,10 @@ const manageClassPayloadSchema = z.discriminatedUnion('operation', [
 ]);
 
 const manageTeacherStatus = z.enum(['active', 'disabled']);
+// 单操作恰好一个班级：多班必须由既有多 operation 计划表达，禁止“只读第一班”的静默部分执行
+const manageTeacherSingleClassIds = z
+  .array(uuid('班级'))
+  .length(1, '每次只能处理一个班级，多班请拆分为多个操作');
 const manageTeacherPayloadSchema = z.discriminatedUnion('operation', [
   z.strictObject({
     kind: z.literal('manage_teacher'),
@@ -201,7 +205,7 @@ const manageTeacherPayloadSchema = z.discriminatedUnion('operation', [
     teacher_account_id: uuid('教师账号'),
     username: z.string().nullable(),
     display_name: z.string().nullable(),
-    class_ids: z.array(uuid('班级')),
+    class_ids: z.array(uuid('班级')).length(0, '教师状态操作不携带班级'),
     status: manageTeacherStatus,
     secret_via_secure_control: z.literal(true),
   }),
@@ -211,7 +215,7 @@ const manageTeacherPayloadSchema = z.discriminatedUnion('operation', [
     teacher_account_id: uuid('教师账号'),
     username: z.string().nullable(),
     display_name: z.string().nullable(),
-    class_ids: z.array(uuid('班级')).min(1),
+    class_ids: manageTeacherSingleClassIds,
     status: z.null(),
     secret_via_secure_control: z.literal(true),
   }),
@@ -221,7 +225,7 @@ const manageTeacherPayloadSchema = z.discriminatedUnion('operation', [
     teacher_account_id: uuid('教师账号'),
     username: z.string().nullable(),
     display_name: z.string().nullable(),
-    class_ids: z.array(uuid('班级')).min(1),
+    class_ids: manageTeacherSingleClassIds,
     status: z.null(),
     secret_via_secure_control: z.literal(true),
   }),
@@ -303,10 +307,11 @@ export function parseWritePayload(value: unknown): YayaDomainPayload {
   if (typeof kind !== 'string') {
     throw new YayaDataError('invalid_request', 'payload 不合法。');
   }
-  const schema = yayaWritePayloadSchemas[kind as YayaPayloadKind];
-  if (!schema) {
+  // own-property 限定：`__proto__`/`constructor`/`toString` 等继承属性不得命中表
+  if (!Object.hasOwn(yayaWritePayloadSchemas, kind)) {
     throw new YayaDataError('invalid_request', `未注册的写操作：${kind}`);
   }
+  const schema = yayaWritePayloadSchemas[kind as YayaPayloadKind];
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
     throw new YayaDataError('invalid_request', 'payload 不合法。', {

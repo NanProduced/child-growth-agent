@@ -176,6 +176,14 @@ export interface YayaVerifyApprovedInput {
   submitter: YayaApprovalSubmitter;
   school_id: string;
   resolveBusinessRevision?: (context: YayaExecutionItemContext) => Promise<string | null>;
+  /**
+   * payload 形状与声明绑定校验（TOOLS 写入口注入）：在取得任何业务目标行锁之前
+   * 逐项执行；非法/未绑定提案不得进入锁流程。DATA 直调省略时保持原语义。
+   */
+  assertItemBinding?: (
+    client: TransactionClient,
+    item: { action: string; resource: string; resource_ref: unknown; payload: unknown },
+  ) => Promise<void>;
 }
 
 /**
@@ -344,6 +352,13 @@ export async function verifyApprovedOperations(
       WHERE operation_id = ANY($1::varchar[]) ORDER BY item_key`,
     [uniqueIds],
   );
+  // 语义绑定先于业务锁：非法/越权 payload 在取得任何业务目标行锁之前拒绝，
+  // 避免未绑定提案进入锁流程（AUTH share→update 升级可形成 40P01）。
+  if (input.assertItemBinding) {
+    for (const item of proposalItems.rows) {
+      await input.assertItemBinding(client, item);
+    }
+  }
   // 先按稳定顺序取得目标行锁；后续逐项读取/版本核对都使用锁后事实。
   await lockExecutionTargets(client, proposalItems.rows);
   const proposalItemByOperation = new Map(proposalItems.rows.map((row) => [row.operation_id, row]));
@@ -464,7 +479,7 @@ export async function verifyApprovedOperations(
  */
 export async function executeApprovedOperations(
   client: TransactionClient,
-  input: YayaExecuteApprovedInput,
+  input: YayaExecuteApprovedInput & Pick<YayaVerifyApprovedInput, "assertItemBinding">,
 ): Promise<readonly YayaOperationReceipt[]> {
   const verified = await verifyApprovedOperations(client, {
     approval_id: input.approval_id,
@@ -472,6 +487,7 @@ export async function executeApprovedOperations(
     submitter: input.submitter,
     school_id: input.school_id,
     resolveBusinessRevision: input.resolveBusinessRevision,
+    assertItemBinding: input.assertItemBinding,
   });
   if (verified.replayed_receipts !== null) return verified.replayed_receipts;
 

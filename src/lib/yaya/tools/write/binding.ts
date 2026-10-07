@@ -9,6 +9,7 @@
  */
 import type { TransactionClient } from '@/storage/database/pg-client';
 
+import { parseResourceRef } from '../../data/rows';
 import { YayaDataError, type YayaItemResourceRef } from '../../storage-types';
 import type { YayaDomainPayload } from '../../types';
 import { parseWritePayload } from './schemas';
@@ -110,14 +111,15 @@ function sameResourceRef(left: YayaItemResourceRef, right: YayaItemResourceRef):
 /** 执行入口绑定：payload 形状 + 推导身份与提案条目声明一致性；不一致即 `invalid_request`。 */
 export async function assertProposalItemBinding(
   client: TransactionClient,
-  item: { action: string; resource: string; resource_ref: YayaItemResourceRef; payload: unknown },
+  item: { action: string; resource: string; resource_ref: unknown; payload: unknown },
 ): Promise<void> {
   const payload = parseWritePayload(item.payload);
   const derived = await deriveItemBinding(client, payload);
   if (item.action !== derived.action || item.resource !== derived.resource) {
     throw new YayaDataError('invalid_request', '提案条目声明与 payload 不一致。');
   }
-  if (!sameResourceRef(item.resource_ref, derived.ref)) {
+  const declaredRef = parseResourceRef(item.resource_ref);
+  if (declaredRef === null || !sameResourceRef(declaredRef, derived.ref)) {
     throw new YayaDataError('invalid_request', '提案条目标与 payload 目标不一致。');
   }
 }

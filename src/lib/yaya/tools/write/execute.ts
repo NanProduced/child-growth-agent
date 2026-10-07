@@ -251,6 +251,8 @@ export function createYayaOperationsExecutor(options: {
         submitter: submitterOf(context),
         school_id: context.schoolId,
         resolveBusinessRevision: resolveRevisionWith(context.client),
+        // 声明/payload 语义绑定先于业务目标锁：非法提案不得进入锁流程
+        assertItemBinding: assertProposalItemBinding,
       }),
     );
     if (preflight.replayed_receipts !== null) {
@@ -305,6 +307,7 @@ export function createYayaOperationsExecutor(options: {
                 submitter: submitterOf(context),
                 school_id: context.schoolId,
                 resolveBusinessRevision: resolveRevisionWith(context.client),
+                assertItemBinding: assertProposalItemBinding,
               });
               await computed.prepare_write!(context.client);
             });
@@ -331,6 +334,7 @@ export function createYayaOperationsExecutor(options: {
           school_id: context.schoolId,
           submitter: submitterOf(context),
           resolveBusinessRevision: resolveRevisionWith(context.client),
+          assertItemBinding: assertProposalItemBinding,
           callback: async (client, executionContext) => {
             const entry = options.registry.find(executionContext.proposal_item.payload.kind);
             if (!entry) throw new YayaDataError('invalid_request', '未注册的写操作。');
