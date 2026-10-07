@@ -1,0 +1,14 @@
+{
+  "family": "Noto Sans SC",
+  "revision": "Google Fonts v41",
+  "origin": "https://fonts.google.com/specimen/Noto+Sans+SC",
+  "license_source": "https://github.com/google/fonts/blob/main/ofl/notosanssc/OFL.txt",
+  "license_file": "OFL-NotoSansSC.txt",
+  "format": "woff2",
+  "variable_weight": [100, 900],
+  "ui_glyphs": 414,
+  "bytes": 107664,
+  "sha256": "6ded052d2ac148fd8405f4625054cc523cd158c62a74e8b7b008ff8bc75c9646",
+  "reproduce": "pnpm exec node scripts/fetch-home-font.mjs",
+  "coverage": "Fixed interface vocabulary plus approved synthetic examples. Arbitrary names retain Chinese fallback; regenerate when static copy changes."
+}

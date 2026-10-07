@@ -113,3 +113,6 @@ public/window.svg
 .codegraph/
 .cozeproj/reduction
 .preview
+
+# Local browser acceptance artifacts (not product source)
+/output/playwright/

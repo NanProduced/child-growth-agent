@@ -1,0 +1,9 @@
+{
+  "tool": "image_gen.imagegen",
+  "model": "unknown",
+  "reference": "docs/design/home-refinement-20261004/01-guest-desktop.png",
+  "transparent_background": true,
+  "prompt_file": "docs/design/home-refinement-20261004/guest-asset-prompt.txt",
+  "purpose": "isolated raster illustration; never UI text/data",
+  "approved_design_reference": true
+}

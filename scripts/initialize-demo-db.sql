@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS observations (
   ai_organized_at timestamptz,
   confirmed_content jsonb,
   confirmed_at timestamptz,
+  class_context_snapshot jsonb,
+  guide_evidence jsonb,
   is_demo boolean NOT NULL DEFAULT false,
   created_at timestamptz DEFAULT now() NOT NULL,
   updated_at timestamptz
@@ -68,6 +70,13 @@ CREATE TABLE IF NOT EXISTS observations (
 
 ALTER TABLE observations
   ADD COLUMN IF NOT EXISTS class_id varchar(36);
+
+-- 指南证据链 v1 列（与 scripts/upgrade-guide-evidence-v1.sql 同步；旧记录保持 NULL）
+ALTER TABLE observations
+  ADD COLUMN IF NOT EXISTS class_context_snapshot jsonb;
+
+ALTER TABLE observations
+  ADD COLUMN IF NOT EXISTS guide_evidence jsonb;
 
 DO $$
 BEGIN

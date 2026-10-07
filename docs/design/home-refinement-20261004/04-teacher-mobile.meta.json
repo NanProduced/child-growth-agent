@@ -1,0 +1,34 @@
+{
+  "file": "04-teacher-mobile.png",
+  "state": "teacher_mobile",
+  "width": 853,
+  "height": 1844,
+  "sha256": "b9aa55c06d0ce9f94fec5243bd3b0b8cf3cb47310036a929cd3e8cf588cb8828",
+  "source": "C:/Users/nanpr/.codex/generated_images/01a0ebae-c34b-7341-b7cc-aee62ce28509/exec-e8789f6a-00a6-4970-afac-115deb8d81f9.png",
+  "prompts": [
+    "Teacher mobile — initial",
+    "Teacher mobile — targeted revision"
+  ],
+  "role_example": {
+    "classes": 3,
+    "children": 54,
+    "confirmations": 3,
+    "supplements": 2,
+    "organizes": 4
+  },
+  "logical_target": {
+    "width": 390,
+    "height": 844
+  },
+  "tool": "image_gen.imagegen (built-in)",
+  "model": "unknown",
+  "usage": null,
+  "recorded_at_utc": "2026-10-04T11:47:04Z",
+  "date_anchor": "2026-10-04",
+  "timezone": "Asia/Shanghai",
+  "status": "user_approved_for_implementation",
+  "approved": true,
+  "prompt_file": "PROMPTS.md",
+  "not_browser_validation": true,
+  "synthetic_design_data": true
+}

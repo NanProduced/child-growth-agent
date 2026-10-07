@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { AccountsError } from '@/lib/accounts/errors';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import {
@@ -13,6 +14,7 @@ import {
 import { ActivitySupportSection } from '@/components/activity-support-section';
 import { TransferClassDialog } from '@/components/class-dialogs';
 import { GrowthProfileRetry } from '@/components/growth-profile-retry';
+import { ReadFailureNotice, readFailureKind } from '@/components/read-failure-notice';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -28,7 +30,9 @@ import {
 } from '@/lib/format';
 import { hasCurrentActivitySupport } from '@/lib/activity-support';
 import { buildGrowthProfileFallback } from '@/lib/growth-profile';
-import { getChild, listClasses, listEnrollments, listObservations } from '@/lib/queries';
+import { resolveServerAuth } from '@/lib/accounts/access';
+import { scopedGetChild as getChild, scopedListClasses as listClasses, scopedListEnrollments as listEnrollments, scopedListObservations as listObservations } from '@/lib/accounts/scoped-queries';
+import { evidenceEntryQuery } from '@/lib/guide/navigation';
 import type {
   Child,
   ChildClassEnrollment,
@@ -154,12 +158,22 @@ export default async function ChildDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  const auth = await resolveServerAuth();
+  if (auth.state.kind !== 'authenticated') {
+    return <ReadFailureNotice kind={auth.state.kind === 'unavailable' ? 'unavailable' : 'login'} what="成长档案" retryHref={`/children/${encodeURIComponent(id)}`} />;
+  }
+  // UI projection only: the server re-authorizes every read and write.
+  const isAdmin = auth.state.principal.role === 'admin';
   let child: Child | null = null;
   let dbError: string | null = null;
   try {
     child = await getChild(id);
   } catch (e) {
-    dbError = e instanceof Error ? e.message : '数据库连接失败';
+    if (e instanceof AccountsError) {
+      if (e.code === 'not_found') notFound();
+      return <ReadFailureNotice kind={readFailureKind(e)} what="成长档案" retryHref={`/children/${encodeURIComponent(id)}`} />;
+    }
+    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
   }
 
   if (dbError) {
@@ -191,7 +205,11 @@ export default async function ChildDetailPage({
       listClasses(),
     ]);
   } catch (e) {
-    dbError = e instanceof Error ? e.message : '数据库连接失败';
+    if (e instanceof AccountsError) {
+      if (e.code === 'not_found') notFound();
+      return <ReadFailureNotice kind={readFailureKind(e)} what="成长档案的观察与班级轨迹" retryHref={`/children/${encodeURIComponent(id)}`} />;
+    }
+    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
   }
 
   if (dbError) {
@@ -279,13 +297,20 @@ export default async function ChildDetailPage({
             </div>
           </div>
           <div className="flex shrink-0 flex-wrap gap-2">
-            <TransferClassDialog child={child} classes={classes} />
-            <Button asChild size="lg" className="w-full sm:w-auto">
-              <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>
-                <PenLine className="size-4" />
-                记录一次观察
+            <Button asChild variant="outline" className="min-h-11">
+              <Link href={`/children/${encodeURIComponent(child.id)}/evidence?${evidenceEntryQuery(child.class_stage)}`}>
+                查看指南证据册
               </Link>
             </Button>
+            {isAdmin ? <TransferClassDialog child={child} classes={classes} /> : null}
+            {isAdmin ? null : (
+              <Button asChild size="lg" className="w-full sm:w-auto">
+                <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>
+                  <PenLine className="size-4" />
+                  记录一次观察
+                </Link>
+              </Button>
+            )}
           </div>
         </div>
       </section>
@@ -369,6 +394,7 @@ export default async function ChildDetailPage({
         confirmedObservationCount={confirmedObservations.length}
         initialSupport={activitySupport}
         hasStaleSupport={hasStaleActivitySupport}
+        readOnly={isAdmin}
       />
 
       <section aria-labelledby="observation-timeline-title">
@@ -381,7 +407,7 @@ export default async function ChildDetailPage({
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-slate-500">共 {observations.length} 条</span>
-            {observations.length > 0 ? (
+            {!isAdmin && observations.length > 0 ? (
               <Button asChild variant="outline" size="sm">
                 <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>
                   <PenLine className="size-4" />
@@ -400,15 +426,19 @@ export default async function ChildDetailPage({
               <div>
                 <h3 className="font-medium">还没有观察记录</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  从一次具体行为开始，逐步形成这个小朋友的观察档案。
+                  {isAdmin
+                    ? '教师录入观察并确认后，记录会显示在这里。'
+                    : '从一次具体行为开始，逐步形成这个小朋友的观察档案。'}
                 </p>
               </div>
-              <Button asChild>
-                <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>
-                  <PenLine className="size-4" />
-                  记录一次观察
-                </Link>
-              </Button>
+              {isAdmin ? null : (
+                <Button asChild>
+                  <Link href={`/observations/new?child_id=${encodeURIComponent(child.id)}`}>
+                    <PenLine className="size-4" />
+                    记录一次观察
+                  </Link>
+                </Button>
+              )}
             </CardContent>
           </Card>
         ) : (

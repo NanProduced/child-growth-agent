@@ -170,7 +170,7 @@ function noteOrNone(note: string | null | undefined): string {
 }
 
 /** 容错提取模型输出中的 JSON（兼容代码块包裹、前后缀文本） */
-function extractJson(text: string): unknown {
+export function extractJson(text: string): unknown {
   let t = text.trim();
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) t = fence[1].trim();

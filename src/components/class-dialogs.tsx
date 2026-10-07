@@ -27,6 +27,7 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { useTeacher } from '@/components/teacher-provider';
+import { fetchWithAccountAuth } from "@/lib/accounts/client";
 import { classLabel } from '@/lib/format';
 import { CLASS_STAGES, CLASS_STAGE_LABELS, type Child, type SchoolClass } from '@/lib/types';
 import { createClassSchema } from '@/lib/validation';
@@ -62,7 +63,7 @@ export function ClassFormDialog({
   size?: 'sm' | 'default';
 }) {
   const router = useRouter();
-  const { loading, configured, isTeacher } = useTeacher();
+  const { loading, configured, canManageClasses } = useTeacher();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [stage, setStage] = useState<string>('small');
@@ -70,8 +71,10 @@ export function ClassFormDialog({
   const [active, setActive] = useState(true);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [busy, setBusy] = useState(false);
+  // 已有分班或观察记录的班级不能直接改学段/学年（升班需新建班级并转班）
+  const [hasHistory, setHasHistory] = useState(false);
 
-  const locked = loading || !configured || !isTeacher;
+  const locked = loading || !configured || !canManageClasses;
 
   function handleOpen(next: boolean) {
     if (next) {
@@ -80,6 +83,26 @@ export function ClassFormDialog({
       setSchoolYear(klass?.school_year ?? defaultSchoolYear());
       setActive(klass?.is_active ?? true);
       setErrors({});
+      setHasHistory(false);
+      if (klass) {
+        fetch(`/api/classes/${klass.id}`)
+          .then((r) => r.json())
+          .then(
+            (data: {
+              history?: { enrollment_count?: number; observation_count?: number };
+            }) => {
+              const history = data.history;
+              setHasHistory(
+                Boolean(
+                  history &&
+                    ((history.enrollment_count ?? 0) > 0 ||
+                      (history.observation_count ?? 0) > 0),
+                ),
+              );
+            },
+          )
+          .catch(() => undefined);
+      }
     }
     setOpen(next);
   }
@@ -106,7 +129,7 @@ export function ClassFormDialog({
     setErrors({});
     setBusy(true);
     try {
-      const res = await fetch(klass ? `/api/classes/${klass.id}` : '/api/classes', {
+      const res = await fetchWithAccountAuth(klass ? `/api/classes/${klass.id}` : '/api/classes', {
         method: klass ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(parsed.data),
@@ -132,7 +155,7 @@ export function ClassFormDialog({
           variant={variant}
           size={size}
           disabled={locked}
-          title={locked ? '管理班级需要教师登录' : undefined}
+          title={locked ? '管理班级需要园所账号登录' : undefined}
           className="min-h-11"
         >
           {klass ? <Pencil className="size-4" /> : <Plus className="size-4" />}
@@ -162,7 +185,7 @@ export function ClassFormDialog({
 
           <div className="space-y-1.5">
             <Label>学段 *</Label>
-            <Select value={stage} onValueChange={setStage}>
+            <Select value={stage} onValueChange={setStage} disabled={hasHistory}>
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="选择学段" />
               </SelectTrigger>
@@ -185,8 +208,14 @@ export function ClassFormDialog({
               maxLength={20}
               value={schoolYear}
               onChange={(e) => setSchoolYear(e.target.value)}
+              disabled={hasHistory}
             />
             <ErrorText message={errors.school_year} />
+            {hasHistory ? (
+              <p className="text-xs leading-5 text-amber-700">
+                该班级已有分班或观察记录。升班请建立新学年的班级并转班；这里仍可修改班级名称或停用班级。
+              </p>
+            ) : null}
           </div>
 
           <div className="flex items-center justify-between gap-3 rounded-lg border bg-slate-50/70 px-3 py-2.5">
@@ -226,13 +255,13 @@ export function TransferClassDialog({
   classes: SchoolClass[];
 }) {
   const router = useRouter();
-  const { loading, configured, isTeacher } = useTeacher();
+  const { loading, configured, canManageClasses } = useTeacher();
   const [open, setOpen] = useState(false);
   const [targetId, setTargetId] = useState('');
   const [busy, setBusy] = useState(false);
 
   const options = classes.filter((c) => c.is_active && c.id !== child.class_id);
-  const locked = loading || !configured || !isTeacher || options.length === 0;
+  const locked = loading || !configured || !canManageClasses || options.length === 0;
   const target = options.find((c) => c.id === targetId) ?? null;
 
   function handleOpen(next: boolean) {
@@ -249,7 +278,7 @@ export function TransferClassDialog({
     }
     setBusy(true);
     try {
-      const res = await fetch(`/api/classes/${target.id}/children`, {
+      const res = await fetchWithAccountAuth(`/api/classes/${target.id}/children`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ child_id: child.id }),
@@ -275,7 +304,7 @@ export function TransferClassDialog({
           variant="outline"
           size="sm"
           disabled={locked}
-          title={locked ? '转班需要教师登录' : undefined}
+          title={locked ? '转班需要园所账号登录' : undefined}
           className="min-h-11"
         >
           <Repeat2 className="size-4" />

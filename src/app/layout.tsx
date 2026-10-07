@@ -1,8 +1,14 @@
 import type { Metadata } from 'next';
+import { connection } from 'next/server';
 import './globals.css';
+import '@/components/home-v2/home-fonts.css';
 import { Toaster } from '@/components/ui/sonner';
 import { TeacherProvider } from '@/components/teacher-provider';
 import { TopNav } from '@/components/top-nav';
+import { YayaEntry } from '@/components/yaya/yaya-entry';
+import { YayaPanel } from '@/components/yaya/yaya-panel';
+import { YayaSurface } from '@/components/yaya/yaya-provider';
+import { resolveServerAuth } from '@/lib/accounts/access';
 
 export const metadata: Metadata = {
   title: {
@@ -13,17 +19,26 @@ export const metadata: Metadata = {
     '面向幼儿园教师的轻量成长观察应用：记录事实、确认观察、持续回看。',
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Account-specific navigation and assistant state must resolve per request,
+  // never from a build-time fallback captured in a static page.
+  await connection();
+  const resolved = await resolveServerAuth();
+  const initial = { state: resolved.state, session: resolved.session, csrf: resolved.csrf };
   return (
     <html lang="zh-CN">
-      <body className="min-h-screen bg-amber-50/50 antialiased">
-        <TeacherProvider>
-          <TopNav />
-          <main className="mx-auto w-full max-w-7xl px-4 pb-16 pt-6 sm:px-6 lg:px-8">{children}</main>
+      <body className="min-h-screen bg-background antialiased">
+        <TeacherProvider initial={initial}>
+          <YayaSurface auth={initial}>
+            <TopNav />
+            <main className="mx-auto w-full max-w-[1536px] px-4 pb-16 pt-6 sm:px-6 lg:px-10">{children}</main>
+            <YayaEntry auth={initial} />
+            <YayaPanel auth={initial} />
+          </YayaSurface>
         </TeacherProvider>
         <Toaster richColors position="top-center" />
       </body>

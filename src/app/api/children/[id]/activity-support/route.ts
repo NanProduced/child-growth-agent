@@ -5,7 +5,7 @@ import {
   confirmedObservations,
   updateActivitySupport,
 } from "@/lib/activity-support";
-import { requireTeacher } from "@/lib/auth";
+import { runBusinessWrite, AccountsError, mapAccountsError } from "@/lib/auth";
 import { StaleEvidenceError } from "@/lib/growth-profile";
 import { getChild, listObservations } from "@/lib/queries";
 
@@ -13,12 +13,10 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const guard = requireTeacher(request);
-  if (guard) return guard;
-
   const { id } = await params;
 
   try {
+    return await runBusinessWrite(request, "activity_support.write", { kind: "child", child_id: id }, async () => {
     const child = await getChild(id);
     if (!child) {
       return NextResponse.json({ message: "成长档案不存在" }, { status: 404 });
@@ -36,7 +34,9 @@ export async function POST(
       forwardHeaders: HeaderUtils.extractForwardHeaders(request.headers),
     });
     return NextResponse.json(result);
+    });
   } catch (error) {
+    if (error instanceof AccountsError) return mapAccountsError(error);
     if (error instanceof StaleEvidenceError) {
       return NextResponse.json({ message: error.message }, { status: 409 });
     }

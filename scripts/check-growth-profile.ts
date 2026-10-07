@@ -311,24 +311,24 @@ async function main(): Promise<void> {
   passed += 1;
 
   // 8) 未登录写请求仍为 401。
-  const previousPasscode = process.env.TEACHER_PASSCODE;
+  const previousTrustedOrigins = process.env.AUTH_TRUSTED_ORIGINS;
   try {
-    process.env.TEACHER_PASSCODE = 'offline-test-passcode';
+    process.env.AUTH_TRUSTED_ORIGINS = 'http://127.0.0.1';
     assert.equal(requireTeacher(new Request('http://localhost/api/observations'))?.status, 401);
   } finally {
-    if (previousPasscode === undefined) delete process.env.TEACHER_PASSCODE;
-    else process.env.TEACHER_PASSCODE = previousPasscode;
+    if (previousTrustedOrigins === undefined) delete process.env.AUTH_TRUSTED_ORIGINS;
+    else process.env.AUTH_TRUSTED_ORIGINS = previousTrustedOrigins;
   }
   passed += 1;
 
-  // 9) 未配置教师口令仍为 503。
-  const previousMissingCheckPasscode = process.env.TEACHER_PASSCODE;
+  // 9) 未配置可信来源仍为 503。
+  const previousMissingCheckTrustedOrigins = process.env.AUTH_TRUSTED_ORIGINS;
   try {
-    delete process.env.TEACHER_PASSCODE;
+    delete process.env.AUTH_TRUSTED_ORIGINS;
     assert.equal(requireTeacher(new Request('http://localhost/api/observations'))?.status, 503);
   } finally {
-    if (previousMissingCheckPasscode === undefined) delete process.env.TEACHER_PASSCODE;
-    else process.env.TEACHER_PASSCODE = previousMissingCheckPasscode;
+    if (previousMissingCheckTrustedOrigins === undefined) delete process.env.AUTH_TRUSTED_ORIGINS;
+    else process.env.AUTH_TRUSTED_ORIGINS = previousMissingCheckTrustedOrigins;
   }
   passed += 1;
 

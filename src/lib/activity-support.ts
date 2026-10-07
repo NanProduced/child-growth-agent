@@ -84,11 +84,22 @@ function buildFallbackProfile(
   };
 }
 
-export async function updateActivitySupport(
+export interface ActivitySupportUpdatePlan {
+  activity_support: ActivitySupport;
+  fallback_profile: GrowthProfile | null;
+  expected_confirmed_ids: string[];
+}
+
+/**
+ * 活动支持的模型生成与依据集快照（事务外）：返回待保存的计划，不写业务行。
+ * TOOLS1 批准执行时先用本函数完成模型等待，再在同一事务内调用
+ * `updateChildActivitySupportWithClient` 落账。
+ */
+export async function generateActivitySupportUpdate(
   child: Child,
   observations: Observation[],
   options: ActivitySupportUpdateOptions = {},
-): Promise<ActivitySupportUpdateResult> {
+): Promise<ActivitySupportUpdatePlan> {
   const confirmed = confirmedObservations(observations);
   if (confirmed.length === 0) {
     throw new Error("活动支持建议需要至少一条已确认观察");
@@ -120,19 +131,28 @@ export async function updateActivitySupport(
     generated_at: generatedAt,
   };
 
-  const fallbackProfile = storedGrowthProfile(child)
-    ? null
-    : buildFallbackProfile(confirmed, generatedAt);
+  return {
+    activity_support: activitySupport,
+    fallback_profile: storedGrowthProfile(child) ? null : buildFallbackProfile(confirmed, generatedAt),
+    expected_confirmed_ids: expectedIds,
+  };
+}
 
+export async function updateActivitySupport(
+  child: Child,
+  observations: Observation[],
+  options: ActivitySupportUpdateOptions = {},
+): Promise<ActivitySupportUpdateResult> {
+  const plan = await generateActivitySupportUpdate(child, observations, options);
   // 保存层原子条件：写入时数据库中的已确认观察集合必须仍等于本次生成使用的快照
   const saved = await (options.save ?? updateChildActivitySupport)(
     child.id,
-    activitySupport,
-    fallbackProfile,
-    expectedIds,
+    plan.activity_support,
+    plan.fallback_profile,
+    plan.expected_confirmed_ids,
   );
   return {
-    activitySupport,
+    activitySupport: plan.activity_support,
     growthProfile: saved.growth_profile,
   };
 }

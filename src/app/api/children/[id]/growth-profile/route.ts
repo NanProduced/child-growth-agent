@@ -1,8 +1,8 @@
 import { HeaderUtils } from "coze-coding-dev-sdk";
 import { NextRequest, NextResponse } from "next/server";
 
-import { requireTeacher } from "@/lib/auth";
-import { updateGrowthProfileSafely } from "@/lib/growth-profile";
+import { runBusinessWrite, AccountsError, mapAccountsError } from "@/lib/auth";
+import { StaleEvidenceError, updateGrowthProfileAfterConfirmation } from "@/lib/growth-profile";
 import { getChild, listObservations } from "@/lib/queries";
 
 /** 教师主动重试成长档案 Agent；只读取已确认观察，不重新确认观察。 */
@@ -10,12 +10,10 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const guard = requireTeacher(request);
-  if (guard) return guard;
-
   const { id } = await params;
 
   try {
+    return await runBusinessWrite(request, "growth_profile.write", { kind: "child", child_id: id }, async () => {
     const child = await getChild(id);
     if (!child) {
       return NextResponse.json({ message: "成长档案不存在" }, { status: 404 });
@@ -29,18 +27,14 @@ export async function POST(
       );
     }
 
-    const result = await updateGrowthProfileSafely(child, observations, {
+    const growthProfile = await updateGrowthProfileAfterConfirmation(child, observations, {
       forwardHeaders: HeaderUtils.extractForwardHeaders(request.headers),
     });
-    if (result.status === "failed") {
-      return NextResponse.json(
-        { message: result.message ?? "成长档案暂未更新，请稍后重试。" },
-        { status: 502 },
-      );
-    }
-
-    return NextResponse.json(result);
+    return NextResponse.json({ status: "updated", growthProfile });
+    });
   } catch (error) {
+    if (error instanceof AccountsError) return mapAccountsError(error);
+    if (error instanceof StaleEvidenceError) return NextResponse.json({ error: "state_conflict", message: error.message }, { status: 409 });
     return NextResponse.json(
       { message: error instanceof Error ? error.message : "更新成长档案失败，请稍后重试" },
       { status: 500 },

@@ -1,0 +1,30 @@
+{
+  "file": "02-teacher-desktop.png",
+  "state": "teacher",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "c767ef48513fad154936618013c30c6f496aa6f336159d4e1466e5940d10ea1c",
+  "source": "C:/Users/nanpr/.codex/generated_images/01a0ebae-c34b-7341-b7cc-aee62ce28509/exec-69d098ec-f62e-4e2e-9464-868b6b61eebc.png",
+  "prompts": [
+    "Teacher desktop — initial",
+    "Teacher desktop — targeted revision"
+  ],
+  "role_example": {
+    "classes": 3,
+    "children": 54,
+    "confirmations": 3,
+    "supplements": 2,
+    "organizes": 4
+  },
+  "tool": "image_gen.imagegen (built-in)",
+  "model": "unknown",
+  "usage": null,
+  "recorded_at_utc": "2026-10-04T11:47:04Z",
+  "date_anchor": "2026-10-04",
+  "timezone": "Asia/Shanghai",
+  "status": "user_approved_for_implementation",
+  "approved": true,
+  "prompt_file": "PROMPTS.md",
+  "not_browser_validation": true,
+  "synthetic_design_data": true
+}

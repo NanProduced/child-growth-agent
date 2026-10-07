@@ -1,6 +1,6 @@
 import { HeaderUtils } from "coze-coding-dev-sdk";
 import { NextRequest, NextResponse } from "next/server";
-import { requireTeacher } from "@/lib/auth";
+import { runBusinessWrite, AccountsError, mapAccountsError } from "@/lib/auth";
 import { ObservationStateConflictError } from "@/lib/evidence-snapshot";
 import { processObservationAgent } from "@/lib/observation-agent";
 import { getChild, getObservation } from "@/lib/queries";
@@ -15,11 +15,9 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const guard = requireTeacher(request);
-  if (guard) return guard;
-
   const { id } = await params;
   try {
+    return await runBusinessWrite(request, "observation.organize", { kind: "observation", observation_id: id }, async () => {
     const observation = await getObservation(id);
     if (!observation) {
       return NextResponse.json({ message: "观察记录不存在" }, { status: 404 });
@@ -42,7 +40,9 @@ export async function POST(
       forwardHeaders: HeaderUtils.extractForwardHeaders(request.headers),
     });
     return NextResponse.json({ observation: updated });
+    });
   } catch (e) {
+    if (e instanceof AccountsError) return mapAccountsError(e);
     if (e instanceof ObservationStateConflictError) {
       return NextResponse.json({ message: e.message }, { status: 409 });
     }
