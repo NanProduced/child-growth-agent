@@ -144,3 +144,10 @@ body {
   background: oklch(0.88 0.08 150);
   color: oklch(0.2 0.03 150);
 }
+
+/* 芽芽工作区：宽屏下核对台已展示提案卡，消息流内隐藏重复卡片（<1280px 时保留卡内视图） */
+@media (width >= 1280px) {
+  .yaya-workspace-thread [data-yaya-proposal] {
+    display: none;
+  }
+}

@@ -1,0 +1,516 @@
+{
+  "conversation_id": "11111111-1111-4111-8111-111111111111",
+  "conversation": {
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "owner_account_id": "teacher-1",
+    "projected_title": "积木区观察",
+    "title_restricted": false,
+    "revision": 3,
+    "created_at": "2026-10-06T01:00:00.000Z",
+    "updated_at": "2026-10-06T02:00:00.000Z",
+    "deleted_at": null
+  },
+  "conversation_list": {
+    "conversations": [
+      {
+        "conversation_id": "11111111-1111-4111-8111-111111111111",
+        "owner_account_id": "teacher-1",
+        "projected_title": "积木区观察",
+        "title_restricted": false,
+        "revision": 3,
+        "created_at": "2026-10-06T01:00:00.000Z",
+        "updated_at": "2026-10-06T02:00:00.000Z",
+        "deleted_at": null
+      },
+      {
+        "conversation_id": "22222222-2222-4222-8222-222222222222",
+        "owner_account_id": "teacher-1",
+        "projected_title": "受限会话",
+        "title_restricted": true,
+        "revision": 1,
+        "created_at": "2026-10-05T01:00:00.000Z",
+        "updated_at": "2026-10-05T02:00:00.000Z",
+        "deleted_at": null
+      }
+    ]
+  },
+  "new_conversation": {
+    "conversation": {
+      "conversation_id": "33333333-3333-4333-8333-333333333333",
+      "owner_account_id": "teacher-1",
+      "projected_title": "未命名会话",
+      "title_restricted": false,
+      "revision": 1,
+      "created_at": "2026-10-06T03:00:00.000Z",
+      "updated_at": "2026-10-06T03:00:00.000Z",
+      "deleted_at": null
+    }
+  },
+  "history": {
+    "conversation": {
+      "conversation_id": "11111111-1111-4111-8111-111111111111",
+      "owner_account_id": "teacher-1",
+      "projected_title": "积木区观察",
+      "title_restricted": false,
+      "revision": 7,
+      "created_at": "2026-10-06T01:00:00.000Z",
+      "updated_at": "2026-10-06T02:00:00.000Z",
+      "deleted_at": null
+    },
+    "messages": [
+      {
+        "message_id": "m-user-1",
+        "conversation_id": "11111111-1111-4111-8111-111111111111",
+        "owner_account_id": "teacher-1",
+        "role": "user",
+        "message_kind": "mixed",
+        "execution_state": "none",
+        "revision": 1,
+        "created_at": "2026-10-06T01:30:00.000Z",
+        "projection": {
+          "visibility": "full",
+          "fragments": [
+            {
+              "fragment_id": "m-user-1:f0",
+              "visibility": "full",
+              "reason": "ok",
+              "text": "帮我整理小满搭长桥的观察。",
+              "provenance": { "kind": "raw_input", "ref_id": null, "label": null, "derived_from": null },
+              "independently_readable": true
+            }
+          ],
+          "attachments": [
+            { "attachment_id": "att-meta-1", "readable": false, "metadata_only": true, "reason": "metadata_only_historical" }
+          ],
+          "metadata": null,
+          "execution_allowed": false
+        },
+        "fragments": [
+          {
+            "fragment_id": "m-user-1:f0",
+            "visibility": "full",
+            "reason": "ok",
+            "text": "帮我整理小满搭长桥的观察。",
+            "provenance": { "kind": "raw_input", "ref_id": null, "label": null, "derived_from": null },
+            "independently_readable": true
+          }
+        ],
+        "attachment_ids": ["att-meta-1"],
+        "metadata": null
+      },
+      {
+        "message_id": "m-assistant-1",
+        "conversation_id": "11111111-1111-4111-8111-111111111111",
+        "owner_account_id": "teacher-1",
+        "role": "assistant",
+        "message_kind": "text",
+        "execution_state": "none",
+        "revision": 2,
+        "created_at": "2026-10-06T01:31:00.000Z",
+        "projection": {
+          "visibility": "full",
+          "fragments": [
+            {
+              "fragment_id": "m-assistant-1:f0",
+              "visibility": "full",
+              "reason": "ok",
+              "text": "已整理成草稿，请核对后再归档。",
+              "provenance": { "kind": "model_text", "ref_id": null, "label": null, "derived_from": null },
+              "independently_readable": true
+            }
+          ],
+          "attachments": [],
+          "metadata": null,
+          "execution_allowed": false
+        },
+        "fragments": [
+          {
+            "fragment_id": "m-assistant-1:f0",
+            "visibility": "full",
+            "reason": "ok",
+            "text": "已整理成草稿，请核对后再归档。",
+            "provenance": { "kind": "model_text", "ref_id": null, "label": null, "derived_from": null },
+            "independently_readable": true
+          }
+        ],
+        "attachment_ids": [],
+        "metadata": null
+      },
+      {
+        "message_id": "m-assistant-2",
+        "conversation_id": "11111111-1111-4111-8111-111111111111",
+        "owner_account_id": "teacher-1",
+        "role": "assistant",
+        "message_kind": "receipt",
+        "execution_state": "unknown",
+        "revision": 3,
+        "created_at": "2026-10-06T01:35:00.000Z",
+        "projection": {
+          "visibility": "full",
+          "fragments": [
+            {
+              "fragment_id": "m-assistant-2:f0",
+              "visibility": "full",
+              "reason": "ok",
+              "text": "操作回执（原操作 op-history-1）：结果需按原操作核对",
+              "provenance": { "kind": "tool_result", "ref_id": null, "label": null, "derived_from": null },
+              "independently_readable": true
+            }
+          ],
+          "attachments": [],
+          "metadata": null,
+          "execution_allowed": false
+        },
+        "fragments": [
+          {
+            "fragment_id": "m-assistant-2:f0",
+            "visibility": "full",
+            "reason": "ok",
+            "text": "操作回执（原操作 op-history-1）：结果需按原操作核对",
+            "provenance": { "kind": "tool_result", "ref_id": null, "label": null, "derived_from": null },
+            "independently_readable": true
+          }
+        ],
+        "attachment_ids": [],
+        "metadata": null
+      }
+    ]
+  },
+  "answer_stream": [
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-1", "seq": 1, "type": "run_started" },
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-1", "seq": 2, "type": "model_attempted", "attempt": 1 },
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-1", "seq": 3, "type": "model_completed", "provider": "stepfun", "model": "step-test", "usage": null },
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-1", "seq": 4, "type": "action_parsed", "action": "answer", "tool": null },
+    {
+      "protocol": "yaya-run-events-v1",
+      "run_id": "run-fixture-1",
+      "seq": 5,
+      "type": "answer",
+      "content": "**先说结论**：小满在搭建中尝试用不同形状的积木解决问题，可以按“科学·数学认知”的线索整理。\n\n- 行为事实：桥塌了三次后，他把底座换成了更宽的长方体。\n- 支持建议：提供不同宽度的底座积木，继续观察他的选择。\n\n注意：<script>window.__yayaXss = true</script> 这段只应作为普通文本显示。[危险链接](javascript:alert(1)) 不应可点击，[可靠来源](https://example.com/guides) 可以点击。\n\n为了覆盖长答展开，下面给出较长的补充说明：观察记录应保持白描，先写幼儿具体做了什么、说了什么，再写成人的支持方式；不要把推断当作事实，也不要用“很棒”“很聪明”这类评价替代行为描述。如果同一段事实包含多名幼儿，应分别记录，每人一张卡，互不混淆。整理草稿只是工作材料，必须由教师核对原文、对象与日期之后才能归档；图片解读只是素材说明，不等于发展结论。",
+      "sources": [
+        { "kind": "model_text", "ref_id": null, "label": "芽芽整理", "derived_from": null }
+      ]
+    },
+    {
+      "protocol": "yaya-run-events-v1",
+      "run_id": "run-fixture-1",
+      "seq": 6,
+      "type": "run_end",
+      "outcome": {
+        "kind": "answered",
+        "content": "**先说结论**：小满在搭建中尝试用不同形状的积木解决问题，可以按“科学·数学认知”的线索整理。\n\n- 行为事实：桥塌了三次后，他把底座换成了更宽的长方体。\n- 支持建议：提供不同宽度的底座积木，继续观察他的选择。\n\n注意：<script>window.__yayaXss = true</script> 这段只应作为普通文本显示。[危险链接](javascript:alert(1)) 不应可点击，[可靠来源](https://example.com/guides) 可以点击。\n\n为了覆盖长答展开，下面给出较长的补充说明：观察记录应保持白描，先写幼儿具体做了什么、说了什么，再写成人的支持方式；不要把推断当作事实，也不要用“很棒”“很聪明”这类评价替代行为描述。如果同一段事实包含多名幼儿，应分别记录，每人一张卡，互不混淆。整理草稿只是工作材料，必须由教师核对原文、对象与日期之后才能归档；图片解读只是素材说明，不等于发展结论。",
+        "sources": [
+          { "kind": "model_text", "ref_id": null, "label": "芽芽整理", "derived_from": null }
+        ]
+      }
+    }
+  ],
+  "proposal_stream": [
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-2", "seq": 1, "type": "run_started" },
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-2", "seq": 2, "type": "model_attempted", "attempt": 1 },
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-2", "seq": 3, "type": "model_completed", "provider": "stepfun", "model": "step-test", "usage": null },
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-2", "seq": 4, "type": "action_parsed", "action": "propose_write", "tool": "create_observation" },
+    {
+      "protocol": "yaya-run-events-v1",
+      "run_id": "run-fixture-2",
+      "seq": 5,
+      "type": "proposal_prepared",
+      "proposal": {
+        "proposal_id": "prop-fixture-1",
+        "batch_id": "batch-fixture-1",
+        "proposal_origin": "model_suggestion",
+        "auth": { "kind": "action", "action": "observation.write", "resource": "child" },
+        "prepared_at": "2026-10-06T03:10:00.000Z",
+        "items": [
+          {
+            "item_key": "item-c1",
+            "target_id": "child-1",
+            "content_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "attachment_associations": [{ "attachment_id": "att-img-1", "target_id": "child-1" }],
+            "payload": {
+              "kind": "create_observation",
+              "child_id": "child-1",
+              "observed_at": "2026-10-08",
+              "raw_text": "小满自己搭长桥，中间塌了三次，他换了更宽的底座，第四次搭稳了。",
+              "context": "积木区",
+              "confirmed_class_id": null,
+              "image_ids": ["att-img-1"],
+              "source_input": null
+            }
+          },
+          {
+            "item_key": "item-c2",
+            "target_id": "child-2",
+            "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "attachment_associations": [],
+            "payload": {
+              "kind": "create_observation",
+              "child_id": "child-2",
+              "observed_at": "2026-10-08",
+              "raw_text": "阿依在建构区与同伴合作，尝试搭建小房子。",
+              "context": "积木区",
+              "confirmed_class_id": null,
+              "image_ids": [],
+              "source_input": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "protocol": "yaya-run-events-v1",
+      "run_id": "run-fixture-2",
+      "seq": 6,
+      "type": "run_end",
+      "outcome": {
+        "kind": "proposed",
+        "proposals": [
+          {
+            "proposal_id": "prop-fixture-1",
+            "batch_id": "batch-fixture-1",
+            "proposal_origin": "model_suggestion",
+            "auth": { "kind": "action", "action": "observation.write", "resource": "child" },
+            "prepared_at": "2026-10-06T03:10:00.000Z",
+            "items": [
+              {
+                "item_key": "item-c1",
+                "target_id": "child-1",
+                "content_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "attachment_associations": [{ "attachment_id": "att-img-1", "target_id": "child-1" }],
+                "payload": {
+                  "kind": "create_observation",
+                  "child_id": "child-1",
+                  "observed_at": "2026-10-08",
+                  "raw_text": "小满自己搭长桥，中间塌了三次，他换了更宽的底座，第四次搭稳了。",
+                  "context": "积木区",
+                  "confirmed_class_id": null,
+                  "image_ids": ["att-img-1"],
+                  "source_input": null
+                }
+              },
+              {
+                "item_key": "item-c2",
+                "target_id": "child-2",
+                "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "attachment_associations": [],
+                "payload": {
+                  "kind": "create_observation",
+                  "child_id": "child-2",
+                  "observed_at": "2026-10-08",
+                  "raw_text": "阿依在建构区与同伴合作，尝试搭建小房子。",
+                  "context": "积木区",
+                  "confirmed_class_id": null,
+                  "image_ids": [],
+                  "source_input": null
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "receipt_unknown_stream": [
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-3", "seq": 1, "type": "run_started" },
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-3", "seq": 2, "type": "action_parsed", "action": "answer", "tool": null },
+    { "protocol": "yaya-run-events-v1", "run_id": "run-fixture-3", "seq": 3, "type": "answer", "content": "已按原操作发出保存请求。", "sources": [] },
+    {
+      "protocol": "yaya-run-events-v1",
+      "run_id": "run-fixture-3",
+      "seq": 4,
+      "type": "receipt",
+      "operation_id": "op-fixture-1",
+      "outcome": { "kind": "unknown", "reason": "no_receipt" }
+    },
+    {
+      "protocol": "yaya-run-events-v1",
+      "run_id": "run-fixture-3",
+      "seq": 5,
+      "type": "run_end",
+      "outcome": { "kind": "answered", "content": "已按原操作发出保存请求。", "sources": [] }
+    }
+  ],
+  "proposal_projection": {
+    "proposal": {
+      "proposal_id": "prop-fixture-1",
+      "batch_id": "batch-fixture-1",
+      "conversation_id": "11111111-1111-4111-8111-111111111111",
+      "owner_account_id": "teacher-1",
+      "proposal_origin": "model_suggestion",
+      "auth": { "kind": "action", "action": "observation.write", "resource": "child" },
+      "status": "open",
+      "prepared_at": "2026-10-06T03:10:00.000Z",
+      "items": [
+        {
+          "item_key": "item-c1",
+          "operation_id": "op-fixture-c1",
+          "target_id": "child-1",
+          "action": "observation.write",
+          "resource": "child",
+          "resource_ref": { "kind": "child", "child_id": "child-1" },
+          "content_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "attachment_associations": [{ "attachment_id": "att-img-1", "target_id": "child-1" }],
+          "business_revision": null,
+          "status": "pending",
+          "access": "full",
+          "payload": {
+            "kind": "create_observation",
+            "child_id": "child-1",
+            "observed_at": "2026-10-08",
+            "raw_text": "小满自己搭长桥，中间塌了三次，他换了更宽的底座，第四次搭稳了。",
+            "context": "积木区",
+            "confirmed_class_id": null,
+            "image_ids": ["att-img-1"],
+            "source_input": null
+          }
+        },
+        {
+          "item_key": "item-c2",
+          "operation_id": "op-fixture-c2",
+          "target_id": "child-2",
+          "action": "observation.write",
+          "resource": "child",
+          "resource_ref": { "kind": "child", "child_id": "child-2" },
+          "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attachment_associations": [],
+          "business_revision": null,
+          "status": "pending",
+          "access": "denied",
+          "payload": null
+        }
+      ],
+      "attachments": [
+        { "attachment_id": "att-img-1", "readable": true, "metadata_only": false, "reason": "ok" }
+      ]
+    }
+  },
+  "approval": {
+    "approval": {
+      "approval_id": "appr-fixture-1",
+      "proposal_id": "prop-fixture-1",
+      "batch_id": "batch-fixture-1",
+      "actor_account_id": "teacher-1",
+      "approval_source": "authenticated_entry",
+      "approved_at": "2026-10-06T03:20:00.000Z",
+      "expires_at": null,
+      "cancelled_at": null,
+      "consumed_at": null,
+      "items": []
+    },
+    "cancelled_approval_id": null
+  },
+  "operations_success": {
+    "receipts": [
+      {
+        "batch_id": "batch-fixture-1",
+        "proposal_id": "prop-fixture-1",
+        "item_key": "item-c1",
+        "operation_id": "op-fixture-c1",
+        "target_id": "child-1",
+        "actor_account_id": "teacher-1",
+        "status": "saved",
+        "effect": "committed",
+        "business_object_id": "obs-fixture-1",
+        "business_revision": "1",
+        "recorded_at": "2026-10-06T03:21:00.000Z"
+      }
+    ]
+  },
+  "operations_unverified": {
+    "receipts": [
+      {
+        "batch_id": "batch-fixture-1",
+        "proposal_id": "prop-fixture-1",
+        "item_key": "item-c1",
+        "operation_id": "op-fixture-c1",
+        "target_id": "child-1",
+        "actor_account_id": "teacher-1",
+        "status": "saved",
+        "effect": "unknown",
+        "business_object_id": null,
+        "business_revision": null,
+        "recorded_at": "2026-10-06T03:21:00.000Z"
+      }
+    ]
+  },
+  "operations_query_saved": {
+    "operation": {
+      "operation_id": "op-fixture-1",
+      "planned": {
+        "batch_id": "batch-fixture-1",
+        "proposal_id": "prop-fixture-1",
+        "item_key": "item-c1",
+        "operation_id": "op-fixture-1",
+        "target_id": "child-1",
+        "actor_account_id": "teacher-1"
+      },
+      "status": "saved",
+      "superseded_by": null,
+      "started": true,
+      "outcome": {
+        "kind": "saved",
+        "receipt": {
+          "batch_id": "batch-fixture-1",
+          "proposal_id": "prop-fixture-1",
+          "item_key": "item-c1",
+          "operation_id": "op-fixture-1",
+          "target_id": "child-1",
+          "actor_account_id": "teacher-1",
+          "status": "saved",
+          "effect": "committed",
+          "business_object_id": "obs-fixture-1",
+          "business_revision": "1",
+          "recorded_at": "2026-10-06T03:22:00.000Z"
+        }
+      }
+    }
+  },
+  "upload_failure": {
+    "uploads": [
+      {
+        "client_upload_id": null,
+        "ok": false,
+        "code": "file_too_large",
+        "message": "单张图片不能超过 10MiB，请压缩后再上传。"
+      }
+    ]
+  },
+  "upload_success": {
+    "uploads": [
+      {
+        "client_upload_id": null,
+        "ok": true,
+        "attachment": {
+          "attachment_id": "att-img-1",
+          "status": "ready",
+          "content_type": "image/png",
+          "byte_size": 2048,
+          "width": 64,
+          "height": 64,
+          "created_at": "2026-10-06T03:30:00.000Z"
+        }
+      }
+    ]
+  },
+  "run_lookup_in_progress": { "status": "in_progress", "run_id": "run-fixture-9" },
+  "auth_status": {
+    "state": {
+      "kind": "authenticated",
+      "principal": {
+        "account_id": "teacher-1",
+        "username": "teacher1",
+        "display_name": "测试教师",
+        "role": "teacher",
+        "account_status": "active",
+        "scope": { "kind": "classes", "class_ids": ["class-1"] }
+      }
+    },
+    "session": {
+      "session_id": "session-fixture",
+      "created_at": "2026-10-06T00:00:00.000Z",
+      "expires_at": "2026-12-31T00:00:00.000Z"
+    },
+    "csrf": { "header_name": "x-csrf-token", "token": "csrf-fixture" }
+  }
+}
+
