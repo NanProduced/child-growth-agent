@@ -1,16 +1,17 @@
 /**
- * YAYA-CHAT-BIND0 离线参考检查（reference_only）。CHAT-BIND0-R1 扩充。
+ * YAYA-CHAT-BIND0 离线参考检查（reference_only）。CHAT-BIND0-R1-FINAL 扩充。
  *
  * 只做纯检查：不连数据库、不调用模型 / 搜索 / 对象存储、不发真实 HTTP、
  * 不写任何业务数据，通过也不证明真实认证 / 真实事务 / 生产可用。
  *
- * 覆盖两条最小接口的反例（原 14 组 + R1 5 组）：
+ * 覆盖两条最小接口的反例（原 14 组 + R1 5 组 + R1-FINAL 3 组 = 22 组）：
  * 私域答案丢来源、只给模型引用但漏依赖、一般问答正向对照、错 owner / 会话 / run / 内容、
  * 历史恢复不执行、错回执身份、终态撤权、旧无绑定消息、重复持久化、未知只查原身份、
  * 保存详情不可读、finished 终态、标记不是批准、浏览器边界；
- * R1：混合依赖漏守门、回执本体核验、重复 / 矛盾事实顺序无关、路径身份编码、提案投影恢复。
+ * R1：混合依赖漏守门、回执本体核验、重复 / 矛盾事实顺序无关、路径身份编码、提案投影恢复；
+ * R1-FINAL：诊断原因两序聚合、独立 `.` / `..` 段拒绝、WHATWG URL 归一化与 query 往返。
  *
- * 运行：pnpm exec tsx scripts/yaya/check-chat-bind.ts
+ * 运行（本工作树内）：pnpm exec tsx scripts/yaya/check-chat-bind.ts
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -763,6 +764,136 @@ check("提案投影恢复：标记提案身份派生只读提案读取，不靠�
     "/api/yaya/conversations/conv-1/runs",
   ]);
   assert.equal(noProposalPaths.includes("/api/yaya/proposals"), false);
+});
+
+/* ------------------------------- R1-FINAL 反例（两个 P2） ------------------------------- */
+
+check("回执诊断原因聚合：同组多错回执两序 verdict 完全一致，按既有枚举优先级取值", () => {
+  const factsWith = (receipts: YayaOperationReceipt[]): YayaRecoveryFacts => ({
+    ...FACTS,
+    operations: [{ ...FACTS.operations[0], receipts }],
+  });
+  const actorWrong: YayaOperationReceipt = { ...RECEIPT, actor_account_id: "acc-other" };
+  const targetWrong: YayaOperationReceipt = { ...RECEIPT, target_id: "obs-9" };
+  const itemWrong: YayaOperationReceipt = { ...RECEIPT, item_key: "item-9" };
+
+  // 同一组回执：target 错在前 / actor 错在前，判定必须逐字一致
+  const targetFirst = verifyYayaRecoveryIdentity(MARK, factsWith([targetWrong, actorWrong]));
+  const actorFirst = verifyYayaRecoveryIdentity(MARK, factsWith([actorWrong, targetWrong]));
+  assert.deepEqual(targetFirst, actorFirst, "两序 verdict / reason 必须完全一致");
+  assert.deepEqual(
+    targetFirst,
+    { verifiable: false, reason: "actor_mismatch" },
+    "原因枚举优先级：actor_mismatch 先于 target_mismatch",
+  );
+
+  // 一条回执同时多错（actor + target）→ 仍是同一优先级结论
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, factsWith([{ ...RECEIPT, actor_account_id: "acc-other", target_id: "obs-9" }])),
+    { verifiable: false, reason: "actor_mismatch" },
+  );
+
+  // 操作级身份错误优先于 actor（item/batch 错 + actor 错）
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, factsWith([{ ...RECEIPT, batch_id: "batch-9", actor_account_id: "acc-other" }])),
+    { verifiable: false, reason: "operation_mismatch" },
+  );
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, factsWith([itemWrong, actorWrong])),
+    { verifiable: false, reason: "operation_mismatch" },
+    "两序（item 错 / actor 错）也必须按 operation_mismatch 优先",
+  );
+  assert.deepEqual(verifyYayaRecoveryIdentity(MARK, factsWith([actorWrong, itemWrong])), {
+    verifiable: false,
+    reason: "operation_mismatch",
+  });
+
+  // 正常对照：单条合法回执仍按原计划核出 saved
+  assert.deepEqual(verifyYayaRecoveryIdentity(MARK, FACTS), {
+    verifiable: true,
+    outcomes: [{ kind: "saved", receipt: RECEIPT }],
+  });
+  // 正常对照：只有 actor 错 / 只有 target 错的既有语义不变
+  assert.deepEqual(verifyYayaRecoveryIdentity(MARK, factsWith([actorWrong])), {
+    verifiable: false,
+    reason: "actor_mismatch",
+  });
+  assert.deepEqual(verifyYayaRecoveryIdentity(MARK, factsWith([targetWrong])), {
+    verifiable: false,
+    reason: "target_mismatch",
+  });
+});
+
+check("独立 . / .. 段拒绝：解析与 GET 清单都不产生会被 WHATWG 改道的目标", () => {
+  for (const dot of [".", ".."]) {
+    // 反例前提：该值不编码，WHATWG 会把它归一化成另一个路径
+    const naive = new URL(`/api/yaya/conversations/${dot}/messages`, "https://example.test");
+    assert.equal(naive.pathname, dot === "." ? "/api/yaya/conversations/messages" : "/api/yaya/messages");
+    assert.notEqual(naive.pathname, `/api/yaya/conversations/${dot}/messages`, "dot 段确实会改道");
+
+    const parsed = parseYayaChatRecoveryMark({ ...MARK, conversation_id: dot });
+    assert.equal(parsed.ok, false, `conversation_id=${dot} 必须被解析拒绝`);
+    assert.equal(firstCode(parsed), "malformed_request");
+
+    // 直接构造（绕过解析）也不得派生任何恢复请求
+    const direct: YayaChatRecoveryMark = { ...MARK, conversation_id: dot };
+    assert.deepEqual(yayaRecoveryLookupRequests(direct), [], "不产生恢复请求");
+  }
+
+  // 正常 conversation 身份仍可查询（不因 dot 规则被误伤）
+  const normal = parseYayaChatRecoveryMark(MARK);
+  assert.equal(normal.ok, true);
+  if (!normal.ok) return;
+  const paths = yayaRecoveryLookupRequests(normal.value).map((request) => request.path);
+  assert.deepEqual(paths, [
+    "/api/yaya/conversations/conv-1/messages",
+    "/api/yaya/conversations/conv-1/runs",
+    "/api/yaya/proposals",
+    "/api/yaya/operations",
+  ]);
+  assert.equal(
+    new URL(paths[0] ?? "", "https://example.test").pathname,
+    "/api/yaya/conversations/conv-1/messages",
+    "正常身份经 WHATWG 归一化后目标不变",
+  );
+});
+
+check("保留字符与嵌入点段编码后 URL 目标不变，query 原值经 URLSearchParams 往返", () => {
+  // 非独立 dot 段的嵌入值仍合法（只拒绝整段 . / ..）
+  const identity = "conv/../../..?x#y%20z";
+  const clientRequestId = "r&e=q+x y";
+  const parsed = parseYayaChatRecoveryMark({
+    ...MARK,
+    conversation_id: identity,
+    run: { run_id: "run-1", client_request_id: clientRequestId },
+  });
+  assert.equal(parsed.ok, true, "嵌入点段与保留字符不被误拒");
+  if (!parsed.ok) return;
+
+  const requests = yayaRecoveryLookupRequests(parsed.value);
+  assert.ok(requests.length >= 4, "合法身份仍产生完整只读清单");
+  const base = "https://example.test";
+  const prefix = "/api/yaya/conversations/";
+
+  // 路径经 WHATWG 解析后目标不变：仍是「原身份所在那一段」，不发生归一化改道
+  for (const suffix of ["/messages", "/runs"]) {
+    const expected = `${prefix}${encodeURIComponent(identity)}${suffix}`;
+    const url = new URL(expected, base);
+    assert.equal(url.pathname, expected, "WHATWG 归一化不得改道");
+    assert.equal(decodeURIComponent(url.pathname.slice(prefix.length, url.pathname.length - suffix.length)), identity, "解码还原原身份，不删字符");
+  }
+
+  // query 保持原值，由 URLSearchParams 拼接后可完整往返
+  const run = requests.find((request) => request.path.endsWith("/runs"));
+  assert.ok(run !== undefined);
+  const runUrl = new URL(run.path, base);
+  for (const [key, value] of Object.entries(run.query)) runUrl.searchParams.set(key, value);
+  assert.equal(runUrl.searchParams.get("client_request_id"), clientRequestId, "query 原值往返");
+  assert.equal(runUrl.pathname, `${prefix}${encodeURIComponent(identity)}/runs`);
+
+  const operation = requests.find((request) => request.path === "/api/yaya/operations");
+  assert.deepEqual(operation?.query, { operation_id: "op-1" }, "操作身份保持独立参数原值");
+  assert.equal(new URLSearchParams(operation?.query).get("operation_id"), "op-1");
 });
 
 /* ------------------------------- 协议边界 ------------------------------- */

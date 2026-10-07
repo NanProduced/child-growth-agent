@@ -26,6 +26,12 @@
  *   item_key 唯一，重复不产生重复结果；
  * - 恢复清单的路径身份 `encodeURIComponent`，查询值保持独立参数交 URLSearchParams。
  *
+ * CHAT-BIND0-R1-FINAL（两个 P2 收口，前次三个 P1 保持）：
+ * - 回执身份诊断聚合**全部**回执原因，按 `pickReason` 枚举优先级取值，
+ *   同组坏回执在任意遍历顺序下返回完全一致的 verdict / reason；
+ * - 独立 `.` / `..` 段在解析与 GET 清单出口整体拒绝（WHATWG 归一化会改道），
+ *   其余保留字符继续编码，不删字符、不双重编码、不加 UUID 限制。
+ *
  * 浏览器消费边界：UI1 可直接打包（esbuild platform=browser），
  * 不得引入 `node:` / Next / 数据库 / 模型模块。
  */
@@ -210,6 +216,17 @@ export interface YayaChatRecoveryMark {
 
 const nonBlankString = z.string().refine((value) => value.trim().length !== 0, "不能为空白字符串");
 
+/**
+ * 路径身份格式下限（R1-FINAL / P2-B）：独立 `.` / `..` 段不会被
+ * `encodeURIComponent` 改写，WHATWG URL 解析时会把它们归一化成别的路径
+ * （`/conversations/./messages` → `/conversations/messages`），
+ * 因此必须整体拒绝；其余值（含 `/ ? # %` 与嵌入的 `..`）照常走编码，
+ * 不删字符、不做双重编码、不追加 UUID 限制。
+ */
+function isPathSafeIdentity(value: string): boolean {
+  return value !== "." && value !== "..";
+}
+
 const yayaRecoveryMarkSchema: z.ZodType<YayaChatRecoveryMark> = z
   .strictObject({
     mark: z.literal(YAYA_RECOVERY_MARK_KIND),
@@ -232,6 +249,13 @@ const yayaRecoveryMarkSchema: z.ZodType<YayaChatRecoveryMark> = z
     ),
   })
   .superRefine((value, ctx) => {
+    if (!isPathSafeIdentity(value.conversation_id)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["conversation_id"],
+        message: "独立 . / .. 段不得作为路径身份",
+      });
+    }
     if (value.operations.length > 0 && value.proposal === null) {
       ctx.addIssue({ code: "custom", path: ["proposal"], message: "带操作身份的标记必须同时带提案身份" });
     }
@@ -361,16 +385,33 @@ function operationFactMismatch(
   return null;
 }
 
-/** 冻结判定给出 `identity_mismatch` 后的精确诊断（operation_id 已在调用前过滤） */
+/**
+ * 冻结判定给出 `identity_mismatch` 后的精确诊断（operation_id 已在调用前过滤）。
+ * R1-FINAL：**聚合全部回执**的每类身份偏差，再按 `pickReason` 的原因枚举优先级
+ * （operation → actor → target）取值，保证同一组坏回执在任意顺序下返回
+ * 完全一致的 verdict / reason；不从回执反建 expected。
+ */
 function diagnoseReceiptIdentityMismatch(
   receipts: readonly YayaOperationReceipt[],
   expected: YayaPlannedOperation,
 ): YayaRecoveryUnverifiableReason {
+  let reason: YayaRecoveryUnverifiableReason | null = null;
   for (const receipt of receipts) {
-    if (receipt.actor_account_id !== expected.actor_account_id) return "actor_mismatch";
-    if (receipt.target_id !== expected.target_id) return "target_mismatch";
+    if (
+      receipt.proposal_id !== expected.proposal_id ||
+      receipt.batch_id !== expected.batch_id ||
+      receipt.item_key !== expected.item_key
+    ) {
+      reason = pickReason(reason, "operation_mismatch");
+    }
+    if (receipt.actor_account_id !== expected.actor_account_id) {
+      reason = pickReason(reason, "actor_mismatch");
+    }
+    if (receipt.target_id !== expected.target_id) {
+      reason = pickReason(reason, "target_mismatch");
+    }
   }
-  return "operation_mismatch";
+  return reason ?? "operation_mismatch";
 }
 
 /**
@@ -510,10 +551,13 @@ function buildRecoveryRequest(
 /**
  * 标记 → 只读查询清单：历史 GET、原运行 GET、提案投影 GET、逐原操作 GET。
  * 不含 POST：不重新发起 run、不执行旧批准、不产生业务写。
+ * 出口守卫（R1-FINAL）：`conversation_id` 是唯一进入路径的身份，
+ * 独立 `.` / `..` 段会被 WHATWG 归一化改道 ⇒ 不产生任何恢复请求。
  */
 export function yayaRecoveryLookupRequests(
   mark: YayaChatRecoveryMark,
 ): readonly YayaRecoveryRequest[] {
+  if (!isPathSafeIdentity(mark.conversation_id)) return [];
   const requests: YayaRecoveryRequest[] = [
     buildRecoveryRequest(YAYA_RECOVERY_PATHS.messages, { conversation_id: mark.conversation_id }),
   ];

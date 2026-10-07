@@ -8,8 +8,10 @@ APP1 当前候选 `62cc3b784d5cb06764e605f3432229e6412a761e`、TOOLS1 当前候�
 
 CHAT-BIND0-R1（2026-10-07）：按主评审 `C:/Users/nanpr/AppData/Local/Temp/opencode/yaya-chat-bind0-review-20261007/REVIEW.md` 返修 —— 关闭 3 个 P1（混合依赖漏守门 / 回执本体未核验 / 重复矛盾依赖顺序）与 1 个 P2（opaque 身份未按路径编码），并收紧文档（唯一写入 owner ≠ 幂等落账）。**协议本轮不冻结，D1–D6 未因任何报告获得实施批准。**
 
+CHAT-BIND0-R1-FINAL（2026-10-07）：按同目录 `R1-REVIEW.md` 只关闭剩余 2 个 P2 —— **P2-A** 回执身份诊断原因随遍历顺序变化（改为聚合全部回执原因 + 复用 `pickReason` 枚举优先级，两序 verdict 逐字一致）；**P2-B** 独立 `.` / `..` 段被 WHATWG 归一化改道（解析与 GET 清单出口整体拒绝，其余保留字符继续编码）。前次三个 P1 全部保持，未新增架构 / 状态机 / runtime。**协议仍未冻结，D1–D6 仍等主评审确认。**
+
 - 纯协议模块：`src/lib/yaya/chat-bind-contract.ts`（browser-safe，只复用已发布类型 / API0 / DATA 判定，不 fork 同名 DTO）
-- 反例检查：`scripts/yaya/check-chat-bind.ts` —— `pnpm exec tsx scripts/yaya/check-chat-bind.ts`（19 项，`reference_only:true`）
+- 反例检查：`scripts/yaya/check-chat-bind.ts` —— `pnpm exec tsx scripts/yaya/check-chat-bind.ts`（22 项，`reference_only:true`；含真实 `platform=browser` 打包）
 - `RTK.md` 不存在（记录，不创建、不安装）；`scripts/harness-safety.ts` blob 保持 `6702f2ddf3b436e79f8c92ae8756c33f611a8503`
 - 本轮不使用真实模型额度（留给后续联合 smoke）；不连托管库、不发真实 HTTP、不操作 main / 不 push / 不部署
 
@@ -123,7 +125,7 @@ CHAT-BIND0-R1（2026-10-07）：按主评审 `C:/Users/nanpr/AppData/Local/Temp/
 
 | 方法 | 输出 | 语义 |
 |---|---|---|
-| `parseYayaChatRecoveryMark(input)` | `YayaApiParseResult` | 结构核验；无授权语义；**`operation_id` / `item_key` 必须唯一**（R1），重复即 `malformed_request` |
+| `parseYayaChatRecoveryMark(input)` | `YayaApiParseResult` | 结构核验；无授权语义；**`operation_id` / `item_key` 必须唯一**（R1），重复即 `malformed_request`；**独立 `conversation_id` = `.` / `..` 拒绝**（R1-FINAL / P2-B），`malformed_request` |
 | `verifyYayaRecoveryIdentity(mark, facts)` | `{verifiable:true, outcomes} \| {verifiable:false, reason}` | 核验顺序固定：owner → conversation → run → 标记身份唯一 → operation → actor → target → content → 回执本体 → 矛盾回执。**没有 role 入参**（owner 先于角色）；任一不一致即不可核验；只返回原查询结论，不新建任何身份 |
 | `yayaRecoveryLookupRequests(mark)` | `{method:"GET", path, query}[]` | 只派生历史 GET、原运行 GET、提案投影 GET、逐原操作 GET；模板直接引用 `YAYA_API_PATHS.run_lookup` / `operations_query`（proposals 为冻结 `approval` 路径的父路径，由检查锁定），不 fork 路径 |
 
@@ -133,7 +135,7 @@ CHAT-BIND0-R1（2026-10-07）：按主评审 `C:/Users/nanpr/AppData/Local/Temp/
 1. 原计划（`YayaPlannedOperation` 六元）**只由标记派生**，不从回执 / 事实反建 expected（调用方不能自证）；
 2. 同 `operation_id` 的事实先分组，组内**每一条**都与标记核对，矛盾即拒绝且**与遍历顺序无关**（多原因按原因枚举固定次序取最优先）；
 3. 组内回执合并后交冻结 `queryOperationOutcome(receipts, expected)` **重算**，事实里自带的 `outcome` 不采信：
-   - `unknown/identity_mismatch` ⇒ `unverifiable`，并按回执字段精确诊断为 `actor_mismatch` / `target_mismatch` / `operation_mismatch`；
+   - `unknown/identity_mismatch` ⇒ `unverifiable`，并按回执字段精确诊断为 `operation_mismatch` / `actor_mismatch` / `target_mismatch`；**R1-FINAL：诊断聚合该组**全部**回执的每类偏差，复用 `pickReason` 与原因枚举优先级（`operation_mismatch` → `actor_mismatch` → `target_mismatch`）取最优先**，同一组坏回执在任意遍历顺序下返回完全一致的 verdict / reason；
    - `unknown/contradictory_receipts` ⇒ `unverifiable(contradictory_receipt)`；
    - `unknown/invalid_success_proof` / `no_receipt` / `verification_required` 与 `in_progress` / `failed` / `conflict` / `saved` / `saved_detail_unavailable` / `unchanged` **按冻结语义原样返回**（不新增第六种 run 状态）；
 4. 完全相同的重复事实 / 重复回执（合法幂等重放）规范为**一个结果**，不产生重复成功；标记内 `operation_id` / `item_key` 重复直接不可核验。
@@ -165,6 +167,12 @@ CHAT-BIND0-R1（2026-10-07）：按主评审 `C:/Users/nanpr/AppData/Local/Temp/
 （`operations` 的 GET / POST 共用路径，方法是唯一区分：本清单硬编码 `method:"GET"`；不派生 `run_start` / `operations_execute` / `approval` / `run_cancel`。）
 
 **编码规则（R1 / P2）**：路径变量用 `encodeURIComponent` 编码后再入 path（保留字符 `/ ? # %` 不得改变目标路径，且解码可完整还原原身份、不删字符）；`query` 保持**独立参数原值**，由消费方用 `URLSearchParams` 拼接，不在模板层拼接字符串。
+
+**独立 dot 段拒绝（R1-FINAL / P2-B）**：`encodeURIComponent` 不改写 `.` / `..`，而 WHATWG URL 解析会把独立段归一化改道（`/api/yaya/conversations/./messages` → `/api/yaya/conversations/messages`，`/api/yaya/conversations/../messages` → `/api/yaya/messages`），不再是原恢复目标。因此：
+
+- `parseYayaChatRecoveryMark` 拒绝 `conversation_id` 为独立 `.` / `..`（`malformed_request`），`yayaRecoveryLookupRequests` 作为出口守卫对同一身份直接返回空清单（不产生恢复请求）——两处共用同一 `isPathSafeIdentity` 判定；
+- 只拒绝**整段**等于 `.` / `..` 的值：嵌入点段（如 `conv/../../..`）与 `/ ? # %` 等合法原值继续照常编码，**不删字符、不做双重编码、不把 ID 擅改为 UUID 限制**；
+- 验收用 `new URL(path, base)` 实测 pathname 归一化结果，不以“字符串看起来编码了”代替路径归一化验证；`query` 仍经 `URLSearchParams` 原值往返。
 
 **提案投影恢复责任（R1）**：恢复清单按 `mark.proposal.proposal_id` 派生 `GET /api/yaya/proposals?proposal_id=...`，
 UI1 已有 `fetchProposalProjection`（`src/components/yaya/client/actions.ts:32-40`）可直接消费；
@@ -204,7 +212,7 @@ UI1 已有 `fetchProposalProjection`（`src/components/yaya/client/actions.ts:32
 
 **零修改**：AUTH 冻结（`src/lib/accounts/**`）、G0 冻结（`src/lib/guide/**`）、`src/lib/yaya/types.ts`、`src/lib/yaya/api-contract.ts`、PRODUCT / DESIGN、依赖锁、`.env`；不新增第二状态库、审批系统、万能工具或重复认证逻辑。
 
-## 6. 反例清单（`scripts/yaya/check-chat-bind.ts` 实际覆盖，19 项；1–14 为原组，15–19 为 R1 新增）
+## 6. 反例清单（`scripts/yaya/check-chat-bind.ts` 实际覆盖，22 项；1–14 为原组，15–19 为 R1 新增，20–22 为 R1-FINAL 新增）
 
 | # | 反例 | 判定 |
 |---|---|---|
@@ -227,12 +235,16 @@ UI1 已有 `fetchProposalProjection`（`src/components/yaya/client/actions.ts:32
 | 17 | **重复 / 矛盾依赖顺序**（P1-C） | 同 operation 正常 + 矛盾事实，两序判定同为 `target_mismatch`；重复事实 / 重复回执规范为**一个**结果；同操作矛盾回执 ⇒ `contradictory_receipt`；重复 `operation_id` / `item_key` 标记 ⇒ 解析 `malformed_request` + 核验 `operation_mismatch`（不返回 2 份结果） |
 | 18 | **opaque 身份未按路径编码**（P2） | `c/../../admin/teachers?a=1#b%20c` ⇒ path 为 `encodeURIComponent` 结果、解码完整还原、路径段无残留 `/ ? #`；`query` 保持原值并经 `URLSearchParams` 往返 |
 | 19 | **提案投影恢复** | `proposals_query` 由冻结 `approval` 路径父路径派生（检查锁定）；proposal-only 标记（无 run / 无操作）仍派生 `GET /api/yaya/proposals?proposal_id=...`；无提案身份不派生；不派生批准写路径 |
+| 20 | **诊断原因顺序无关**（P2-A，RED→GREEN） | 同组 `actor 错 + target 错` 两序 verdict / reason 逐字一致（枚举优先级 `actor_mismatch` 先于 `target_mismatch`）；单条回执同时多错同结论；`item/batch 错 + actor 错` 两序均 `operation_mismatch`（操作级优先）；正常回执仍 `saved`、单错 actor / target 语义不变 |
+| 21 | **独立 `.` / `..` 段拒绝**（P2-B，RED→GREEN） | 先用 WHATWG `new URL` 证明该值会被改道，再断言解析 `malformed_request`、直接构造的标记 `yayaRecoveryLookupRequests` 返回 `[]`（不产生恢复请求）；正常 `conv-1` 身份仍产生 4 条只读清单且 pathname 不变 |
+| 22 | **保留字符编码后 URL 目标不变** | 嵌入点段与保留字符的合法身份（`conv/../../..?x#y%20z`）解析通过；`new URL` 归一化后 pathname 仍等于编码后的目标路径（不改道、不删字符）；`client_request_id` 原值经 `URLSearchParams` 往返一致；操作身份保持独立参数原值 |
 
 ## 7. 证据分级
 
 | 级别 | 本轮状态 | 内容 |
 |---|---|---|
-| **纯检查**（已跑） | ✅ 通过 | `check-chat-bind.ts` **19 项**；`tsc -p tsconfig.json` 0 错；`eslint --quiet` 两个新文件 0 告警；`check-api-contract.ts` 57 项回归通过 |
+| **纯检查**（已跑） | ✅ 通过 | `check-chat-bind.ts` **22 项**（本工作树内绝对路径运行，含真实 `platform=browser` 打包）；`pnpm exec tsx scripts/yaya/check-api-contract.ts` 57 项回归；`pnpm ts-check`（`tsc -p tsconfig.json`）0 错；`pnpm lint:build`（`eslint . --quiet`）0 告警；`git diff --check` 无空白错误 |
+| **RED→GREEN**（已跑） | ✅ 通过 | 先补 3 组新反例再修：RED 实测 `20/22`（P2-A 两序 `target_mismatch` vs `actor_mismatch`；P2-B `conversation_id='.'` 被接受），修后 `22/22`；原 19 组与 `check-api-contract` 57 项全程未回归 |
 | **主评审独立复跑**（已有） | ✅ 通过 | 主评审报告：原 14 组独立实跑 14/14（含真实 `platform=browser` 打包）+ 6 个补充探针；本轮把 6 个探针适配到新事实形状复跑，逐条显示 P1-A `unknown/unavailable`、P1-B `unverifiable` / `invalid_success_proof`、P1-C 两序一致 + 重复标记拒绝、P2 路径编码（临时脚本，跑完即删，不入库） |
 | **浏览器 fixture** | NOT_RUN | UI1 去掉 assistant append、重载后按标记恢复、错误身份文案、受限消息渲染 |
 | **真实 HTTP + DB** | NOT_RUN | D1 拒绝助手 POST、D3 绑定字段读写、D4 `recovery` 随消息视图返回、D5 读投影降级、旧消息 `unknown` 降级、owner 过滤；§2.4 的同事务 / 故障回滚 / 受控竞争 |
@@ -244,6 +256,8 @@ UI1 已有 `fetchProposalProjection`（`src/components/yaya/client/actions.ts:32
 
 - 本轮**不宣称**“私域答案绕过投影”或“历史丢失原身份”的运行时漏洞已关闭：只交付接口、兼容规则与反例。
 - **协议本轮不冻结**；**D1–D6 不因任何报告获得实施批准**，仍等主评审确认。
+- R1-FINAL 只关闭两个 P2，未新增架构、状态机、错误码、写接口或 runtime 实现；三个 P1 的既有收敛保持不变。
+- 不修改 `types.ts` / `api-contract.ts` / `storage-types.ts`、AUTH / G0、DATA / APP / TOOLS / UI / schema、`package.json` / 锁文件 / harness。
 - 不合并 UI1 / APP1 / TOOLS1 候选，不修改其 runtime，不抢写其路由、schema 或仓储。
 - 不新增审批、认证或状态库；接口缺口（如 D1–D6）交唯一 owner 与主评审决定。
 - `authorizeYayaMessageWrite` 是能力边界，**不宣称**“重复落账在协议层不可能”；幂等与原子提交要求见 §2.4，落地与验证归 APP1 / DATA1。
