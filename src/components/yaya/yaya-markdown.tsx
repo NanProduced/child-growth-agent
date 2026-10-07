@@ -273,7 +273,7 @@ function MarkdownBody({ blocks }: { blocks: YayaMarkdownBlock[] }) {
 
 export function YayaMarkdown({
   text,
-  collapsible = true,
+  collapsible = false,
   className,
 }: {
   text: string;
@@ -294,7 +294,7 @@ export function YayaMarkdown({
           <button
             type="button"
             onClick={() => setExpanded(true)}
-            className="pointer-events-auto mb-1 inline-flex h-9 items-center gap-1 rounded-full border bg-background px-3 text-xs font-medium text-foreground shadow-sm"
+            className="pointer-events-auto mb-1 inline-flex h-11 items-center gap-1 rounded-full border bg-background px-3 text-xs font-medium text-foreground shadow-sm"
           >
             展开全文 <ChevronDown className="size-3.5" />
           </button>
@@ -304,7 +304,7 @@ export function YayaMarkdown({
         <button
           type="button"
           onClick={() => setExpanded(false)}
-          className="mt-1 inline-flex h-9 items-center gap-1 text-xs font-medium text-muted-foreground"
+          className="mt-1 inline-flex h-11 items-center gap-1 text-xs font-medium text-muted-foreground"
         >
           收起 <ChevronUp className="size-3.5" />
         </button>

@@ -5,7 +5,7 @@
  * 提案 / 批准 / operation 记录为准，UI 不自行分配执行身份。
  */
 import type { YayaAgentStopReason } from "@/lib/yaya/agent/types";
-import type { YayaOperationQueryOutcome, YayaSourceRef } from "@/lib/yaya/types";
+import type { YayaOperationQueryOutcome, YayaPlannedOperation, YayaSourceRef } from "@/lib/yaya/types";
 
 export const YAYA_PART_NAMES = {
   sources: "yaya-sources",
@@ -36,6 +36,8 @@ export interface YayaProposalPartData {
 export interface YayaReceiptPartData {
   operation_id: string;
   outcome: YayaOperationQueryOutcome;
+  /** 没有原计划时只能显示 verification_required，不能从回执自证成功。 */
+  expected_plan?: YayaPlannedOperation | null;
 }
 
 export interface YayaStoppedPartData {

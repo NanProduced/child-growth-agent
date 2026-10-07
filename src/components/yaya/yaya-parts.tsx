@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { YayaOperationQueryOutcome, YayaSourceRef } from "@/lib/yaya/types";
 
-import { queryOriginalOperation, lookupOriginalRun } from "./client/actions";
+import { lookupOriginalRun, queryOriginalOperation, reconcileOriginalOperationQuery } from "./client/actions";
 import type {
   YayaClarifyPartData,
   YayaHistoryNotePartData,
@@ -186,7 +186,14 @@ function outcomeHeadline(outcome: YayaOperationQueryOutcome): { tone: "amber" | 
 }
 
 export function YayaReceiptPart({ data }: DataMessagePartProps<YayaReceiptPartData>) {
-  const [outcome, setOutcome] = useState<YayaOperationQueryOutcome>(data.outcome);
+  const expectedPlan = data.expected_plan ?? null;
+  const [outcome, setOutcome] = useState<YayaOperationQueryOutcome>(
+    reconcileOriginalOperationQuery(
+      data.operation_id,
+      { operation_id: data.operation_id, outcome: data.outcome },
+      expectedPlan
+    ).outcome
+  );
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
   const headline = outcomeHeadline(outcome);
@@ -198,7 +205,7 @@ export function YayaReceiptPart({ data }: DataMessagePartProps<YayaReceiptPartDa
     setChecking(true);
     setCheckError(null);
     try {
-      const result = await queryOriginalOperation(data.operation_id);
+      const result = await queryOriginalOperation(data.operation_id, expectedPlan);
       setOutcome(result.outcome);
     } catch {
       setCheckError("读取暂未完成，这不代表没有数据；未显示成功。");
@@ -222,11 +229,13 @@ export function YayaReceiptPart({ data }: DataMessagePartProps<YayaReceiptPartDa
       ) : null}
       {outcome.kind === "unknown" ? (
         <p className="text-xs text-muted-foreground">
-          不会自动重复提交，也不会重新发起新提案。
+          {outcome.reason === "verification_required"
+            ? "当前消息没有完整原计划，不能证明成功；请从待核对提案入口读取。"
+            : "不会自动重复提交，也不会重新发起新提案。"}
         </p>
       ) : null}
       {outcome.kind !== "saved" && outcome.kind !== "saved_detail_unavailable" ? (
-        <Button type="button" variant="outline" size="sm" className="h-9" onClick={() => void recheck()} disabled={checking}>
+        <Button type="button" variant="outline" size="sm" className="h-11" onClick={() => void recheck()} disabled={checking}>
           <RefreshCw className={cn("size-3.5", checking && "animate-spin motion-reduce:animate-none")} aria-hidden />
           {checking ? "正在读取…" : "重新读取核对"}
         </Button>
@@ -294,7 +303,7 @@ export function YayaRunErrorPart({ data }: DataMessagePartProps<YayaRunErrorPart
       ) : null}
       <p className="text-xs text-muted-foreground">没有明确回执前不会显示“已保存”。</p>
       {canLookup ? (
-        <Button type="button" variant="outline" size="sm" className="h-9" onClick={() => void lookup()} disabled={checking}>
+        <Button type="button" variant="outline" size="sm" className="h-11" onClick={() => void lookup()} disabled={checking}>
           <RefreshCw className={cn("size-3.5", checking && "animate-spin motion-reduce:animate-none")} aria-hidden />
           {checking ? "正在读取…" : "重新读取核对"}
         </Button>

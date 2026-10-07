@@ -25,6 +25,7 @@ import { YAYA_PART_NAMES } from "../../src/components/yaya/client/parts";
 import type { ProjectedProposal } from "../../src/components/yaya/client/schemas";
 import { readYayaRunStream } from "../../src/components/yaya/client/wire";
 import { parseYayaInline, parseYayaMarkdown } from "../../src/components/yaya/yaya-markdown";
+import { proposalPayloadIsReviewable } from "../../src/components/yaya/yaya-proposal";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = JSON.parse(
@@ -401,11 +402,22 @@ function proposalChecks(): void {
   const wrongOperation = reconcileOriginalOperationQuery("op-fixture-1", {
     operation_id: "wrong-operation",
     outcome: savedOutcome,
-  });
+  }, null);
   check(
     "wrong operation identity stays unknown",
     wrongOperation.outcome.kind === "unknown" && wrongOperation.outcome.reason === "identity_mismatch",
     JSON.stringify(wrongOperation)
+  );
+
+  const withoutPlan = reconcileOriginalOperationQuery(
+    "op-fixture-1",
+    { operation_id: "op-fixture-1", outcome: savedOutcome },
+    null
+  );
+  check(
+    "receipt without original plan stays verification_required",
+    withoutPlan.outcome.kind === "unknown" && withoutPlan.outcome.reason === "verification_required",
+    JSON.stringify(withoutPlan)
   );
 
   const wrongReceipt = reconcileOriginalOperationQuery(
@@ -426,6 +438,15 @@ function proposalChecks(): void {
     "wrong receipt plan identity stays unknown",
     wrongReceipt.outcome.kind === "unknown" && wrongReceipt.outcome.reason === "identity_mismatch",
     JSON.stringify(wrongReceipt)
+  );
+
+  check(
+    "unknown proposal payload is not reviewable",
+    !proposalPayloadIsReviewable({ kind: "future_action", target_id: "child-1" })
+  );
+  check(
+    "damaged confirmation payload is not reviewable",
+    !proposalPayloadIsReviewable({ kind: "confirm_observation", observation_id: "obs-1", input: {} })
   );
 }
 

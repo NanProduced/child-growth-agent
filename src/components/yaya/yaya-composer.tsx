@@ -72,7 +72,7 @@ function ComposerAttachmentTile() {
         <button
           type="button"
           aria-label={`移除 ${attachment.name}`}
-          className="absolute right-0.5 top-0.5 flex size-8 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm"
+          className="absolute right-0.5 top-0.5 flex size-11 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm"
         >
           <X className="size-3.5" aria-hidden />
         </button>
@@ -81,7 +81,7 @@ function ComposerAttachmentTile() {
         <button
           type="button"
           aria-label={`重试上传 ${attachment.name}`}
-          className="absolute bottom-0.5 right-0.5 flex size-8 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm"
+            className="absolute bottom-0.5 right-0.5 flex size-11 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm"
           onClick={() => {
             const file = attachment.file;
             if (file !== undefined) void aui.composer.addAttachment(file);
@@ -161,7 +161,7 @@ export function YayaComposer({ disabled = false }: { disabled?: boolean }) {
                 type="button"
                 variant="outline"
                 size="sm"
-                className="h-9 rounded-full text-xs text-muted-foreground"
+                className="h-11 rounded-full text-xs text-muted-foreground"
                 aria-label="设置本条消息的对象与来源"
               >
                 <Tag className="size-3.5" aria-hidden />
@@ -198,7 +198,7 @@ export function YayaComposer({ disabled = false }: { disabled?: boolean }) {
                       type="button"
                       variant={source === option ? "default" : "outline"}
                       size="sm"
-                      className="h-9 rounded-full text-xs"
+                      className="h-11 rounded-full text-xs"
                       onClick={() => setSource(source === option ? null : option)}
                     >
                       {option}
@@ -214,7 +214,7 @@ export function YayaComposer({ disabled = false }: { disabled?: boolean }) {
           {objectName !== null ? (
             <button
               type="button"
-              className="inline-flex h-9 items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 text-xs text-emerald-800"
+              className="inline-flex h-11 items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 text-xs text-emerald-800"
               onClick={() => {
                 setObjectName(null);
                 setObjectDraft("");
@@ -228,7 +228,7 @@ export function YayaComposer({ disabled = false }: { disabled?: boolean }) {
           {source !== null ? (
             <button
               type="button"
-              className="inline-flex h-9 items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-3 text-xs text-sky-800"
+              className="inline-flex h-11 items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-3 text-xs text-sky-800"
               onClick={() => setSource(null)}
               aria-label={`移除来源 ${source}`}
             >

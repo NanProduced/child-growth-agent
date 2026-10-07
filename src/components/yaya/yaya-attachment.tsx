@@ -123,7 +123,7 @@ function AttachmentTile({
       <button
         type="button"
         aria-label={`移除 ${attachment.name}`}
-        className="absolute right-0.5 top-0.5 flex size-8 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm"
+        className="absolute right-0.5 top-0.5 flex size-11 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm"
         onClick={() => onRemove(attachment)}
       >
         <X className="size-3.5" aria-hidden />
@@ -132,7 +132,7 @@ function AttachmentTile({
         <button
           type="button"
           aria-label={`重试上传 ${attachment.name}`}
-          className="absolute bottom-0.5 right-0.5 flex size-8 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm"
+          className="absolute bottom-0.5 right-0.5 flex size-11 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm"
           onClick={() => {
             const file = attachment.file;
             if (file !== undefined) onRetry(file);

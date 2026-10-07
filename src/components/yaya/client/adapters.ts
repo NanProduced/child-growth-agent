@@ -142,7 +142,7 @@ function eventParts(event: YayaRunWireEvent): ThreadAssistantMessagePart[] {
           type: "data",
           id: `receipt-${event.operation_id}`,
           name: YAYA_PART_NAMES.receipt,
-          data: { operation_id: event.operation_id, outcome: event.outcome },
+          data: { operation_id: event.operation_id, outcome: event.outcome, expected_plan: null },
         },
       ];
     case "stopped":

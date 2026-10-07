@@ -134,17 +134,20 @@ function receiptMatchesPlan(
 export function reconcileOriginalOperationQuery(
   operationId: string,
   response: { operation_id: string; outcome: YayaOperationQueryOutcome },
-  expected?: YayaPlannedOperation,
+  expected: YayaPlannedOperation | null,
 ): { operation_id: string; outcome: YayaOperationQueryOutcome } {
   if (response.operation_id !== operationId) {
     return { operation_id: operationId, outcome: identityMismatchOutcome() };
   }
+  if (expected === null) {
+    return {
+      operation_id: operationId,
+      outcome: { kind: "unknown", reason: "verification_required" },
+    };
+  }
   const outcome = response.outcome;
   if (outcome.kind === "saved" || outcome.kind === "saved_detail_unavailable") {
-    if (expected !== undefined && !receiptMatchesPlan(outcome.receipt, expected)) {
-      return { operation_id: operationId, outcome: identityMismatchOutcome() };
-    }
-    if (expected === undefined && outcome.receipt.operation_id !== operationId) {
+    if (!receiptMatchesPlan(outcome.receipt, expected)) {
       return { operation_id: operationId, outcome: identityMismatchOutcome() };
     }
   }
@@ -193,7 +196,7 @@ const operationQueryResponseSchema = z.looseObject({
 /** 只按原 operation_id 查询；不启动模型、不执行旧批准、不产生业务写。 */
 export async function queryOriginalOperation(
   operationId: string,
-  expected?: YayaPlannedOperation,
+  expected: YayaPlannedOperation | null,
 ): Promise<{ operation_id: string; outcome: YayaOperationsExecutionAssessment["outcomes"][number]["outcome"] }> {
   const response = await yayaGetJson(
     `/api/yaya/operations?operation_id=${encodeURIComponent(operationId)}`,

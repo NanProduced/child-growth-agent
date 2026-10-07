@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
+import { yayaDomainPayloadWireSchema } from "@/lib/yaya/api-contract";
 import type { YayaDomainPayload, YayaOperationQueryOutcome } from "@/lib/yaya/types";
 
 import {
@@ -55,6 +56,27 @@ const RESOURCE_LABEL: Record<string, string> = {
   child: "幼儿",
   transfer: "转班",
   observation: "观察",
+};
+
+const GUIDE_ACTION_LABEL: Record<string, string> = {
+  suggest: "提出建议",
+  confirm: "确认关联",
+  reject: "拒绝关联",
+  withdraw: "撤回关联",
+};
+
+const CLASS_STAGE_LABEL: Record<string, string> = {
+  small: "小班",
+  middle: "中班",
+  large: "大班",
+};
+
+const TEACHER_OPERATION_LABEL: Record<string, string> = {
+  create: "建立账号",
+  set_status: "修改状态",
+  reset_password: "重置密码",
+  assign_class: "分配任教班级",
+  remove_assignment: "移除任教班级",
 };
 
 function payloadSummary(payload: YayaDomainPayload | null): { title: string; lines: string[] } {
@@ -103,6 +125,7 @@ function payloadSummary(payload: YayaDomainPayload | null): { title: string; lin
 }
 
 interface ProposalContentDetails {
+  payload: YayaDomainPayload | null;
   targetLabel: string | null;
   lines: string[];
   missing: string[];
@@ -124,6 +147,176 @@ function readText(value: unknown, keys: readonly string[]): string | null {
   return null;
 }
 
+function isNonBlank(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || isNonBlank(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isGuideBasis(value: unknown): boolean {
+  const record = asRecord(value);
+  return (
+    record !== null &&
+    isNonBlank(record.observation_id) &&
+    isNonBlank(record.quote) &&
+    isNonBlank(record.quote_source) &&
+    (record.quote_field === undefined || record.quote_field === null || isNonBlank(record.quote_field))
+  );
+}
+
+function isGuideDecision(value: unknown): boolean {
+  const record = asRecord(value);
+  if (record === null || !isNonBlank(record.support) || !Array.isArray(record.basis)) return false;
+  const hasItem = isNonBlank(record.item_id) || isNonBlank(record.link_id);
+  return (
+    hasItem &&
+    record.basis.length > 0 &&
+    record.basis.every(isGuideBasis) &&
+    (record.sustained_note === undefined ||
+      record.sustained_note === null ||
+      asRecord(record.sustained_note) !== null)
+  );
+}
+
+function isGuideMutation(value: unknown): boolean {
+  const record = asRecord(value);
+  if (record === null || !isNonBlank(record.action)) return false;
+  if (record.action === "suggest") return true;
+  if (record.action === "confirm") {
+    return (
+      typeof record.expected_guide_revision === "number" &&
+      Array.isArray(record.decisions) &&
+      record.decisions.length > 0 &&
+      record.decisions.every(isGuideDecision)
+    );
+  }
+  if (record.action === "reject" || record.action === "withdraw") {
+    return (
+      isNonBlank(record.link_id) &&
+      (record.reason === undefined || typeof record.reason === "string") &&
+      typeof record.expected_guide_revision === "number"
+    );
+  }
+  return false;
+}
+
+function isConfirmInput(value: unknown): boolean {
+  const record = asRecord(value);
+  const content = asRecord(record?.content);
+  if (
+    record === null ||
+    content === null ||
+    !isNonBlank(content.domain) ||
+    !isNonBlank(content.sub_domain) ||
+    !isNonBlank(content.objective_description) ||
+    !isStringArray(content.highlights) ||
+    !isStringArray(content.support_suggestions) ||
+    !isNonBlank(content.highlight_quote)
+  ) {
+    return false;
+  }
+  if (record.teacher_note !== undefined && typeof record.teacher_note !== "string") return false;
+  if (record.clarification !== undefined && typeof record.clarification !== "string") return false;
+  if (record.guide_decisions === undefined || record.guide_decisions === null) return true;
+  const guide = asRecord(record.guide_decisions);
+  return (
+    guide !== null &&
+    typeof guide.expected_guide_revision === "number" &&
+    Array.isArray(guide.decisions) &&
+    guide.decisions.length > 0 &&
+    guide.decisions.every(isGuideDecision)
+  );
+}
+
+function decodeProposalPayload(value: unknown): YayaDomainPayload | null {
+  const parsed = yayaDomainPayloadWireSchema.safeParse(value);
+  if (!parsed.success) return null;
+  const payload = parsed.data;
+  const record = asRecord(payload);
+  if (record === null) return null;
+  switch (payload.kind) {
+    case "create_observation":
+      return isNonBlank(record.child_id) &&
+        isNonBlank(record.observed_at) &&
+        isNonBlank(record.raw_text) &&
+        isNullableString(record.context) &&
+        isNullableString(record.confirmed_class_id) &&
+        isStringArray(record.image_ids) &&
+        (record.source_input === null || asRecord(record.source_input) !== null)
+        ? payload
+        : null;
+    case "organize_observation":
+      return isNonBlank(record.observation_id) ? payload : null;
+    case "follow_up_observation":
+      return isNonBlank(record.observation_id) && isNonBlank(record.action) && isNonBlank(record.content)
+        ? payload
+        : null;
+    case "confirm_observation":
+      return isNonBlank(record.observation_id) && isConfirmInput(record.input) ? payload : null;
+    case "guide_decision":
+      return isNonBlank(record.observation_id) && isGuideMutation(record.mutation) ? payload : null;
+    case "create_child":
+      return (
+        isNonBlank(record.name) &&
+        isNonBlank(record.gender) &&
+        isNonBlank(record.birth_date) &&
+        isNonBlank(record.target_class_id) &&
+        isNullableString(record.note)
+      )
+        ? payload
+        : null;
+    case "transfer_child":
+      return isNonBlank(record.child_id) && isNonBlank(record.target_class_id) && isNullableString(record.effective_date)
+        ? payload
+        : null;
+    case "manage_class":
+      return (
+        isNonBlank(record.operation) &&
+        isNullableString(record.class_id) &&
+        isNonBlank(record.name) &&
+        isNonBlank(record.stage) &&
+        isNonBlank(record.school_year) &&
+        (record.is_active === null || typeof record.is_active === "boolean")
+      )
+        ? payload
+        : null;
+    case "manage_teacher":
+      return (
+        isNonBlank(record.operation) &&
+        isNullableString(record.teacher_account_id) &&
+        isNullableString(record.username) &&
+        isNullableString(record.display_name) &&
+        isStringArray(record.class_ids) &&
+        isNullableString(record.status) &&
+        record.secret_via_secure_control === true
+      )
+        ? payload
+        : null;
+    case "refresh_growth_profile":
+    case "refresh_activity_support":
+      return isNonBlank(record.child_id) ? payload : null;
+    case "attach_observation_images":
+      return (
+        isNonBlank(record.observation_id) &&
+        isStringArray(record.image_ids) &&
+        typeof record.expected_attachment_revision === "number" &&
+        isNullableString(record.source_confirmed_at)
+      )
+        ? payload
+        : null;
+  }
+}
+
+export function proposalPayloadIsReviewable(value: unknown): boolean {
+  return decodeProposalPayload(value) !== null;
+}
+
 function addLine(lines: string[], label: string, value: unknown): void {
   if (typeof value === "string" && value.trim() !== "") lines.push(label + "：" + value);
   else if (typeof value === "number" || typeof value === "boolean") lines.push(label + "：" + String(value));
@@ -138,8 +331,10 @@ function addStringList(lines: string[], label: string, values: readonly string[]
 function guideDecisionLines(lines: string[], value: unknown, title: string): void {
   const record = asRecord(value);
   if (record === null) return;
-  addLine(lines, title + "动作", record.action);
+  addLine(lines, title + "动作", GUIDE_ACTION_LABEL[String(record.action)] ?? record.action);
   addLine(lines, title + "指南修订", record.expected_guide_revision);
+  addLine(lines, title + "关联标识", record.link_id);
+  addLine(lines, title + "撤回/拒绝理由", record.reason);
   const decisions = Array.isArray(record.decisions) ? record.decisions : [];
   decisions.forEach((decision, index) => {
     const entry = asRecord(decision);
@@ -159,15 +354,17 @@ function guideDecisionLines(lines: string[], value: unknown, title: string): voi
     });
     const sustained = asRecord(entry.sustained_note);
     if (sustained !== null) {
-      addLine(lines, prefix + "持续性说明", sustained.note ?? sustained.content ?? sustained.period);
+      addLine(lines, prefix + "期间开始", sustained.period_start);
+      addLine(lines, prefix + "期间结束", sustained.period_end);
+      addLine(lines, prefix + "持续性纪要", sustained.description);
     }
   });
 }
 
 function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDetails {
-  const payload = (item.payload ?? null) as YayaDomainPayload | null;
+  const payload = decodeProposalPayload(item.payload);
   if (payload === null) {
-    return { targetLabel: null, lines: [], missing: ["实际内容"] };
+    return { payload: null, targetLabel: null, lines: [], missing: ["内容格式无法核对"] };
   }
   const lines: string[] = [];
   const missing: string[] = [];
@@ -188,7 +385,6 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
     case "create_observation":
       targetLabel = childName;
       if (targetLabel === null) missing.push("幼儿名称");
-      addLine(lines, "幼儿", targetLabel);
       addLine(lines, "观察日期", payload.observed_at);
       addLine(lines, "情境", payload.context);
       addLine(lines, "原始观察", payload.raw_text);
@@ -198,20 +394,22 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
       targetLabel = childName ?? observationLabel;
       if (targetLabel === null) missing.push("幼儿或观察名称");
       missing.push("待整理的原文与草稿");
-      addLine(lines, "幼儿/观察", targetLabel);
       addLine(lines, "整理目标", "服务端准备内容未随当前投影提供");
       break;
     case "follow_up_observation":
       targetLabel = childName ?? observationLabel;
       if (targetLabel === null) missing.push("幼儿或观察名称");
-      addLine(lines, "幼儿/观察", targetLabel);
       addLine(lines, "补充内容", payload.content);
       break;
     case "confirm_observation":
       targetLabel = childName ?? observationLabel;
       if (targetLabel === null) missing.push("幼儿或观察名称");
-      if (targetLabel === null) missing.push("原文与日期");
-      addLine(lines, "幼儿/观察", targetLabel);
+      const confirmedObservedAt = readText(payloadRecord, ["observed_at", "observation_date"]);
+      const confirmedRawText = readText(payloadRecord, ["raw_text", "observation_text"]);
+      if (confirmedObservedAt === null) missing.push("观察日期");
+      if (confirmedRawText === null) missing.push("原始观察");
+      addLine(lines, "观察日期", confirmedObservedAt);
+      addLine(lines, "原始观察", confirmedRawText);
       addLine(lines, "教师确认稿·领域", payload.input.content.domain);
       addLine(lines, "教师确认稿·子领域", payload.input.content.sub_domain);
       addLine(lines, "教师确认稿·目标描述", payload.input.content.objective_description);
@@ -227,7 +425,6 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
     case "guide_decision":
       targetLabel = childName ?? observationLabel;
       if (targetLabel === null) missing.push("幼儿或观察名称");
-      addLine(lines, "幼儿/观察", targetLabel);
       guideDecisionLines(lines, payload.mutation, "指南决定");
       if (payload.mutation.action === "confirm") {
         const mutation = asRecord(payload.mutation);
@@ -238,7 +435,6 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
       break;
     case "create_child":
       targetLabel = payload.name;
-      addLine(lines, "幼儿", payload.name);
       addLine(lines, "性别", payload.gender);
       addLine(lines, "出生日期", payload.birth_date);
       addLine(lines, "目标班级", className);
@@ -257,17 +453,16 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
     case "manage_class":
       targetLabel = payload.name;
       addLine(lines, "班级", payload.name);
-      addLine(lines, "动作", payload.operation);
-      addLine(lines, "学段", payload.stage);
+      addLine(lines, "动作", payload.operation === "create" ? "新建" : "修改");
+      addLine(lines, "学段", CLASS_STAGE_LABEL[payload.stage] ?? payload.stage);
       addLine(lines, "学年", payload.school_year);
       addLine(lines, "启用状态", payload.is_active);
       break;
     case "manage_teacher":
       targetLabel = payload.display_name ?? payload.username;
-      addLine(lines, "教师", targetLabel);
       addLine(lines, "账号", payload.username);
-      addLine(lines, "动作", payload.operation);
-      addLine(lines, "状态", payload.status);
+      addLine(lines, "动作", TEACHER_OPERATION_LABEL[payload.operation] ?? payload.operation);
+      addLine(lines, "状态", payload.status === "active" ? "启用" : payload.status === "disabled" ? "停用" : payload.status);
       addLine(lines, "任教班级技术标识", payload.class_ids.join("、"));
       if (targetLabel === null) missing.push("教师姓名或账号");
       if (payload.operation === "assign_class" && payload.class_ids.length === 0) missing.push("目标班级");
@@ -276,17 +471,14 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
     case "refresh_growth_profile":
       targetLabel = childName;
       if (targetLabel === null) missing.push("幼儿名称");
-      addLine(lines, "幼儿", targetLabel);
       break;
     case "refresh_activity_support":
       targetLabel = childName;
       if (targetLabel === null) missing.push("幼儿名称");
-      addLine(lines, "幼儿", targetLabel);
       break;
     case "attach_observation_images":
       targetLabel = childName ?? observationLabel;
       if (targetLabel === null) missing.push("幼儿或观察名称");
-      addLine(lines, "幼儿/观察", targetLabel);
       addLine(lines, "追加图片", payload.image_ids.length + " 张");
       addLine(lines, "附件修订前提", payload.expected_attachment_revision);
       addLine(lines, "确认来源时间", payload.source_confirmed_at);
@@ -298,7 +490,7 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
   if (payloadRecord !== null && targetLabel === null) {
     targetLabel = readText(payloadRecord, ["target_label", "label"]);
   }
-  return { targetLabel, lines, missing: [...new Set(missing)] };
+  return { payload, targetLabel, lines, missing: [...new Set(missing)] };
 }
 
 function ItemOutcomeLine({ outcome, onRecheck, checking }: {
@@ -339,7 +531,7 @@ function ItemOutcomeLine({ outcome, onRecheck, checking }: {
           type="button"
           onClick={onRecheck}
           disabled={checking}
-          className="inline-flex h-8 items-center gap-1 rounded-md border px-2 text-xs"
+          className="inline-flex h-11 items-center gap-1 rounded-md border px-2 text-xs"
         >
           <RefreshCw className={cn("size-3", checking && "animate-spin motion-reduce:animate-none")} aria-hidden />
           重新读取核对
@@ -511,7 +703,7 @@ export function YayaProposalPanel({
               { accountId: principal.account_id, role: principal.role, displayName: principal.display_name },
               [operationId]
             )[0];
-      const result = await queryOriginalOperation(operationId, expected);
+      const result = await queryOriginalOperation(operationId, expected ?? null);
       setResults((current) => ({ ...current, [result.operation_id]: result.outcome }));
     } catch {
       setActionError("读取暂未完成，这不代表没有数据；仍按结果未知处理。");
@@ -559,7 +751,7 @@ export function YayaProposalPanel({
       {loadError !== null ? (
         <div className="mt-3 space-y-2">
           <p className="text-sm text-amber-800">{loadError}</p>
-          <Button type="button" variant="outline" size="sm" className="h-9" onClick={() => void load()}>
+          <Button type="button" variant="outline" size="sm" className="h-11" onClick={() => void load()}>
             <RefreshCw className="size-3.5" aria-hidden /> 重新读取
           </Button>
         </div>
@@ -569,6 +761,7 @@ export function YayaProposalPanel({
         {items.map((item) => {
           const outcome = results[item.operation_id];
           const details = detailsByOperation.get(item.operation_id) ?? {
+            payload: null,
             targetLabel: null,
             lines: [],
             missing: ["内容当前不可读"],
@@ -579,7 +772,7 @@ export function YayaProposalPanel({
             item.payload !== null &&
             details.missing.length === 0 &&
             outcome === undefined;
-          const summary = payloadSummary(item.payload as YayaDomainPayload | null);
+          const summary = payloadSummary(details.payload);
           const galleryImage = approvalsHref(item);
           return (
             <article
@@ -616,14 +809,18 @@ export function YayaProposalPanel({
                       className={cn(
                         "text-xs",
                         item.access === "full"
-                          ? "bg-emerald-100 text-emerald-700"
+                          ? details.missing.length === 0
+                            ? "bg-emerald-100 text-emerald-700"
+                            : "bg-amber-100 text-amber-700"
                           : item.access === "historical_read_only"
                             ? "bg-sky-100 text-sky-700"
                             : "bg-rose-100 text-rose-700"
                       )}
                     >
                       {item.access === "full"
-                        ? "内容可核对"
+                        ? details.missing.length === 0
+                          ? "内容可核对"
+                          : "内容需补齐"
                         : item.access === "historical_read_only"
                           ? "历史只读"
                           : "内容不可读"}

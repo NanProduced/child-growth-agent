@@ -97,7 +97,7 @@ export function YayaThreadList({ className }: { className?: string }) {
       <div className="flex items-center justify-between px-3 py-2">
         <h2 className="text-sm font-medium text-foreground">历史会话</h2>
         <ThreadListPrimitive.New asChild>
-          <Button type="button" variant="outline" size="sm" className="h-9" data-yaya-new-thread>
+          <Button type="button" variant="outline" size="sm" className="h-11" data-yaya-new-thread>
             <MessageSquarePlus className="size-3.5" aria-hidden />
             新对话
           </Button>
