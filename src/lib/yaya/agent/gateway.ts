@@ -14,11 +14,11 @@ import {
   type YayaModelResponse,
 } from './types';
 
-export function createLlmYayaModelGateway(): YayaModelGateway {
+export function createLlmYayaModelGateway(options: { dateAnchor?: string; forwardHeaders?: Record<string, string> } = {}): YayaModelGateway {
   return {
     async generate(request: YayaModelRequest): Promise<YayaModelResponse> {
       const result = await invokeChatLlm(
-        request.messages.map((message) => ({
+        [...(options.dateAnchor ? [{ role: 'system' as const, text: `服务端本次运行日期（Asia/Shanghai）：${options.dateAnchor}。今天/昨天以此为锚点；教师已明确给出的绝对日期优先，不要因缺少模型自身时钟而追问今天是哪一天。此日期不是幼儿事实，也不改写教师原文。` }] : []), ...request.messages].map((message) => ({
           role: message.role,
           content: message.text,
           images: message.images,
@@ -27,6 +27,7 @@ export function createLlmYayaModelGateway(): YayaModelGateway {
           temperature: 0.3,
           signal: request.signal,
           responseFormat: YAYA_ACTION_WIRE_FORMAT,
+          forwardHeaders: options.forwardHeaders,
         },
       );
       return {

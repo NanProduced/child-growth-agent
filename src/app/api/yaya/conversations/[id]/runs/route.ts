@@ -6,6 +6,7 @@
  * 响应头未发送前的失败用 HTTP 错误；流开始后的失败只能是显式终态事件。
  */
 import { NextRequest } from 'next/server';
+import { HeaderUtils } from 'coze-coding-dev-sdk';
 
 import { lookupYayaRun, startYayaRun } from '@/lib/yaya/agent/runtime';
 import { yayaRouteError } from '@/lib/yaya/data';
@@ -19,7 +20,9 @@ export async function POST(
 ): Promise<Response> {
   const { id } = await params;
   try {
-    return await startYayaRun(request, id, { write: (state) => createPlatformWriteBinding(state, request) });
+    const forwardHeaders = HeaderUtils.extractForwardHeaders(request.headers);
+    delete forwardHeaders['x-run-mode']; // A browser cannot select a gateway test/mock mode.
+    return await startYayaRun(request, id, { forwardHeaders, write: (state) => createPlatformWriteBinding(state, request) });
   } catch (error) {
     return yayaRouteError(error);
   }

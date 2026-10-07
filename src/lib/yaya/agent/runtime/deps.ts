@@ -12,6 +12,7 @@
  *   TOOLS1 交付后通过 `write` 选项绑定真实工厂（同一 run 持久化与依赖钩子）。
  */
 import { withPrivateRead, yayaDataRepository } from '@/lib/yaya/data';
+import { isoDateInShanghai } from '@/lib/format';
 import { createYayaReadRegistry, type YayaReadRegistry } from '@/lib/yaya/tools/read';
 
 import { createLlmYayaModelGateway } from '../gateway';
@@ -128,6 +129,7 @@ export interface YayaRunWriteBinding {
 export interface YayaRunDependencyOptions {
   readRegistry?: YayaReadRegistry;
   write?: YayaRunWriteBinding | ((state: YayaRunRuntimeState) => YayaRunWriteBinding);
+  forwardHeaders?: Record<string, string>;
 }
 
 const failClosedProposeWrite = async (): Promise<YayaProposeWriteOutcome> => ({
@@ -143,7 +145,7 @@ export function createYayaRunDependencies(
   const readRegistry = options.readRegistry ?? createYayaReadRegistry();
   const write = typeof options.write === 'function' ? options.write(state) : options.write;
   return {
-    model: createLlmYayaModelGateway(),
+    model: createLlmYayaModelGateway({ dateAnchor: isoDateInShanghai(new Date(state.run.created_at)), forwardHeaders: options.forwardHeaders }),
     resolveCurrentIdentity: ({ run_id }) =>
       resolveYayaRunCurrentIdentity({ runId: run_id, token: state.token }),
     loadProjectedContext: (input) => loadYayaRunProjectedContext(state, input.identity.principal),

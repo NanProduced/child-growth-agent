@@ -66,10 +66,12 @@ function isMode(value: string | undefined): value is MediaStorageMode {
 export function loadMediaStorageConfig(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): MediaStorageConfig | null {
-  const environment = env.MEDIA_ENVIRONMENT?.trim();
-  const mode = env.MEDIA_STORAGE_MODE?.trim();
+  const platform = env.YAYA_PLATFORM_AUTH === 'workload';
+  const environment = platform ? env.COZE_PROJECT_ENV === 'PROD' ? 'production' : env.COZE_PROJECT_ENV === 'DEV' ? 'development' : undefined : env.MEDIA_ENVIRONMENT?.trim();
+  const mode = env.MEDIA_STORAGE_MODE?.trim() || (platform ? 's3' : undefined);
   if (!isEnvironment(environment) || !isMode(mode)) return null;
   if (mode === "local") {
+    if (environment === 'production') return null;
     const root = env.MEDIA_LOCAL_ROOT?.trim();
     if (!root) return null;
     return {
@@ -81,9 +83,9 @@ export function loadMediaStorageConfig(
       local_root: root,
     };
   }
-  const bucket = env.MEDIA_BUCKET_NAME?.trim();
-  const endpoint = env.MEDIA_BUCKET_ENDPOINT?.trim();
-  const region = env.MEDIA_BUCKET_REGION?.trim() || "auto";
+  const bucket = (platform ? env.COZE_BUCKET_NAME : env.MEDIA_BUCKET_NAME)?.trim();
+  const endpoint = (platform ? env.COZE_BUCKET_ENDPOINT_URL : env.MEDIA_BUCKET_ENDPOINT)?.trim();
+  const region = env.MEDIA_BUCKET_REGION?.trim() || (platform ? 'cn-beijing' : 'auto');
   if (!bucket || !endpoint) return null;
   return { mode, environment, bucket, endpoint, region, local_root: null };
 }
@@ -111,9 +113,11 @@ export function buildObjectKey(input: {
   owner_account_id: string;
   attachment_id: string;
   variant: MediaVariant;
+  checksum_sha256?: string;
 }): string {
   if (!KEY_SEGMENT.test(input.owner_account_id) || !KEY_SEGMENT.test(input.attachment_id)) {
     throw new MediaError("invalid_request", "对象键身份不合法。");
   }
-  return `${input.environment === "production" ? "media/prod" : "media/dev"}/${input.owner_account_id}/${input.attachment_id}/${input.variant}`;
+  if (input.checksum_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(input.checksum_sha256)) throw new MediaError('invalid_request', '对象内容摘要不合法。');
+  return `${input.environment === "production" ? "media/prod" : "media/dev"}/${input.owner_account_id}/${input.attachment_id}/${input.variant}${input.checksum_sha256 ? '/' + input.checksum_sha256 : ''}`;
 }

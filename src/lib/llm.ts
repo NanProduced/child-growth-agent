@@ -2,6 +2,7 @@ import { Config, LLMClient } from 'coze-coding-dev-sdk';
 import type { ContentPart, Message } from 'coze-coding-dev-sdk';
 
 import { FIVE_DOMAINS } from './types';
+import { assertCozeEndpoint, platformWorkloadHeaders } from './coze-runtime';
 
 export type LlmProvider = 'coze' | 'stepfun';
 export type LlmResponseType =
@@ -558,14 +559,67 @@ function stepFunChatResponseFormat(options: LlmChatOptions): object | undefined 
   return options.responseType ? STEPFUN_RESPONSE_FORMATS[options.responseType] : undefined;
 }
 
+/** The platform may return SSE even when stream=false. Never accept HTML or
+ * incomplete streams as a successful model response; reasoning is not emitted.
+ */
+export function parseCozeModelWire(body: string, contentType: string): unknown {
+  const text = body.trim();
+  if (text.startsWith('{')) return JSON.parse(text) as unknown;
+  if (!contentType.includes('text/event-stream') && !text.startsWith('data:')) throw Error('扣子网关没有返回模型 JSON 或合法事件流。');
+  let content = '', usage: unknown = null, model: string | null = null, done = false, ended = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue;
+    const data = line.slice(5).trim();
+    if (!data) continue;
+    if (ended) throw Error('扣子事件流终态后仍有数据。');
+    if (data === '[DONE]') { done = true; ended = true; continue; }
+    const value: unknown = JSON.parse(data);
+    if (!isRecord(value) || value.error) throw Error('扣子事件流包含错误。');
+    if (typeof value.model === 'string') {
+      if (model !== null && model !== value.model) throw Error('扣子事件流模型身份矛盾。');
+      model = value.model;
+    }
+    if (value.usage) usage = value.usage;
+    if (!Array.isArray(value.choices)) continue;
+    for (const choice of value.choices) {
+      if (!isRecord(choice)) throw Error('扣子事件流形状错误。');
+      if (isRecord(choice.delta) && typeof choice.delta.content === 'string') content += choice.delta.content;
+      if (choice.finish_reason === 'stop') done = true;
+      if (choice.finish_reason === 'length') throw Error('扣子模型回答被截断。');
+    }
+  }
+  if (!done || !content.trim()) throw Error('扣子事件流没有完整回答。');
+  return { model, choices: [{ message: { content } }], usage };
+}
+
 async function invokeCozeChat(
   messages: readonly LlmChatMessage[],
   options: LlmChatOptions,
 ): Promise<LlmChatResult> {
+  const model = process.env.YAYA_COZE_MODEL?.trim() || COZE_ORGANIZE_MODEL;
+  if (process.env.YAYA_PLATFORM_AUTH === 'workload') {
+    const headers = platformWorkloadHeaders('model', options.forwardHeaders);
+    const endpoint = assertCozeEndpoint(process.env.COZE_INTEGRATION_MODEL_BASE_URL || 'https://integration.coze.cn/api/v3');
+    const timeout = AbortSignal.timeout(getStepFunTimeoutMs());
+    const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
+    let response: Response;
+    try {
+      response = await fetch(endpoint + '/chat/completions', { method: 'POST', redirect: 'error', headers: { ...headers, 'content-type': 'application/json', 'X-Client-Sdk': 'coze-coding-dev-sdk-typescript/0.3.0' }, body: JSON.stringify({ model, messages: buildCozeChatMessages(messages), temperature: options.temperature ?? 0.3, thinking: { type: options.thinking ?? 'disabled' }, stream: true, stream_options: { include_usage: true } }), signal });
+    } catch {
+      if (options.signal?.aborted) throw new LlmAbortedError();
+      throw Error('扣子平台代理请求未完成。');
+    }
+    if (!response.ok) throw Error('扣子平台代理请求失败（HTTP ' + response.status + '）。');
+    const timing = timeoutRace(signal, getStepFunTimeoutMs());
+    let wire: string;
+    try { wire = await Promise.race([response.text(), timing.promise]); } finally { timing.cancel(); }
+    const value = parseCozeModelWire(wire, response.headers.get('content-type') ?? '');
+    return { content: stepFunContent(value), provider: 'coze', model: isRecord(value) && typeof value.model === 'string' && value.model ? value.model : model, usage: isRecord(value) ? normalizeUsage(value.usage) ?? null : null };
+  }
   // Coze 已安装 SDK 没有 response_format/tools 参数：结构化动作由 Prompt 承载，Zod 校验在应用层。
   const response = await raceWithAbort(
     new LLMClient(new Config(), options.forwardHeaders).invoke(buildCozeChatMessages(messages), {
-      model: COZE_ORGANIZE_MODEL,
+      model,
       temperature: options.temperature ?? 0.3,
       thinking: options.thinking ?? 'disabled',
     }),
@@ -575,7 +629,7 @@ async function invokeCozeChat(
   return {
     content: response.content,
     provider: 'coze',
-    model: COZE_ORGANIZE_MODEL,
+    model,
     usage: null,
   };
 }
@@ -616,7 +670,10 @@ export async function invokeChatLlm(
   messages: readonly LlmChatMessage[],
   options: LlmChatOptions = {},
 ): Promise<LlmChatResult> {
-  return getLlmProvider() === 'stepfun'
+  const key = messages.some(message => (message.images?.length ?? 0) > 0) ? 'YAYA_CHAT_IMAGE_PROVIDER' : 'YAYA_CHAT_TEXT_PROVIDER';
+  const provider = process.env[key]?.trim() || getLlmProvider();
+  if (provider !== 'coze' && provider !== 'stepfun') throw Error('不支持的聊天 provider。');
+  return provider === 'stepfun'
     ? invokeStepFunChat(messages, options)
     : invokeCozeChat(messages, options);
 }

@@ -317,6 +317,7 @@ async function uploadOne(
       owner_account_id: ownerAccountId,
       attachment_id: attachmentId,
       variant,
+      checksum_sha256: process.env.YAYA_PLATFORM_AUTH === 'workload' ? sha256Hex(processed[variant]) : undefined,
     });
   const keys = {
     original: keyFor("original"),
