@@ -16,6 +16,7 @@ import {
   type YayaApprovalBinding,
   type YayaApprovalItemExecution,
   type YayaApprovalItemRef,
+  type YayaApprovalSubmitter,
   type YayaOperationReceipt,
   type YayaPlannedOperation,
   type YayaProposalItem,
@@ -27,6 +28,7 @@ import {
   type YayaBatchQueryView,
   type YayaBusinessWriteResult,
   type YayaExecuteApprovedInput,
+  type YayaExecutionItemContext,
   type YayaOperationQueryView,
   type YayaSupersedeInput,
   type YayaSupersedeResult,
@@ -167,14 +169,92 @@ function buildBinding(proposalOrigin: "teacher_card" | "model_suggestion", row: 
   };
 }
 
+/** `verifyApprovedOperations` 输入：与正式执行同一套提交者/批准/版本解析口径 */
+export interface YayaVerifyApprovedInput {
+  approval_id: string;
+  operation_ids: readonly string[];
+  submitter: YayaApprovalSubmitter;
+  school_id: string;
+  resolveBusinessRevision?: (context: YayaExecutionItemContext) => Promise<string | null>;
+  /**
+   * payload 形状与声明绑定校验（TOOLS 写入口注入）：在取得任何业务目标行锁之前
+   * 逐项执行；非法/未绑定提案不得进入锁流程。DATA 直调省略时保持原语义。
+   */
+  assertItemBinding?: (
+    client: TransactionClient,
+    item: { action: string; resource: string; resource_ref: unknown; payload: unknown },
+  ) => Promise<void>;
+}
+
 /**
- * 授权执行：调用方必须在业务写事务内传入同一个 client。
- * 返回逐项回执；重复调用（全部已有回执）返回原回执，不再次执行。
+ * 同 client 的批准核验结果（不消费批准、不写业务）：
+ * - `replayed_receipts` 非空表示所选操作全部已有回执，调用方应直接按原回执返回；
+ * - `executions` 为已核验的逐项执行上下文（输入顺序）。
  */
-export async function executeApprovedOperations(
+export interface YayaVerifiedApprovedOperations {
+  approval_id: string;
+  proposal_id: string;
+  batch_id: string;
+  proposal_origin: "teacher_card" | "model_suggestion";
+  replayed_receipts: readonly YayaOperationReceipt[] | null;
+  executions: readonly YayaExecutionItemContext[];
+  operations: readonly YayaOperationRow[];
+}
+
+/**
+ * 目标业务行锁（稳定顺序：children → app_accounts → classes → observations）。
+ * 与既有调用链全局一致：任教服务先锁 teacher 账号再 INSERT 任教关系（FK 需要
+ * classes 行锁），转班先锁 children 再碰 classes；工具按同一顺序取锁即无环。
+ * 锁后读取并核对批准版本，消除“先读旧修订、等待行锁后被并发覆盖”的窗口；
+ * 只锁当前操作明确指向的目标行，不给普通只读 getter 加锁。
+ */
+async function lockExecutionTargets(
   client: TransactionClient,
-  input: YayaExecuteApprovedInput,
-): Promise<readonly YayaOperationReceipt[]> {
+  items: readonly ProposalItemRow[],
+): Promise<void> {
+  const targets = new Map<string, { table: string; id: string; rank: number }>();
+  const add = (rank: number, table: string, id: string): void => {
+    targets.set(`${rank}:${id}`, { table, id, rank });
+  };
+  for (const item of items) {
+    const ref = parseResourceRef(item.resource_ref);
+    if (ref === null) continue;
+    const payload = item.payload as YayaProposalItem["payload"];
+    if (ref.kind === "child" || ref.kind === "transfer") add(0, "children", ref.child_id);
+    if (payload.kind === "manage_teacher" && payload.teacher_account_id) {
+      add(1, "app_accounts", payload.teacher_account_id);
+    }
+    if (ref.kind === "class" && ref.class_id !== null) add(2, "classes", ref.class_id);
+    if (ref.kind === "observation") {
+      const found = await client.query<{ child_id: string }>(
+        "SELECT child_id FROM observations WHERE id = $1",
+        [ref.observation_id],
+      );
+      const childId = found.rows[0]?.child_id;
+      if (childId) add(0, "children", childId);
+      add(3, "observations", ref.observation_id);
+    }
+  }
+  const ordered = [...targets.values()].sort(
+    (left, right) => left.rank - right.rank || left.id.localeCompare(right.id),
+  );
+  for (const target of ordered) {
+    await client.query(`SELECT id FROM ${target.table} WHERE id = $1 FOR UPDATE`, [target.id]);
+  }
+}
+
+/**
+ * 批准核验（共享边界，不消费批准）：
+ * - 与正式执行同一套判定：提交者/原 session/CSRF/批准生命周期 + 逐项身份/资源事实/
+ *   内容摘要/附件关联/业务版本 + `evaluateApprovalExecution`；
+ * - 先按稳定顺序取得目标行锁，再读取并核对批准版本；锁等待后按当前时间重新核验
+ *   批准到期与会话有效性（与 AUTH private-auth 同一判定口径）；
+ * - 任何前提不满足抛 `approval_invalid` 并附 reasons；调用方不得自行复制第二套规则。
+ */
+export async function verifyApprovedOperations(
+  client: TransactionClient,
+  input: YayaVerifyApprovedInput,
+): Promise<YayaVerifiedApprovedOperations> {
   const uniqueIds = [...new Set(input.operation_ids)];
   if (
     uniqueIds.length === 0 ||
@@ -203,11 +283,20 @@ export async function executeApprovedOperations(
   const existing = operations.rows.map((row) => receiptRowToReceipt(row));
   if (existing.every((receipt) => receipt !== null)) {
     const byId = new Map((existing as YayaOperationReceipt[]).map((receipt) => [receipt.operation_id, receipt]));
-    return input.operation_ids.map((operationId) => {
+    const replayed = input.operation_ids.map((operationId) => {
       const receipt = byId.get(operationId);
       if (!receipt) throw new YayaDataError("operation_unknown", "回执缺失。");
       return receipt;
     });
+    return {
+      approval_id: input.approval_id,
+      proposal_id: operations.rows[0]?.proposal_id ?? "",
+      batch_id: operations.rows[0]?.batch_id ?? "",
+      proposal_origin: "model_suggestion",
+      replayed_receipts: replayed,
+      executions: [],
+      operations: operations.rows,
+    };
   }
   if (existing.some((receipt) => receipt !== null)) {
     throw new YayaDataError("operation_unknown", "该批准集合存在部分回执，无法原子重放。");
@@ -263,8 +352,18 @@ export async function executeApprovedOperations(
       WHERE operation_id = ANY($1::varchar[]) ORDER BY item_key`,
     [uniqueIds],
   );
+  // 语义绑定先于业务锁：非法/越权 payload 在取得任何业务目标行锁之前拒绝，
+  // 避免未绑定提案进入锁流程（AUTH share→update 升级可形成 40P01）。
+  if (input.assertItemBinding) {
+    for (const item of proposalItems.rows) {
+      await input.assertItemBinding(client, item);
+    }
+  }
+  // 先按稳定顺序取得目标行锁；后续逐项读取/版本核对都使用锁后事实。
+  await lockExecutionTargets(client, proposalItems.rows);
   const proposalItemByOperation = new Map(proposalItems.rows.map((row) => [row.operation_id, row]));
   const executions: YayaApprovalItemExecution[] = [];
+  const contexts: YayaExecutionItemContext[] = [];
   for (const row of operations.rows) {
     if (row.proposal_id !== approval.proposal_id) reasons.push("unexpected_item");
     const guard = guardExecutionAgainstOperation({
@@ -306,24 +405,29 @@ export async function executeApprovedOperations(
     });
     if (recomputed !== approvalItem.content_digest) reasons.push("content_changed");
     let businessRevision = approvalItem.business_revision;
-    if (approvalItem.business_revision !== null) {
-      if (!input.resolveBusinessRevision) {
-        reasons.push("business_version_changed");
+    const context: YayaExecutionItemContext = {
+      operation: toPlanned(row),
+      proposal_item: {
+        item_key: proposalItem.item_key,
+        target_id: proposalItem.target_id,
+        content_digest: proposalItem.content_digest,
+        attachment_associations: associations,
+        payload: proposalItem.payload as YayaProposalItem["payload"],
+      },
+      approval_item: approvalItem,
+      proposal_origin: proposal.proposal_origin,
+    };
+    if (input.resolveBusinessRevision) {
+      const resolved = await input.resolveBusinessRevision(context);
+      if (approvalItem.business_revision === null) {
+        // 批准快照是 null（缺版本前提）：当前事实存在版本即前提不成立，保守拒绝；
+        // 当前也无版本（创建/附件 CAS 等真正无版本动作）才继续。
+        if (resolved !== null) reasons.push("business_version_changed");
       } else {
-        const context = {
-          operation: toPlanned(row),
-          proposal_item: {
-            item_key: proposalItem.item_key,
-            target_id: proposalItem.target_id,
-            content_digest: proposalItem.content_digest,
-            attachment_associations: associations,
-            payload: proposalItem.payload as YayaProposalItem["payload"],
-          },
-          approval_item: approvalItem,
-          proposal_origin: proposal.proposal_origin,
-        };
-        businessRevision = await input.resolveBusinessRevision(context);
+        businessRevision = resolved;
       }
+    } else if (approvalItem.business_revision !== null) {
+      reasons.push("business_version_changed");
     }
     executions.push({
       item_key: approvalItem.item_key,
@@ -333,6 +437,7 @@ export async function executeApprovedOperations(
       attachment_associations: approvalItem.attachment_associations,
       business_revision: businessRevision,
     });
+    contexts.push(context);
   }
   const evaluation = evaluateApprovalExecution(
     buildBinding(proposal.proposal_origin, approval, bindingItems),
@@ -340,45 +445,74 @@ export async function executeApprovedOperations(
     executions,
   );
   if (!evaluation.ok) reasons.push(...evaluation.reasons);
+  // 行锁等待可能跨过批准到期或会话期限：按当前时间/当前会话事实复核。
+  if (approval.cancelled_at !== null) reasons.push("approval_cancelled");
+  if (approval.expires_at !== null && new Date() >= new Date(isoRequired(approval.expires_at))) {
+    reasons.push("approval_expired");
+  }
+  const sessionFresh = await client.query<{ valid: boolean }>(
+    `SELECT revoked_at IS NULL AND expires_at > clock_timestamp() AS valid
+       FROM app_sessions WHERE id = $1`,
+    [approval.session_id],
+  );
+  if (sessionFresh.rows[0]?.valid !== true) reasons.push("session_invalid");
   if (reasons.length > 0) {
     throw new YayaDataError("approval_invalid", "批准前提已变化，已拒绝执行。", {
       reasons: [...new Set(reasons)],
     });
   }
+  return {
+    approval_id: approval.id,
+    proposal_id: approval.proposal_id,
+    batch_id: approval.batch_id,
+    proposal_origin: proposal.proposal_origin,
+    replayed_receipts: null,
+    executions: contexts,
+    operations: operations.rows,
+  };
+}
 
+/**
+ * 授权执行：调用方必须在业务写事务内传入同一个 client。
+ * 返回逐项回执；重复调用（全部已有回执）返回原回执，不再次执行。
+ * 核验与准备态保存共用 `verifyApprovedOperations`，不复制第二套审批规则。
+ */
+export async function executeApprovedOperations(
+  client: TransactionClient,
+  input: YayaExecuteApprovedInput & Pick<YayaVerifyApprovedInput, "assertItemBinding">,
+): Promise<readonly YayaOperationReceipt[]> {
+  const verified = await verifyApprovedOperations(client, {
+    approval_id: input.approval_id,
+    operation_ids: input.operation_ids,
+    submitter: input.submitter,
+    school_id: input.school_id,
+    resolveBusinessRevision: input.resolveBusinessRevision,
+    assertItemBinding: input.assertItemBinding,
+  });
+  if (verified.replayed_receipts !== null) return verified.replayed_receipts;
+
+  const uniqueIds = [...new Set(input.operation_ids)];
   const consumed = await client.query(
     "UPDATE yaya_approvals SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
-    [approval.id],
+    [verified.approval_id],
   );
   if (!consumed.rowCount) {
     throw new YayaDataError("approval_consumed", "批准已被消费。");
   }
   await client.query(
     "UPDATE yaya_operations SET started_at = now(), approval_id = $2 WHERE operation_id = ANY($1::varchar[])",
-    [uniqueIds, approval.id],
+    [uniqueIds, verified.approval_id],
   );
 
-  const operationsById = new Map(operations.rows.map((row) => [row.operation_id, row]));
+  const contextByOperation = new Map(
+    verified.executions.map((context) => [context.operation.operation_id, context]),
+  );
   const receipts: YayaOperationReceipt[] = [];
   for (const operationId of input.operation_ids) {
-    const row = operationsById.get(operationId);
-    const proposalItem = proposalItemByOperation.get(operationId);
-    const approvalItem = bindingItems.find((item) => item.operation_id === operationId);
-    if (!row || !proposalItem || !approvalItem) {
+    const context = contextByOperation.get(operationId);
+    if (!context) {
       throw new YayaDataError("operation_unknown", "执行上下文不完整。");
     }
-    const context = {
-      operation: toPlanned(row),
-      proposal_item: {
-        item_key: proposalItem.item_key,
-        target_id: proposalItem.target_id,
-        content_digest: proposalItem.content_digest,
-        attachment_associations: parseAssociations(proposalItem.attachment_associations),
-        payload: proposalItem.payload as YayaProposalItem["payload"],
-      },
-      approval_item: approvalItem,
-      proposal_origin: proposal.proposal_origin,
-    };
     const result: YayaBusinessWriteResult = await input.callback(client, context);
     const violations = guardBusinessWriteResult(result);
     if (violations.length > 0) {
