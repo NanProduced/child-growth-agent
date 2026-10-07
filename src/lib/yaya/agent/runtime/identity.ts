@@ -128,7 +128,7 @@ async function resolveBoundaryIdentity(
   try {
     assignments = await runQuery<{ class_id: string }>(
       `SELECT class_id FROM teacher_class_assignments
-        WHERE account_id = $1 AND removed_at IS NULL ORDER BY class_id`,
+        WHERE account_id = $1 AND removed_at IS NULL ORDER BY class_id${lockSuffix}`,
       [account.id],
     );
   } catch {

@@ -37,7 +37,6 @@ import { runYayaAgent } from '../engine';
 import {
   DEFAULT_YAYA_AGENT_LIMITS,
   type YayaAgentEvent,
-  type YayaCurrentIdentity,
   type YayaRunOutcome,
 } from '../types';
 
@@ -52,6 +51,7 @@ import {
   boundaryStopForIdentity,
   isYayaRunOwnedByThisProcess,
   resolveYayaRunBoundaryIdentity,
+  verifyYayaRunBoundaryIdentity,
 } from './identity';
 import {
   abortYayaRunProcess,
@@ -78,6 +78,37 @@ const NDJSON_HEADERS: Record<string, string> = {
 
 function stoppedOutcome(reason: 'run_replaced' | 'model_failed'): YayaRunOutcome {
   return { kind: 'stopped', reason, detail: null };
+}
+
+/**
+ * 发布前按**当前**授权核验待发布终态（含已存终态与回退路径，含正常成功）：
+ * 停止终态无私域内容直通；其余与查询口径共用 runTerminalPresentable，
+ * 不可核验时改发 context_revoked，绝不发布旧私域内容。
+ */
+async function publishableOutcome(
+  run: YayaRunRecord,
+  token: string,
+  outcome: YayaRunOutcome,
+): Promise<YayaRunOutcome> {
+  if (outcome.kind === 'stopped') return outcome;
+  const carrier = carrierForToken(token);
+  try {
+    const presentable = await withPrivateRead(carrier, async ({ principal }) =>
+      runTerminalPresentable(run, carrier, principal),
+    );
+    return presentable ? outcome : { kind: 'stopped', reason: 'context_revoked', detail: null };
+  } catch (error) {
+    if (error instanceof AccountsError) {
+      if (error.code === 'account_disabled') {
+        return { kind: 'stopped', reason: 'account_disabled', detail: null };
+      }
+      if (error.code === 'identity_unavailable') {
+        return { kind: 'stopped', reason: 'identity_unavailable', detail: null };
+      }
+      return { kind: 'stopped', reason: 'session_invalid', detail: null };
+    }
+    return { kind: 'stopped', reason: 'context_revoked', detail: null };
+  }
 }
 
 function carrierFromRequest(request: Request): HeaderCarrier {
@@ -336,25 +367,26 @@ async function driveRun(input: {
     });
     let stored: YayaRunRecord | null = null;
     let finalizeThrew = false;
-    // 最后保存边界：身份阶段（账号/会话共享锁）→ run 行锁等待 → 来源阶段（锁后重核全部已装载投影）。
-    // 锁等待期间提交的撤会话/来源降级只能被拒绝；并发撤销被共享锁线性化到原终态之后。
-    let boundaryIdentity: YayaCurrentIdentity | null = null;
+    // 最后保存边界：身份阶段（账号/会话/任教共享锁）→ run 行锁等待 → 来源阶段
+    // （锁后重核全部已装载投影 + 身份重核）；墙钟到期/撤权/转班跨过锁等待时按当前事实停止。
     try {
       stored = await finalizeYayaRun(run.run_id, ownerInstance, result.outcome, {
-        verify: async (client) => {
-          boundaryIdentity = await resolveYayaRunBoundaryIdentity(client, { run, token });
-          return boundaryStopForIdentity(boundaryIdentity, run);
-        },
+        verify: async (client) => verifyYayaRunBoundaryIdentity(client, { run, token }),
         verifyProjections: async (client) => {
-          const identity = boundaryIdentity;
-          if (identity === null || identity.principal === null) return null;
+          // run 行锁等待完成后重新解析身份：锁等待可能跨过会话到期时刻。
+          const identity = await resolveYayaRunBoundaryIdentity(client, { run, token });
+          const identityStop = boundaryStopForIdentity(identity, run);
+          if (identityStop !== null) return identityStop;
+          if (identity.principal === null) return null;
           const verdict = await revalidateYayaRunContextWithClient(
             state,
             { run_id: run.run_id, identity, sources: [], image_ids: [] },
             { principal: identity.principal },
             client,
           );
-          return verdict.ok ? null : { kind: 'stopped', reason: 'context_revoked', detail: null };
+          if (!verdict.ok) return { kind: 'stopped', reason: 'context_revoked', detail: null };
+          // 来源重核本身也会等待 child 共享锁：提交前再确认一次身份，覆盖整段锁等待。
+          return verifyYayaRunBoundaryIdentity(client, { run, token });
         },
       });
     } catch {
@@ -362,7 +394,9 @@ async function driveRun(input: {
     }
     if (stored !== null) {
       const parsed = yayaRunOutcomeSchema.safeParse(stored.outcome);
-      publishPersistedOutcome(parsed.success ? parsed.data : stoppedOutcome('model_failed'));
+      const candidate = parsed.success ? parsed.data : stoppedOutcome('model_failed');
+      // 用落库记录自身重核（与查询口径一致）：注册期快照不含运行中累积的依赖。
+      publishPersistedOutcome(await publishableOutcome(stored, token, candidate));
       return;
     }
     if (finalizeThrew) {
@@ -374,7 +408,8 @@ async function driveRun(input: {
     const fallback = await loadYayaRun(run.run_id).catch(() => null);
     if (fallback !== null && fallback.state === 'terminal') {
       const parsed = yayaRunOutcomeSchema.safeParse(fallback.outcome);
-      publishPersistedOutcome(parsed.success ? parsed.data : stoppedOutcome('model_failed'));
+      const candidate = parsed.success ? parsed.data : stoppedOutcome('model_failed');
+      publishPersistedOutcome(await publishableOutcome(fallback, token, candidate));
       return;
     }
     publishPersistedOutcome(

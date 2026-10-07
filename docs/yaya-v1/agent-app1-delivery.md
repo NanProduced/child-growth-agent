@@ -296,3 +296,74 @@ NOT_RUN 同 §7：真实模型质量、真实浏览器、生产迁移/部署、�
 新增 20 次真实额度未动。清理精确核验通过（容器/媒体根/进程树/两连接客户端/生成物还原）。
 
 NOT_RUN 同 §7/§9。
+
+## 11. R3 返修：锁等待窗口的会话到期、已存终态发布与来源权限前提
+
+起点 `62cc3b784d5cb06764e605f3432229e6412a761e`（主评审 P1-A/P1-B/P1-C）。
+只改 APP1 runtime 三文件、专属检查与本文件；**无 DDL 变更**；冻结类型/API0/内核/LLM/AUTH/DATA/MEDIA/READ1/
+harness/package/lock 未改；模型调用保持事务外；API 流仍唯一一致终态、结果未知只查原身份、不重发。
+
+### 11.1 RED→GREEN
+
+先按三条 P1 的真实时序反例入库（会话 TTL 跨 run 锁等待、peer 已存终态+转班、多来源共享锁窗口转班），
+在原候选上实测 RED：`158/164`，失败 6 项（A 跨期 3、B 已存终态 1、C 多来源 2）；
+修三处共享根因后 GREEN：`164/164`，`failures: []`，连续两轮实跑（run_id `agent-app1-muxsk8rp-01ffbb4e`、
+`agent-app1-muxslglf-6465c067`）。调试期临时插桩（pg_locks/pg_stat_activity/终态行打印）已全部移除并复跑确认；
+`pnpm validate` 与 `pwsh scripts/build.ps1` 通过。
+
+| 场景 | RED（R3 反例实测） | GREEN（R3 实测） |
+|---|---|---|
+| A 会话墙钟跨锁等待（P1-A） | run 行锁等待跨过会话自然到期，保存边界仍按进入时身份发布 answer；落账裁决时刻与查询口径跟随旧身份 | 来源重核完成后、提交前再跑一次边界身份核验（覆盖锁等待期到期），降级 `stopped(session_invalid)` 且无 answer；`terminal_at` 为实际裁决时刻且晚于 `expires_at`；查询口径一致 |
+| B 已存终态发布（P1-B） | peer 先落 `answered` 终态，本端发布分支不经当前授权直接发布 fallback 私域内容 | 发布分支对**落库行**（stored/fallback）跑 `withPrivateRead` + `runTerminalPresentable` 全量门禁，降级 `stopped(context_revoked)`；不覆盖 peer 已提交内容；查询 `unverifiable` 且不含标记 |
+| C 来源权限前提持锁（P1-C） | 多来源等待窗口内转班可提交，前项已核验来源的权限前提只在核验瞬间成立 | 观察/幼儿资源事实先取 `children FOR SHARE` 再读归属并持到提交；实测 finalize 卡在后项来源（childC 历史片段）共享锁期间，转班被 childA 共享锁挡住；转班提交晚于 `terminal_at`（同一 DB 时钟）；对照：转班先提交 → `stopped(context_revoked)` 无 answer |
+
+### 11.2 实现要点
+
+- `service.ts`：`verify` 与 `verifyProjections` 均走 `verifyYayaRunBoundaryIdentity`；`verifyProjections`
+  顺序 = `boundaryStopForIdentity` 优先停止 → `revalidateYayaRunContextWithClient`（run 锁等待之后、同一 client）
+  → 结尾再身份核验一次（覆盖来源锁等待期间的到期/撤销）。
+- 新增 `publishableOutcome(run, token, outcome)` 发布门禁：`stopped` 直通；其余必须过 `withPrivateRead` +
+  `runTerminalPresentable`（false → `context_revoked`；`AccountsError` 映射 `account_disabled` /
+  `identity_unavailable` / 其余 → `session_invalid`；其他异常保守 `context_revoked`）。
+  两个内容发布点（stored 与 fallback）都传**落库行**——注册期 in-memory run 依赖为空，传它会漏核（B1 实测拦下）。
+- `context.ts::readResourceFactsWith`：`observation` 分支拆为「读观察行 → children FOR SHARE → 读当前归属」，
+  `child` 分支先 `FOR SHARE` 再读；锁自核验点持到事务提交，覆盖「读集合 → 写终态」窗口。
+- `identity.ts`：assignments 更新 SQL 追加 `${lockSuffix}`，与保存边界共享锁同序。
+
+### 11.3 专属检查装置要点（新增 25 项，139→164）
+
+- **A1**：`directSession(ttl=10s)` + 两连接 `yaya_runs FOR UPDATE` 占位 → 实测剩余 >3000ms 进入边界、
+  等待期到期、跨期后唯一 `run_end stopped session_invalid`（无 answer）、`terminal_at > expires_at`、查询口径一致。
+- **B1**：可信 peer 先 `finalizeYayaRun` 落 `answered`（库内 marker）→ 转班 → 本端照常跑完；断言无 answer、
+  `stopped(context_revoked)`、库内仍是 peer 内容、查询 `unverifiable` 不含 marker。
+- **C1**：等到 **answer 的 `action_parsed`** 再抢 childC——首个 `action_parsed` 属 read，那时答案的发布前重核
+  尚未经过，racer 会把锁窗口挪到引擎边界而非保存边界；run 行锁仍被测试占着，finalize 必然停在 run 锁上，
+  释放后必然卡在 childC 共享锁。`pg_locks` 只认「已持有 children 元组锁且仍在等事务」的等待者，排除 run 行锁
+  释放尾迹（否则转班会在 finalize 取得 childA 共享锁之前抢跑——插桩移除前的 162/164 实测抓到过该缺口）；
+  时序断言用转班完成瞬间的 `clock_timestamp()` 与 `terminal_at` 同源比较（`children.updated_at = now()` 是
+  转班事务开始时刻，不能证明提交顺序）。
+- **C2 对照**：转班先提交 → 拒绝旧内容（`stopped context_revoked`、无 answer）。
+
+### 11.4 R3 文件清单（在 R2 五文件基础上）
+
+| 文件 | 变更 |
+|---|---|
+| `src/lib/yaya/agent/runtime/context.ts` | 资源事实 children 共享锁（child/observation 分支）持到提交 |
+| `src/lib/yaya/agent/runtime/identity.ts` | assignments 更新追加 `${lockSuffix}` |
+| `src/lib/yaya/agent/runtime/service.ts` | 双重身份核验 + `publishableOutcome` 全量发布门禁（stored/fallback） |
+| `scripts/yaya/check-agent-app1.ts` | R3 三组正反例 25 项（139→164）；answer `action_parsed` 等待、精确锁等待探测、同源时序断言 |
+| `docs/yaya-v1/agent-app1-delivery.md` | 本 R3 章节 |
+
+`store.ts`、`deps.ts`、迁移与表结构本轮未改。
+
+### 11.5 R3 验收（本候选实跑）
+
+| 检查 | 结果 |
+|---|---|
+| 专属验收 | **164/164** 连续两轮，`failures: []`，清理闸门通过 |
+| `pnpm validate` / `pwsh scripts/build.ps1` | 通过 |
+| check-preflight / contract / api-contract 等分层检查 | 本轮未重跑（R3 未改其依赖面；R2 实测见 §10） |
+
+分层同 §9/§10：真实 next dev HTTP、真实 AUTH/PG/DATA/READ1/sharp+本地对象根、两连接真实行锁交错；
+模型替身为本地 StepFun 协议服务（真实 `llm.ts` 路径）；真实 provider/搜索/S3/托管库请求 0。
+NOT_RUN 同 §7：真实模型质量、真实浏览器、生产迁移/部署、代理长连接仍不在本轮。

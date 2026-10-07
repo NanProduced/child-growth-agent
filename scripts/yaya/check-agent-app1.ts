@@ -56,6 +56,7 @@ import {
 } from '../../src/lib/yaya/agent/runtime/store';
 import { loadAttachmentContent } from '../../src/lib/media/content-service';
 import { mediaRuntimeOrThrow } from '../../src/lib/media/runtime';
+import { enrollChildInClass } from '../../src/lib/queries';
 import { withTransaction } from '../../src/storage/database/pg-client';
 import {
   assertCleanupComplete,
@@ -362,11 +363,12 @@ async function login(base: string, username: string, password: string) {
 async function directSession(
   database: Client,
   accountId: string,
+  ttlSeconds = 86_400,
 ): Promise<{ cookie: string; csrf: string; token: string }> {
   const token = createSessionToken();
   await database.query(
-    "INSERT INTO app_sessions (account_id, token_hash, expires_at) VALUES ($1,$2,now()+interval '1 day')",
-    [accountId, token.tokenHash],
+    'INSERT INTO app_sessions (account_id, token_hash, expires_at) VALUES ($1,$2,now()+make_interval(secs => $3))',
+    [accountId, token.tokenHash, ttlSeconds],
   );
   return {
     cookie: `${SESSION_COOKIE_NAME}=${token.token}`,
@@ -544,6 +546,28 @@ function openNdjson(response: Response): NdjsonStream {
     },
   };
   return stream;
+}
+
+/**
+ * 逐行读到 action_parsed（引擎发布前重核已过）或终局；返回是否看到 action_parsed。
+ * `action` 限定动作：多步流里首个 action_parsed 属于 read，等到 answer 才意味着
+ * 答案动作的发布前重核已过、引擎即将进入保存边界。
+ */
+async function readUntilActionParsed(
+  stream: NdjsonStream,
+  action?: Extract<YayaRunWireEvent, { type: 'action_parsed' }>['action'],
+): Promise<boolean> {
+  for (;;) {
+    const line = await readLineWithin(stream, 30_000);
+    if (line === null) return false;
+    const entry = parseYayaRunWireLine(line);
+    if (!entry.ok) continue;
+    if (entry.value.type === 'action_parsed') {
+      if (action === undefined || entry.value.action === action) return true;
+      continue;
+    }
+    if (entry.value.type === 'run_end') return false;
+  }
 }
 
 async function readLineWithin(stream: NdjsonStream, timeoutMs: number): Promise<string | null> {
@@ -1883,7 +1907,7 @@ async function main(): Promise<void> {
           hashSessionToken(boundarySession.token),
         ])
       ).rows[0]?.id ?? '';
-    const makeBoundaryRun = async () => {
+    const makeBoundaryRun = async (sessionId: string = boundarySessionId) => {
       const registration = await withTransaction((client) =>
         registerYayaRun(client, {
           run_id: randomUUID(),
@@ -1893,7 +1917,7 @@ async function main(): Promise<void> {
           user_text: '[app1:boundary] 合成',
           attachment_ids: [],
           expected_conversation_revision: convA.revision,
-          session_id: boundarySessionId,
+          session_id: sessionId,
           owner_instance: 'app1-check-boundary',
           deadline_at: new Date(Date.now() + 90_000).toISOString(),
         }),
@@ -2622,6 +2646,482 @@ async function main(): Promise<void> {
       'R2-C 合法 ref + message/fragment 选择器仍有效（对照）',
       validRefPair.corrupt === false && validRefPair.dependencies.length === 1,
     );
+
+    /* ============================== R3：锁等待后的身份/来源/权限前提 ============================== */
+
+    await r2Racer.query('ROLLBACK').catch(() => undefined);
+    await r2Lock.query('ROLLBACK').catch(() => undefined);
+
+    // 反例 A1：run 锁等待跨过会话自然到期；共享锁能串行化撤销行 UPDATE，却冻结不了墙钟。
+    const a1Session = await directSession(database, facts.teacherA.id, 10);
+    const a1Auth = { cookie: `${SESSION_COOKIE_NAME}=${a1Session.token}`, csrf: a1Session.csrf };
+    const a1Id = `expiry-${randomUUID()}`;
+    const a1Locked = deferred();
+    const a1Release = deferred();
+    gates.push(a1Release.resolve);
+    stub.register('[app1:expiry]', [
+      {
+        prepare: async () => {
+          const db = database;
+          if (db === null) throw new Error('database unavailable');
+          const rows = await db.query<{ id: string }>(
+            'SELECT id FROM yaya_runs WHERE client_request_id = $1',
+            [a1Id],
+          );
+          const serviceRunId = rows.rows[0]?.id;
+          if (!serviceRunId) throw new Error('expiry run not found');
+          await r2Lock!.query('BEGIN');
+          await r2Lock!.query('SELECT id FROM yaya_runs WHERE id = $1 FOR UPDATE', [serviceRunId]);
+          a1Locked.resolve();
+          void (async () => {
+            await a1Release.promise;
+            await r2Lock!.query('COMMIT').catch(() => undefined);
+          })();
+        },
+        content: actionAnswer('会话到期后不应发布。'),
+      },
+    ]);
+    const a1Response = await postRun(
+      base,
+      a1Auth,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: a1Id,
+        user_text: '[app1:expiry] 锁等待到期',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await a1Locked.promise;
+    const a1Stream = openNdjson(a1Response);
+    const a1Action = await readUntilActionParsed(a1Stream);
+    const a1Remaining = await database.query<{ remaining_ms: string }>(
+      'SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp())) * 1000 AS remaining_ms FROM app_sessions WHERE token_hash = $1',
+      [hashSessionToken(a1Session.token)],
+    );
+    check(
+      'R3-A 进入保存边界前会话仍有效（剩余 >3000ms，受控交错）',
+      a1Action && Number(a1Remaining.rows[0]?.remaining_ms ?? 0) > 3000,
+    );
+    const a1Active = await database.query<{ state: string }>(
+      'SELECT state FROM yaya_runs WHERE client_request_id = $1',
+      [a1Id],
+    );
+    check('R3-A 锁等待期间 run 仍活跃（终态未落）', a1Active.rows[0]?.state === 'active');
+    let a1Expired = false;
+    for (let attempt = 0; attempt < 250; attempt += 1) {
+      const expired = await database.query<{ expired: boolean }>(
+        'SELECT expires_at < clock_timestamp() AS expired FROM app_sessions WHERE token_hash = $1',
+        [hashSessionToken(a1Session.token)],
+      );
+      if (expired.rows[0]?.expired === true) {
+        a1Expired = true;
+        break;
+      }
+      await sleepMs(60);
+    }
+    check('R3-A 锁等待期间会话墙钟已到期（受控交错）', a1Expired);
+    a1Release.resolve();
+    const a1Parsed = parseLines(await a1Stream.collect());
+    const a1Row = await database.query<{ kind: string | null; reason: string | null; after_expiry: boolean | null }>(
+      `SELECT outcome->>'kind' AS kind, outcome->>'reason' AS reason,
+              terminal_at > (SELECT expires_at FROM app_sessions WHERE token_hash = $1) AS after_expiry
+         FROM yaya_runs WHERE client_request_id = $2`,
+      [hashSessionToken(a1Session.token), a1Id],
+    );
+    check(
+      'R3-A 跨过会话到期的锁等待 → 拒绝发布（唯一 run_end stopped session_invalid，无 answer）',
+      a1Parsed.allParsed &&
+        a1Parsed.verdict.ok &&
+        !a1Parsed.events.some((event) => event.type === 'answer') &&
+        a1Parsed.verdict.outcome.kind === 'stopped' &&
+        a1Parsed.verdict.outcome.reason === 'session_invalid',
+    );
+    check(
+      'R3-A 落账按实际当前时刻裁决（stopped session_invalid 且 terminal_at 晚于 expires_at）',
+      a1Row.rows[0]?.kind === 'stopped' &&
+        a1Row.rows[0]?.reason === 'session_invalid' &&
+        a1Row.rows[0]?.after_expiry === true,
+    );
+    const a1Lookup = await lookupRun(base, authA, convA.conversation_id, a1Id);
+    const a1LookupBody = (await a1Lookup.json()) as {
+      status?: string;
+      outcome?: { kind?: string; reason?: string };
+    };
+    check(
+      'R3-A 查询口径一致（finished + stopped session_invalid）',
+      a1LookupBody.status === 'finished' &&
+        a1LookupBody.outcome?.kind === 'stopped' &&
+        a1LookupBody.outcome?.reason === 'session_invalid',
+    );
+
+    // 对照 A2：同样的 run 锁等待，但会话未跨期 → 正常回答。
+    const a2Session = await directSession(database, facts.teacherA.id);
+    const a2Auth = { cookie: `${SESSION_COOKIE_NAME}=${a2Session.token}`, csrf: a2Session.csrf };
+    const a2Id = `expiry-ok-${randomUUID()}`;
+    const a2Locked = deferred();
+    const a2Release = deferred();
+    gates.push(a2Release.resolve);
+    stub.register('[app1:expiry-ok]', [
+      {
+        prepare: async () => {
+          const db = database;
+          if (db === null) throw new Error('database unavailable');
+          const rows = await db.query<{ id: string }>(
+            'SELECT id FROM yaya_runs WHERE client_request_id = $1',
+            [a2Id],
+          );
+          const serviceRunId = rows.rows[0]?.id;
+          if (!serviceRunId) throw new Error('expiry-ok run not found');
+          await r2Lock!.query('BEGIN');
+          await r2Lock!.query('SELECT id FROM yaya_runs WHERE id = $1 FOR UPDATE', [serviceRunId]);
+          a2Locked.resolve();
+          void (async () => {
+            await a2Release.promise;
+            await r2Lock!.query('COMMIT').catch(() => undefined);
+          })();
+        },
+        content: actionAnswer('锁等待未跨期，正常发布。'),
+      },
+    ]);
+    const a2Response = await postRun(
+      base,
+      a2Auth,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: a2Id,
+        user_text: '[app1:expiry-ok] 锁等待未跨期',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await a2Locked.promise;
+    const a2Stream = openNdjson(a2Response);
+    const a2Action = await readUntilActionParsed(a2Stream);
+    check('R3-A 对照：正常会话进入保存边界有效且动作已解析', a2Action);
+    a2Release.resolve();
+    const a2Parsed = parseLines(await a2Stream.collect());
+    check(
+      'R3-A 对照：锁等待未跨期 → 正常回答（answered）',
+      a2Parsed.allParsed && a2Parsed.verdict.ok && a2Parsed.verdict.outcome.kind === 'answered',
+    );
+    const a2Lookup = await lookupRun(base, authA, convA.conversation_id, a2Id);
+    const a2LookupBody = (await a2Lookup.json()) as {
+      status?: string;
+      outcome?: { kind?: string };
+    };
+    check(
+      'R3-A 对照：查询可读（finished + answered）',
+      a2LookupBody.status === 'finished' && a2LookupBody.outcome?.kind === 'answered',
+    );
+
+    // 对照 A3：已到期会话在身份阶段（run 锁之前）即停。
+    const a3Session = await directSession(database, facts.teacherA.id, -5);
+    const a3SessionId =
+      (
+        await database.query<{ id: string }>('SELECT id FROM app_sessions WHERE token_hash = $1', [
+          hashSessionToken(a3Session.token),
+        ])
+      ).rows[0]?.id ?? '';
+    const a3Run = await makeBoundaryRun(a3SessionId);
+    const a3Stored = await finalizeYayaRun(a3Run.run_id, 'app1-check-boundary', candidateAnswered, {
+      verify: (client) =>
+        verifyYayaRunBoundaryIdentity(client, { run: a3Run, token: a3Session.token }),
+    });
+    check(
+      'R3-A 对照：已到期会话在身份阶段即停（stopped session_invalid）',
+      outcomeOf(a3Stored).kind === 'stopped' && outcomeOf(a3Stored).reason === 'session_invalid',
+    );
+
+    // 反例 B1：可信 peer 先落已存终态，随后转班；发布分支必须核验实际待发布记录自身的来源。
+    const peerTermGate = deferred();
+    gates.push(peerTermGate.resolve);
+    stub.register('[app1:peerterm]', [
+      { content: actionRead('get_observation', { observation_id: facts.observationA }) },
+      { hold: peerTermGate.promise, content: actionAnswer('已存终态后不应发布旧内容。') },
+    ]);
+    const b1Id = `peerterm-${randomUUID()}`;
+    const b1Promise = postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: b1Id,
+        user_text: '[app1:peerterm] 已存终态恢复',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:peerterm]', 2);
+    const b1Rows = await database.query<{ id: string; owner_instance: string }>(
+      'SELECT id, owner_instance FROM yaya_runs WHERE client_request_id = $1',
+      [b1Id],
+    );
+    const b1Run = b1Rows.rows[0];
+    if (!b1Run) throw new Error('peerterm run not found');
+    const PEER_TERM_MARKER = 'APP1_R3_PEER_FALLBACK_MARKER';
+    const peerTermStored = await finalizeYayaRun(b1Run.id, b1Run.owner_instance, {
+      kind: 'answered',
+      content: `${PEER_TERM_MARKER} 不应发布。`,
+      sources: [],
+    });
+    check('R3-B 夹具：可信 peer 先落已存终态（answered）', outcomeOf(peerTermStored).kind === 'answered');
+    await enrollChildInClass({ child_id: facts.childA, class_id: facts.classB });
+    peerTermGate.resolve();
+    const b1Parsed = parseLines(await openNdjson(await b1Promise).collect());
+    const b1Db = await database.query<{ outcome: unknown }>('SELECT outcome FROM yaya_runs WHERE id = $1', [
+      b1Run.id,
+    ]);
+    const b1Lookup = await lookupRun(base, authA, convA.conversation_id, b1Id);
+    const b1LookupText = JSON.stringify(await b1Lookup.json());
+    check(
+      'R3-B 已存终态经当前授权核验后不发布旧私域内容（无 answer、run_end stopped context_revoked）',
+      b1Parsed.allParsed &&
+        b1Parsed.verdict.ok &&
+        !b1Parsed.events.some((event) => event.type === 'answer') &&
+        b1Parsed.verdict.outcome.kind === 'stopped' &&
+        b1Parsed.verdict.outcome.reason === 'context_revoked',
+    );
+    check(
+      'R3-B 不覆盖 peer 已提交终态（库内仍是 peer 内容）',
+      JSON.stringify(b1Db.rows[0]?.outcome ?? null).includes(PEER_TERM_MARKER),
+    );
+    check(
+      'R3-B 查询口径一致（unverifiable，不含标记）',
+      !b1LookupText.includes(PEER_TERM_MARKER) && b1LookupText.includes('unverifiable'),
+    );
+    await enrollChildInClass({ child_id: facts.childA, class_id: facts.classA });
+
+    // 对照 B2：核验通过时已存终态正常发布（同一原语、无转班）。
+    const peerOkGate = deferred();
+    gates.push(peerOkGate.resolve);
+    stub.register('[app1:peerok]', [
+      { content: actionRead('get_observation', { observation_id: facts.observationA }) },
+      { hold: peerOkGate.promise, content: actionAnswer('已存终态正常发布对照。') },
+    ]);
+    const b2Id = `peerok-${randomUUID()}`;
+    const b2Promise = postRun(
+      base,
+      authA,
+      convA.conversation_id,
+      runBody({
+        conversation_id: convA.conversation_id,
+        client_request_id: b2Id,
+        user_text: '[app1:peerok] 已存终态对照',
+        expected_conversation_revision: convA.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:peerok]', 2);
+    const b2Rows = await database.query<{ id: string; owner_instance: string }>(
+      'SELECT id, owner_instance FROM yaya_runs WHERE client_request_id = $1',
+      [b2Id],
+    );
+    const b2Run = b2Rows.rows[0];
+    if (!b2Run) throw new Error('peerok run not found');
+    const PEER_OK_MARKER = 'APP1_R3_PEER_OK_MARKER';
+    const peerOkStored = await finalizeYayaRun(b2Run.id, b2Run.owner_instance, {
+      kind: 'answered',
+      content: `${PEER_OK_MARKER} 可正常发布。`,
+      sources: [],
+    });
+    check('R3-B 对照夹具：peer 终态落库（answered）', outcomeOf(peerOkStored).kind === 'answered');
+    peerOkGate.resolve();
+    const b2Parsed = parseLines(await openNdjson(await b2Promise).collect());
+    check(
+      'R3-B 对照：核验通过 → 已存终态正常发布（answer 含 peer 内容）',
+      b2Parsed.allParsed &&
+        b2Parsed.verdict.ok &&
+        b2Parsed.verdict.outcome.kind === 'answered' &&
+        b2Parsed.verdict.outcome.content.includes(PEER_OK_MARKER),
+    );
+    const b2Lookup = await lookupRun(base, authA, convA.conversation_id, b2Id);
+    const b2LookupText = JSON.stringify(await b2Lookup.json());
+    check(
+      'R3-B 对照：查询可读且含内容（finished）',
+      b2LookupText.includes('"status":"finished"') && b2LookupText.includes(PEER_OK_MARKER),
+    );
+
+    // 反例 C1：多来源 —— 后项来源等待期间，前项已核验来源的权限前提必须保护到提交。
+    const childC = randomUUID();
+    await database.query(
+      "INSERT INTO children (id, name, gender, birth_date, class_name) VALUES ($1,'孙小满','女','2021-03-03','松果班')",
+      [childC],
+    );
+    await database.query(
+      "INSERT INTO child_class_enrollments (child_id, class_id, start_date) VALUES ($1,$2,'2026-01-01')",
+      [childC, facts.classA],
+    );
+    const c1Conv = await createConversation(base, authA);
+    const c1Saved = await saveMessage(
+      base,
+      authA,
+      c1Conv.conversation_id,
+      c1Conv.revision,
+      '孙小满今天在娃娃家照顾弟弟娃娃。',
+      childC,
+    );
+    check(
+      'R3-C 前置：多来源历史片段已登记（会话版本推进）',
+      c1Conv.status === 201 && c1Saved.status === 201 && c1Saved.revision === 2,
+    );
+    const c1Id = `multisource-${randomUUID()}`;
+    const c1Locked = deferred();
+    const c1Gate = deferred();
+    const c1Release = deferred();
+    gates.push(c1Gate.resolve);
+    gates.push(c1Release.resolve);
+    stub.register('[app1:multisource]', [
+      { content: actionRead('get_observation', { observation_id: facts.observationA }) },
+      {
+        prepare: async () => {
+          const db = database;
+          if (db === null) throw new Error('database unavailable');
+          const rows = await db.query<{ id: string }>(
+            'SELECT id FROM yaya_runs WHERE client_request_id = $1',
+            [c1Id],
+          );
+          const serviceRunId = rows.rows[0]?.id;
+          if (!serviceRunId) throw new Error('multisource run not found');
+          await r2Lock!.query('BEGIN');
+          await r2Lock!.query('SELECT id FROM yaya_runs WHERE id = $1 FOR UPDATE', [serviceRunId]);
+          c1Locked.resolve();
+          void (async () => {
+            await c1Release.promise;
+            await r2Lock!.query('COMMIT').catch(() => undefined);
+          })();
+        },
+        hold: c1Gate.promise,
+        content: actionAnswer('APP1_R3_MULTI_SOURCE_MARKER 转班竞态不应发布。', [
+          `observation:${facts.observationA}`,
+        ]),
+      },
+    ]);
+    const c1Promise = postRun(
+      base,
+      authA,
+      c1Conv.conversation_id,
+      runBody({
+        conversation_id: c1Conv.conversation_id,
+        client_request_id: c1Id,
+        user_text: '[app1:multisource] 多来源锁等待',
+        expected_conversation_revision: c1Saved.revision,
+      }),
+    );
+    await c1Locked.promise;
+    c1Gate.resolve();
+    const c1Stream = openNdjson(await c1Promise);
+    // 等到 answer 的 action_parsed：答案动作的发布前重核已过（此刻 childC 空闲，必过），
+    // 引擎随即进入保存边界；run 行锁仍被 r2Lock 占着，finalize 必然停在 run 锁上。
+    // 之后才抢 childC，释放 run 锁后 finalize 的来源重核必然卡在 childC 共享锁上——
+    // 若等首个（read 的）action_parsed，racer 会抢在引擎答案重核之前，把锁窗口挪到引擎边界。
+    const c1Action = await readUntilActionParsed(c1Stream, 'answer');
+    check('R3-C 引擎发布前重核已通过（answer action_parsed，进入保存边界）', c1Action);
+    await r2Racer.query('BEGIN');
+    await r2Racer.query('SELECT id FROM children WHERE id = $1 FOR UPDATE', [childC]);
+    c1Release.resolve();
+    // 第二次锁等待：finalize 在后项来源（历史片段 childC）的共享锁上实测等待。
+    // 只认「已在 children 行上持有元组锁且仍在等事务」的等待者（唯一可能是 finalize 的来源重核）：
+    // run 行锁的释放尾迹也是 transactionid 等待，若计入会在 finalize 取得 childA 共享锁之前放行转班。
+    let c1Waiting = false;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const waitRows = await database.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_locks w
+          WHERE w.locktype = 'transactionid' AND NOT w.granted AND w.pid <> pg_backend_pid()
+            AND EXISTS (
+              SELECT 1 FROM pg_locks h
+               WHERE h.pid = w.pid AND h.granted AND h.locktype = 'tuple'
+                 AND h.relation::regclass::text = 'children'
+            )`,
+      );
+      if ((waitRows.rows[0]?.n ?? 0) > 0) {
+        c1Waiting = true;
+        break;
+      }
+      await sleepMs(100);
+    }
+    check('R3-C 第二次锁等待实测：finalize 卡在后项来源共享锁上', c1Waiting);
+    let c1TransferDone = false;
+    let c1TransferDbNowMs = Number.NaN;
+    const c1Transfer = enrollChildInClass({ child_id: facts.childA, class_id: facts.classB }).then(
+      async () => {
+        c1TransferDone = true;
+        const db = database;
+        if (db === null) throw new Error('database unavailable');
+        const nowRow = await db.query<{ db_now_ms: number }>(
+          'SELECT EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS db_now_ms',
+        );
+        c1TransferDbNowMs = Number(nowRow.rows[0]?.db_now_ms ?? Number.NaN);
+      },
+    );
+    await sleepMs(600);
+    check('R3-C 前项已核验来源受锁保护（转班未在终态前提交）', !c1TransferDone);
+    const c1State = await database.query<{ state: string }>(
+      'SELECT state FROM yaya_runs WHERE client_request_id = $1',
+      [c1Id],
+    );
+    check('R3-C 等待期间 run 仍活跃（终态未提交）', c1State.rows[0]?.state === 'active');
+    await r2Racer.query('COMMIT');
+    await Promise.race([c1Transfer, sleepMs(10_000)]);
+    const c1Parsed = parseLines(await c1Stream.collect());
+    check(
+      'R3-C 整条流 API0 合法且单一终局（若发布 answer 必含标记）',
+      c1Parsed.allParsed &&
+        c1Parsed.verdict.ok &&
+        (c1Parsed.verdict.outcome.kind === 'stopped' ||
+          (c1Parsed.verdict.outcome.kind === 'answered' &&
+            c1Parsed.verdict.outcome.content.includes('APP1_R3_MULTI_SOURCE_MARKER'))),
+    );
+    // children.updated_at = now() 取的是转班事务开始时刻（可能早于终态），不能证明提交顺序；
+    // 改用「转班完成瞬间的 DB 时钟 >= terminal_at」——同一 DB 时钟源，无跨机偏差。
+    const c1Timing = await database.query<{ terminal_epoch_ms: number | null }>(
+      `SELECT (EXTRACT(EPOCH FROM r.terminal_at) * 1000) AS terminal_epoch_ms
+         FROM yaya_runs r WHERE r.client_request_id = $1`,
+      [c1Id],
+    );
+    const c1TerminalMs = Number(c1Timing.rows[0]?.terminal_epoch_ms ?? Number.NaN);
+    check(
+      'R3-C 转班提交晚于终态提交（权限前提保护到提交的时序证明）',
+      Number.isFinite(c1TerminalMs) && Number.isFinite(c1TransferDbNowMs) && c1TerminalMs <= c1TransferDbNowMs,
+    );
+    await enrollChildInClass({ child_id: facts.childA, class_id: facts.classA });
+
+    // 对照 C2：转班先提交 → 必须拒绝旧内容。
+    const c2Gate = deferred();
+    gates.push(c2Gate.resolve);
+    stub.register('[app1:multisource2]', [
+      { content: actionRead('get_observation', { observation_id: facts.observationA }) },
+      {
+        hold: c2Gate.promise,
+        content: actionAnswer('APP1_R3_MULTI_SOURCE_MARKER 先转班后不应发布。', [
+          `observation:${facts.observationA}`,
+        ]),
+      },
+    ]);
+    const c2Id = `multisource2-${randomUUID()}`;
+    const c2Promise = postRun(
+      base,
+      authA,
+      c1Conv.conversation_id,
+      runBody({
+        conversation_id: c1Conv.conversation_id,
+        client_request_id: c2Id,
+        user_text: '[app1:multisource2] 先转班对照',
+        expected_conversation_revision: c1Saved.revision,
+      }),
+    );
+    await stub.waitForRequest('[app1:multisource2]', 2);
+    await enrollChildInClass({ child_id: facts.childA, class_id: facts.classB });
+    c2Gate.resolve();
+    const c2Parsed = parseLines(await openNdjson(await c2Promise).collect());
+    check(
+      'R3-C 对照：转班先提交 → 拒绝旧内容（run_end stopped context_revoked，无 answer）',
+      c2Parsed.allParsed &&
+        c2Parsed.verdict.ok &&
+        !c2Parsed.events.some((event) => event.type === 'answer') &&
+        c2Parsed.verdict.outcome.kind === 'stopped' &&
+        c2Parsed.verdict.outcome.reason === 'context_revoked',
+    );
+    await enrollChildInClass({ child_id: facts.childA, class_id: facts.classA });
 
     /* ============================== 中断恢复标记 ============================== */
 

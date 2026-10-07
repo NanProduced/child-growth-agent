@@ -305,6 +305,10 @@ async function readResourceFactsWith(
     return rows[0] === undefined ? null : { kind: 'class', class_id: id };
   }
   if (kind === 'child') {
+    const locked = await runQuery<{ id: string }>('SELECT id FROM children WHERE id = $1 FOR SHARE', [
+      id,
+    ]);
+    if (locked[0] === undefined) return null;
     const rows = await runQuery<{ current_class_id: string | null }>(
       `SELECT (SELECT e.class_id FROM child_class_enrollments e
                 WHERE e.child_id = c.id AND e.end_date IS NULL
@@ -317,32 +321,41 @@ async function readResourceFactsWith(
       ? null
       : { kind: 'child', child_id: id, current_class_id: row.current_class_id };
   }
-  const rows = await runQuery<{
+  const observationRows = await runQuery<{
     child_id: string;
     observed_class_id: string | null;
-    current_class_id: string | null;
     author_account_id: string | null;
   }>(
     `SELECT o.child_id,
             o.class_id AS observed_class_id,
-            (SELECT e.class_id FROM child_class_enrollments e
-              WHERE e.child_id = o.child_id AND e.end_date IS NULL
-              ORDER BY e.start_date DESC LIMIT 1) AS current_class_id,
             to_jsonb(o.*)->>'created_by_account_id' AS author_account_id
        FROM observations o WHERE o.id = $1`,
     [id],
   );
-  const row = rows[0];
-  return row === undefined
-    ? null
-    : {
-        kind: 'observation',
-        observation_id: id,
-        child_id: row.child_id,
-        current_class_id: row.current_class_id,
-        observed_class_id: row.observed_class_id,
-        author_account_id: row.author_account_id,
-      };
+  const observationRow = observationRows[0];
+  if (observationRow === undefined) return null;
+  // 权限前提（当前班级归属）在 children 共享锁之后读取：保存边界事务内锁持到提交，
+  // 并发转班要么等终态落账、要么在锁前提交并让本次重核读到新归属。
+  const locked = await runQuery<{ id: string }>(
+    'SELECT id FROM children WHERE id = $1 FOR SHARE',
+    [observationRow.child_id],
+  );
+  if (locked[0] === undefined) return null;
+  const currentRows = await runQuery<{ current_class_id: string | null }>(
+    `SELECT (SELECT e.class_id FROM child_class_enrollments e
+              WHERE e.child_id = c.id AND e.end_date IS NULL
+              ORDER BY e.start_date DESC LIMIT 1) AS current_class_id
+       FROM children c WHERE c.id = $1`,
+    [observationRow.child_id],
+  );
+  return {
+    kind: 'observation',
+    observation_id: id,
+    child_id: observationRow.child_id,
+    current_class_id: currentRows[0]?.current_class_id ?? null,
+    observed_class_id: observationRow.observed_class_id,
+    author_account_id: observationRow.author_account_id,
+  };
 }
 
 /** business_scope 边界探针：复用 AUTH `class.catalog.read` 的当前范围判定（空任教/无范围拒绝） */
