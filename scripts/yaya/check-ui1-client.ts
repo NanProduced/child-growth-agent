@@ -10,11 +10,11 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import { assessYayaOperationsExecutionResponse } from "../../src/lib/yaya/api-contract";
-import { receiptProvesSuccess } from "../../src/lib/yaya/types";
+import { receiptProvesSuccess, type YayaOperationQueryOutcome } from "../../src/lib/yaya/types";
 import type { ThreadMessage } from "@assistant-ui/react";
 
 import { yayaApiErrorToPart, yayaAttachmentIdFromUrl, YayaApiError } from "../../src/components/yaya/client/api";
-import { planFromProjection } from "../../src/components/yaya/client/actions";
+import { planFromProjection, reconcileOriginalOperationQuery } from "../../src/components/yaya/client/actions";
 import {
   collectUserFacts,
   composeRunUserText,
@@ -393,6 +393,39 @@ function proposalChecks(): void {
   check(
     "missing receipt rejected (response_incomplete)",
     !missing.ok && missing.violations.some((violation) => violation.code === "response_incomplete")
+  );
+
+  const savedOutcome = (fixtures["operations_query_saved"] as unknown as {
+    operation: { outcome: YayaOperationQueryOutcome };
+  }).operation.outcome;
+  const wrongOperation = reconcileOriginalOperationQuery("op-fixture-1", {
+    operation_id: "wrong-operation",
+    outcome: savedOutcome,
+  });
+  check(
+    "wrong operation identity stays unknown",
+    wrongOperation.outcome.kind === "unknown" && wrongOperation.outcome.reason === "identity_mismatch",
+    JSON.stringify(wrongOperation)
+  );
+
+  const wrongReceipt = reconcileOriginalOperationQuery(
+    "op-fixture-c1",
+    {
+      operation_id: "op-fixture-c1",
+      outcome: {
+        kind: "saved",
+        receipt: {
+          ...(fixtures["operations_success"] as unknown as { receipts: Record<string, unknown>[] }).receipts[0],
+          target_id: "child-other",
+        },
+      } as YayaOperationQueryOutcome,
+    },
+    plan[0]
+  );
+  check(
+    "wrong receipt plan identity stays unknown",
+    wrongReceipt.outcome.kind === "unknown" && wrongReceipt.outcome.reason === "identity_mismatch",
+    JSON.stringify(wrongReceipt)
   );
 }
 

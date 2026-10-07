@@ -128,6 +128,7 @@ export function YayaComposer({ disabled = false }: { disabled?: boolean }) {
   const [objectName, setObjectName] = useState<string | null>(null);
   const [source, setSource] = useState<string | null>(null);
   const [objectDraft, setObjectDraft] = useState("");
+  const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
 
   const context = useMemo<YayaComposerContext>(() => ({ object: objectName, source }), [objectName, source]);
   useEffect(() => {
@@ -239,9 +240,12 @@ export function YayaComposer({ disabled = false }: { disabled?: boolean }) {
         <div className="flex items-end gap-1.5">
           <YayaImagePicker
             onFiles={addFiles}
+            onLimitExceeded={(count) =>
+              setAttachmentNotice("本次选择超过 8 张上限，已忽略 " + count + " 张；已有图片仍保留。")
+            }
             disabled={disabled || isRunning || remaining === 0}
             max={remaining}
-            label={remaining === 0 ? "最多 8 张图片" : "添加图片"}
+            label={remaining === 0 ? "已达 8 张图片上限" : "添加图片"}
           />
           <ComposerPrimitive.Input
             aria-label="给芽芽的消息"
@@ -249,7 +253,7 @@ export function YayaComposer({ disabled = false }: { disabled?: boolean }) {
             rows={1}
             data-yaya-composer-input
             className={cn(
-              "max-h-40 min-h-11 flex-1 resize-none rounded-2xl border bg-background px-3 py-2.5 text-sm outline-none",
+              "max-h-40 min-h-11 flex-1 resize-none overflow-y-auto rounded-2xl border bg-background px-3 py-2.5 text-base leading-6 outline-none sm:text-sm",
               "focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-60"
             )}
             disabled={disabled}
@@ -274,6 +278,11 @@ export function YayaComposer({ disabled = false }: { disabled?: boolean }) {
             </ComposerPrimitive.Send>
           )}
         </div>
+        {attachmentNotice !== null ? (
+          <p className="mt-1.5 text-xs leading-5 text-amber-700" aria-live="polite">
+            {attachmentNotice}
+          </p>
+        ) : null}
         <p className="mt-1.5 text-[11px] leading-4 text-muted-foreground">
           回车发送，Shift+Enter 换行；图片只作观察素材，分析结果不等于幼儿发展结论。
         </p>

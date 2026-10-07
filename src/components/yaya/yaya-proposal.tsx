@@ -102,6 +102,205 @@ function payloadSummary(payload: YayaDomainPayload | null): { title: string; lin
   }
 }
 
+interface ProposalContentDetails {
+  targetLabel: string | null;
+  lines: string[];
+  missing: string[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readText(value: unknown, keys: readonly string[]): string | null {
+  const record = asRecord(value);
+  if (record === null) return null;
+  for (const key of keys) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim() !== "") return candidate.trim();
+  }
+  return null;
+}
+
+function addLine(lines: string[], label: string, value: unknown): void {
+  if (typeof value === "string" && value.trim() !== "") lines.push(label + "：" + value);
+  else if (typeof value === "number" || typeof value === "boolean") lines.push(label + "：" + String(value));
+}
+
+function addStringList(lines: string[], label: string, values: readonly string[]): void {
+  if (values.length === 0) return;
+  lines.push(label + "：");
+  values.forEach((value, index) => lines.push("  " + String(index + 1) + ". " + value));
+}
+
+function guideDecisionLines(lines: string[], value: unknown, title: string): void {
+  const record = asRecord(value);
+  if (record === null) return;
+  addLine(lines, title + "动作", record.action);
+  addLine(lines, title + "指南修订", record.expected_guide_revision);
+  const decisions = Array.isArray(record.decisions) ? record.decisions : [];
+  decisions.forEach((decision, index) => {
+    const entry = asRecord(decision);
+    if (entry === null) return;
+    const prefix = title + "第 " + String(index + 1) + " 项";
+    addLine(lines, prefix + "条目", entry.item_label ?? entry.item_id ?? entry.link_id);
+    addLine(lines, prefix + "决定", entry.support);
+    addLine(lines, prefix + "成人帮助", entry.adult_help_used);
+    addLine(lines, prefix + "备注", entry.teacher_note);
+    const basis = Array.isArray(entry.basis) ? entry.basis : [];
+    basis.forEach((basisEntry, basisIndex) => {
+      const basisRecord = asRecord(basisEntry);
+      if (basisRecord === null) return;
+      addLine(lines, prefix + "依据 " + String(basisIndex + 1) + " 引文", basisRecord.quote);
+      addLine(lines, prefix + "依据 " + String(basisIndex + 1) + "来源", basisRecord.quote_source);
+      addLine(lines, prefix + "依据 " + String(basisIndex + 1) + "字段", basisRecord.quote_field);
+    });
+    const sustained = asRecord(entry.sustained_note);
+    if (sustained !== null) {
+      addLine(lines, prefix + "持续性说明", sustained.note ?? sustained.content ?? sustained.period);
+    }
+  });
+}
+
+function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDetails {
+  const payload = (item.payload ?? null) as YayaDomainPayload | null;
+  if (payload === null) {
+    return { targetLabel: null, lines: [], missing: ["实际内容"] };
+  }
+  const lines: string[] = [];
+  const missing: string[] = [];
+  const payloadRecord = asRecord(payload);
+  const resourceRecord = asRecord(item.resource_ref);
+  const childName =
+    readText(payload, ["child_name", "childName"]) ??
+    readText(resourceRecord, ["child_name", "childName", "label"]);
+  const observationLabel =
+    readText(payload, ["observation_label", "observation_name"]) ??
+    readText(resourceRecord, ["observation_label", "observation_name", "label"]);
+  const className =
+    readText(payload, ["class_name", "target_class_name", "targetClassName"]) ??
+    readText(resourceRecord, ["class_name", "target_class_name", "targetClassName", "label"]);
+  let targetLabel: string | null = null;
+
+  switch (payload.kind) {
+    case "create_observation":
+      targetLabel = childName;
+      if (targetLabel === null) missing.push("幼儿名称");
+      addLine(lines, "幼儿", targetLabel);
+      addLine(lines, "观察日期", payload.observed_at);
+      addLine(lines, "情境", payload.context);
+      addLine(lines, "原始观察", payload.raw_text);
+      addLine(lines, "关联图片", payload.image_ids.length + " 张");
+      break;
+    case "organize_observation":
+      targetLabel = childName ?? observationLabel;
+      if (targetLabel === null) missing.push("幼儿或观察名称");
+      missing.push("待整理的原文与草稿");
+      addLine(lines, "幼儿/观察", targetLabel);
+      addLine(lines, "整理目标", "服务端准备内容未随当前投影提供");
+      break;
+    case "follow_up_observation":
+      targetLabel = childName ?? observationLabel;
+      if (targetLabel === null) missing.push("幼儿或观察名称");
+      addLine(lines, "幼儿/观察", targetLabel);
+      addLine(lines, "补充内容", payload.content);
+      break;
+    case "confirm_observation":
+      targetLabel = childName ?? observationLabel;
+      if (targetLabel === null) missing.push("幼儿或观察名称");
+      if (targetLabel === null) missing.push("原文与日期");
+      addLine(lines, "幼儿/观察", targetLabel);
+      addLine(lines, "教师确认稿·领域", payload.input.content.domain);
+      addLine(lines, "教师确认稿·子领域", payload.input.content.sub_domain);
+      addLine(lines, "教师确认稿·目标描述", payload.input.content.objective_description);
+      addStringList(lines, "教师确认稿·发展亮点", payload.input.content.highlights);
+      addStringList(lines, "教师确认稿·支持建议", payload.input.content.support_suggestions);
+      addLine(lines, "教师确认稿·原文引句", payload.input.content.highlight_quote);
+      addLine(lines, "教师备注", payload.input.teacher_note);
+      addLine(lines, "澄清补充", payload.input.clarification);
+      if (payload.input.guide_decisions !== undefined) {
+        guideDecisionLines(lines, payload.input.guide_decisions, "归档时指南决定");
+      }
+      break;
+    case "guide_decision":
+      targetLabel = childName ?? observationLabel;
+      if (targetLabel === null) missing.push("幼儿或观察名称");
+      addLine(lines, "幼儿/观察", targetLabel);
+      guideDecisionLines(lines, payload.mutation, "指南决定");
+      if (payload.mutation.action === "confirm") {
+        const mutation = asRecord(payload.mutation);
+        if (mutation === null || !Array.isArray(mutation.decisions) || mutation.decisions.length === 0) {
+          missing.push("指南条目与依据");
+        }
+      }
+      break;
+    case "create_child":
+      targetLabel = payload.name;
+      addLine(lines, "幼儿", payload.name);
+      addLine(lines, "性别", payload.gender);
+      addLine(lines, "出生日期", payload.birth_date);
+      addLine(lines, "目标班级", className);
+      addLine(lines, "备注", payload.note);
+      if (className === null) missing.push("目标班级名称");
+      break;
+    case "transfer_child":
+      targetLabel = childName !== null && className !== null ? childName + " → " + className : null;
+      addLine(lines, "幼儿", childName);
+      addLine(lines, "目标班级", className);
+      addLine(lines, "生效日期", payload.effective_date);
+      if (childName === null) missing.push("幼儿名称");
+      if (className === null) missing.push("目标班级名称");
+      if (payload.effective_date === null) missing.push("生效日期");
+      break;
+    case "manage_class":
+      targetLabel = payload.name;
+      addLine(lines, "班级", payload.name);
+      addLine(lines, "动作", payload.operation);
+      addLine(lines, "学段", payload.stage);
+      addLine(lines, "学年", payload.school_year);
+      addLine(lines, "启用状态", payload.is_active);
+      break;
+    case "manage_teacher":
+      targetLabel = payload.display_name ?? payload.username;
+      addLine(lines, "教师", targetLabel);
+      addLine(lines, "账号", payload.username);
+      addLine(lines, "动作", payload.operation);
+      addLine(lines, "状态", payload.status);
+      addLine(lines, "任教班级技术标识", payload.class_ids.join("、"));
+      if (targetLabel === null) missing.push("教师姓名或账号");
+      if (payload.operation === "assign_class" && payload.class_ids.length === 0) missing.push("目标班级");
+      lines.push("密码等秘密不会进入聊天；如需改密，必须通过安全控件。");
+      break;
+    case "refresh_growth_profile":
+      targetLabel = childName;
+      if (targetLabel === null) missing.push("幼儿名称");
+      addLine(lines, "幼儿", targetLabel);
+      break;
+    case "refresh_activity_support":
+      targetLabel = childName;
+      if (targetLabel === null) missing.push("幼儿名称");
+      addLine(lines, "幼儿", targetLabel);
+      break;
+    case "attach_observation_images":
+      targetLabel = childName ?? observationLabel;
+      if (targetLabel === null) missing.push("幼儿或观察名称");
+      addLine(lines, "幼儿/观察", targetLabel);
+      addLine(lines, "追加图片", payload.image_ids.length + " 张");
+      addLine(lines, "附件修订前提", payload.expected_attachment_revision);
+      addLine(lines, "确认来源时间", payload.source_confirmed_at);
+      break;
+    default:
+      break;
+  }
+
+  if (payloadRecord !== null && targetLabel === null) {
+    targetLabel = readText(payloadRecord, ["target_label", "label"]);
+  }
+  return { targetLabel, lines, missing: [...new Set(missing)] };
+}
+
 function ItemOutcomeLine({ outcome, onRecheck, checking }: {
   outcome: YayaOperationQueryOutcome;
   onRecheck: () => void;
@@ -113,9 +312,13 @@ function ItemOutcomeLine({ outcome, onRecheck, checking }: {
     : "text-amber-700";
   const text =
     outcome.kind === "saved"
-      ? "已保存（服务端回执核对一致）"
+      ? success
+        ? "已保存（服务端回执核对一致）"
+        : "回执缺少完整成功证明"
       : outcome.kind === "saved_detail_unavailable"
-        ? "已保存，详情暂不可读"
+        ? success
+          ? "已保存，详情暂不可读"
+          : "回执缺少完整成功证明"
         : outcome.kind === "in_progress"
           ? "此操作仍在进行中"
           : outcome.kind === "conflict"
@@ -184,12 +387,35 @@ export function YayaProposalPanel({
   }, [load]);
 
   const items = proposal?.items ?? [];
-  const eligible = useMemo(
-    () => items.filter((item) => item.status === "pending" && item.access === "full" && item.payload !== null),
+  const detailsByOperation = useMemo(
+    () => new Map(items.map((item) => [item.operation_id, proposalContentDetails(item)] as const)),
     [items]
+  );
+  const eligible = useMemo(
+    () =>
+      items.filter(
+        (item) =>
+          item.status === "pending" &&
+          item.access === "full" &&
+          item.payload !== null &&
+          (detailsByOperation.get(item.operation_id)?.missing.length ?? 1) === 0 &&
+          results[item.operation_id] === undefined
+      ),
+    [detailsByOperation, items, results]
   );
   const selectedIds = useMemo(() => eligible.filter((item) => selected.has(item.operation_id)).map((item) => item.operation_id), [eligible, selected]);
   const busy = phase === "approving" || phase === "executing";
+
+  const lockUnknown = (operationIds: readonly string[]) => {
+    setResults((current) => {
+      const next = { ...current };
+      for (const operationId of operationIds) {
+        if (next[operationId] === undefined) next[operationId] = { kind: "unknown", reason: "no_receipt" };
+      }
+      return next;
+    });
+    setSelected(new Set());
+  };
 
   const toggle = (item: ProjectedProposalItem, checked: boolean) => {
     setSelected((current) => {
@@ -213,14 +439,22 @@ export function YayaProposalPanel({
 
   const runSelected = async () => {
     if (proposal === null || principal === null || selectedIds.length === 0) return;
+    const submittedIds = [...selectedIds];
+    let approvalRecorded = false;
     setActionError(null);
     setPhase("approving");
     try {
-      const approval = await approveProposalItems(proposal.proposal_id, selectedIds);
+      const approval = await approveProposalItems(proposal.proposal_id, submittedIds);
+      approvalRecorded = true;
       setPhase("executing");
-      const plan = planFromProjection(proposal, { accountId: principal.account_id, role: principal.role, displayName: principal.display_name }, selectedIds);
-      const outcome = await executeApprovedOperations(plan, approval.approval_id, selectedIds);
+      const plan = planFromProjection(
+        proposal,
+        { accountId: principal.account_id, role: principal.role, displayName: principal.display_name },
+        submittedIds
+      );
+      const outcome = await executeApprovedOperations(plan, approval.approval_id, submittedIds);
       if (outcome.kind === "rejected") {
+        lockUnknown(submittedIds);
         setActionError(`${outcome.message}${outcome.detail !== null ? `（${outcome.detail}）` : ""} 已批准项不会自动重发。`);
         setPhase("idle");
         await load();
@@ -232,6 +466,7 @@ export function YayaProposalPanel({
       setSelected(new Set());
       setPhase("done");
     } catch (error) {
+      if (approvalRecorded) lockUnknown(submittedIds);
       setActionError(
         error instanceof YayaApiError
           ? `${error.message}未显示成功，请重新读取核对。`
@@ -268,7 +503,15 @@ export function YayaProposalPanel({
   const recheckItem = async (operationId: string) => {
     setCheckingId(operationId);
     try {
-      const result = await queryOriginalOperation(operationId);
+      const expected =
+        proposal === null || principal === null
+          ? undefined
+          : planFromProjection(
+              proposal,
+              { accountId: principal.account_id, role: principal.role, displayName: principal.display_name },
+              [operationId]
+            )[0];
+      const result = await queryOriginalOperation(operationId, expected);
       setResults((current) => ({ ...current, [result.operation_id]: result.outcome }));
     } catch {
       setActionError("读取暂未完成，这不代表没有数据；仍按结果未知处理。");
@@ -279,6 +522,7 @@ export function YayaProposalPanel({
 
   const savedCount = Object.values(results).filter((entry) => receiptShowsSuccess(entry)).length;
   const pendingCount = eligible.length;
+  const restrictedCount = items.length - eligible.length;
 
   return (
     <section
@@ -299,6 +543,9 @@ export function YayaProposalPanel({
             </Badge>
             <span className="text-xs text-muted-foreground">
               本批 {proposal.items.length} 条 · 待核对 {pendingCount} · 已完成回执 {savedCount}
+            </span>
+            <span className="w-full text-xs text-muted-foreground">
+              可提交 {pendingCount} · 已选 {selectedIds.length} · 受限/待补 {restrictedCount}
             </span>
           </>
         ) : (
@@ -321,8 +568,17 @@ export function YayaProposalPanel({
       <div className="mt-3 space-y-3">
         {items.map((item) => {
           const outcome = results[item.operation_id];
+          const details = detailsByOperation.get(item.operation_id) ?? {
+            targetLabel: null,
+            lines: [],
+            missing: ["内容当前不可读"],
+          };
           const eligibleItem =
-            item.status === "pending" && item.access === "full" && item.payload !== null && outcome === undefined;
+            item.status === "pending" &&
+            item.access === "full" &&
+            item.payload !== null &&
+            details.missing.length === 0 &&
+            outcome === undefined;
           const summary = payloadSummary(item.payload as YayaDomainPayload | null);
           const galleryImage = approvalsHref(item);
           return (
@@ -354,7 +610,6 @@ export function YayaProposalPanel({
                     </p>
                     <Badge variant="outline" className="text-xs">
                       {RESOURCE_LABEL[item.resource] ?? item.resource}
-                      {item.target_id !== null ? ` · ${item.target_id.slice(0, 8)}` : ""}
                     </Badge>
                     <Badge
                       variant="secondary"
@@ -380,11 +635,26 @@ export function YayaProposalPanel({
                     ) : null}
                   </div>
                   <p className="text-xs text-muted-foreground">{summary.title}</p>
-                  {summary.lines.map((line, index) => (
+                  <p className="text-sm font-medium text-foreground">
+                    核对对象：{details.targetLabel ?? "名称未提供"}
+                  </p>
+                  {(details.lines.length > 0 ? details.lines : summary.lines).map((line, index) => (
                     <p key={index} className="whitespace-pre-wrap text-sm text-foreground/90">
                       {line}
                     </p>
                   ))}
+                  {item.target_id !== null ? (
+                    <details className="text-xs text-muted-foreground">
+                      <summary className="cursor-pointer py-1">查看技术标识（仅作审计）</summary>
+                      <p className="break-all pt-1">目标标识：{item.target_id}</p>
+                      <p className="break-all">操作标识：{item.operation_id}</p>
+                    </details>
+                  ) : null}
+                  {details.missing.length > 0 ? (
+                    <p className="text-xs text-amber-700">
+                      批准前还需核对：{details.missing.join("、")}。当前不会提交此项。
+                    </p>
+                  ) : null}
                   {galleryImage !== null ? (
                     <YayaAttachmentGallery images={[galleryImage]} onOpen={(image) => setViewer(image)} />
                   ) : item.attachment_associations.length > 0 ? (
@@ -394,6 +664,8 @@ export function YayaProposalPanel({
                     <p className="text-xs text-amber-700">
                       {item.status !== "pending"
                         ? "该项已处理，不能再次提交。"
+                        : details.missing.length > 0
+                          ? "目标或实际写入内容不完整；不会随整批提交。"
                         : "该项当前不可读或内容不完整；不会随整批提交。"}
                     </p>
                   ) : null}

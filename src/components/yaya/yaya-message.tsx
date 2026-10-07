@@ -31,6 +31,8 @@ function AssistantText({ text }: TextMessagePartProps) {
 }
 
 function AssistantEmpty() {
+  const isRunning = useAuiState((state) => state.message.status?.type === "running");
+  if (!isRunning) return null;
   return (
     <p className="flex items-center gap-2 text-sm text-muted-foreground">
       <YayaAvatar mood="thinking" size={20} />

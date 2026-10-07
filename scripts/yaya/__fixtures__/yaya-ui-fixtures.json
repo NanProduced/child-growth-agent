@@ -347,7 +347,7 @@
           "target_id": "child-1",
           "action": "observation.write",
           "resource": "child",
-          "resource_ref": { "kind": "child", "child_id": "child-1" },
+          "resource_ref": { "kind": "child", "child_id": "child-1", "label": "小满" },
           "content_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "attachment_associations": [{ "attachment_id": "att-img-1", "target_id": "child-1" }],
           "business_revision": null,

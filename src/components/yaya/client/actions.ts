@@ -11,13 +11,19 @@
  */
 import { z } from "zod";
 
+import { fetchWithAccountAuth } from "@/lib/accounts/client";
 import {
   assessYayaOperationsExecutionResponse,
   parseYayaRunLookupResponse,
+  yayaRunCancelResponseSchema,
   type YayaOperationsExecutionAssessment,
   type YayaRunLookupResponse,
 } from "@/lib/yaya/api-contract";
-import type { YayaPlannedOperation } from "@/lib/yaya/types";
+import type {
+  YayaOperationQueryOutcome,
+  YayaOperationReceipt,
+  YayaPlannedOperation,
+} from "@/lib/yaya/types";
 import { yayaOperationQueryOutcomeSchema } from "@/lib/yaya/api-contract";
 
 import {
@@ -106,6 +112,45 @@ export function planFromProjection(
     }));
 }
 
+function identityMismatchOutcome(): YayaOperationQueryOutcome {
+  return { kind: "unknown", reason: "identity_mismatch" };
+}
+
+function receiptMatchesPlan(
+  receipt: YayaOperationReceipt,
+  plan: YayaPlannedOperation,
+): boolean {
+  return (
+    receipt.operation_id === plan.operation_id &&
+    receipt.batch_id === plan.batch_id &&
+    receipt.proposal_id === plan.proposal_id &&
+    receipt.item_key === plan.item_key &&
+    receipt.target_id === plan.target_id &&
+    receipt.actor_account_id === plan.actor_account_id
+  );
+}
+
+/** 原操作响应必须仍指向请求的 operation；有计划时再核对完整回执身份。 */
+export function reconcileOriginalOperationQuery(
+  operationId: string,
+  response: { operation_id: string; outcome: YayaOperationQueryOutcome },
+  expected?: YayaPlannedOperation,
+): { operation_id: string; outcome: YayaOperationQueryOutcome } {
+  if (response.operation_id !== operationId) {
+    return { operation_id: operationId, outcome: identityMismatchOutcome() };
+  }
+  const outcome = response.outcome;
+  if (outcome.kind === "saved" || outcome.kind === "saved_detail_unavailable") {
+    if (expected !== undefined && !receiptMatchesPlan(outcome.receipt, expected)) {
+      return { operation_id: operationId, outcome: identityMismatchOutcome() };
+    }
+    if (expected === undefined && outcome.receipt.operation_id !== operationId) {
+      return { operation_id: operationId, outcome: identityMismatchOutcome() };
+    }
+  }
+  return { operation_id: operationId, outcome };
+}
+
 export type ExecuteOutcome =
   | { kind: "assessed"; assessment: YayaOperationsExecutionAssessment }
   | { kind: "rejected"; message: string; detail: string | null };
@@ -115,15 +160,11 @@ export async function executeApprovedOperations(
   approvalId: string,
   operationIds: readonly string[]
 ): Promise<ExecuteOutcome> {
-  const response = await fetch("/api/yaya/operations", {
+  const response = await fetchWithAccountAuth("/api/yaya/operations", {
     method: "POST",
-    credentials: "same-origin",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ approval_id: approvalId, operation_ids: [...operationIds] }),
   });
-  if (response.status === 401 || response.status === 403 || response.status === 503) {
-    window.dispatchEvent(new Event("cga:auth-changed"));
-  }
   if (!response.ok) {
     const { yayaHttpError } = await import("./api");
     const error = await yayaHttpError(response);
@@ -151,13 +192,14 @@ const operationQueryResponseSchema = z.looseObject({
 
 /** 只按原 operation_id 查询；不启动模型、不执行旧批准、不产生业务写。 */
 export async function queryOriginalOperation(
-  operationId: string
+  operationId: string,
+  expected?: YayaPlannedOperation,
 ): Promise<{ operation_id: string; outcome: YayaOperationsExecutionAssessment["outcomes"][number]["outcome"] }> {
   const response = await yayaGetJson(
     `/api/yaya/operations?operation_id=${encodeURIComponent(operationId)}`,
     operationQueryResponseSchema
   );
-  return { operation_id: response.operation.operation_id, outcome: response.operation.outcome };
+  return reconcileOriginalOperationQuery(operationId, response.operation, expected);
 }
 
 /** 原运行查询（首响应丢失时）：五态分开，服务失败不冒充缺失。 */
@@ -165,14 +207,35 @@ export async function lookupOriginalRun(
   conversationId: string,
   clientRequestId: string
 ): Promise<YayaRunLookupResponse | null> {
-  const response = await fetch(
+  const response = await fetchWithAccountAuth(
     `${YAYA_CONVERSATIONS_PATH}/${encodeURIComponent(conversationId)}/runs?client_request_id=${encodeURIComponent(
       clientRequestId
     )}`,
-    { method: "GET", credentials: "same-origin", cache: "no-store" }
+    { method: "GET", cache: "no-store" }
   );
   if (!response.ok) return null;
   const body: unknown = await response.json().catch(() => null);
   const parsed = parseYayaRunLookupResponse(body);
   return parsed.ok ? parsed.value : null;
+}
+
+/** 取消只停止原 run 的后续派发；首响应丢失时先按稳定 client_request_id 查原 run。 */
+export async function requestYayaRunCancel(
+  conversationId: string,
+  clientRequestId: string,
+  knownRunId: string | null,
+): Promise<boolean> {
+  let runId = knownRunId;
+  if (runId === null) {
+    const lookup = await lookupOriginalRun(conversationId, clientRequestId);
+    if (lookup?.status !== "in_progress") return false;
+    runId = lookup.run_id;
+  }
+  const response = await yayaWriteJson(
+    `/api/yaya/runs/${encodeURIComponent(runId)}/cancel`,
+    "POST",
+    null,
+    yayaRunCancelResponseSchema,
+  );
+  return response.run_id === runId;
 }

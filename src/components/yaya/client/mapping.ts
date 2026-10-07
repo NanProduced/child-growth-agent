@@ -5,7 +5,7 @@
  */
 import type { ThreadAssistantMessagePart, ThreadMessage, ThreadMessageLike } from "@assistant-ui/react";
 import type { YayaStoredFragment } from "@/lib/yaya/storage-types";
-import type { YayaSourceRef } from "@/lib/yaya/types";
+import { receiptProvesSuccess, type YayaOperationQueryOutcome, type YayaSourceRef } from "@/lib/yaya/types";
 
 import { yayaAttachmentContentUrl, yayaAttachmentIdFromUrl } from "./api";
 import { YAYA_PART_NAMES } from "./parts";
@@ -122,14 +122,27 @@ export function persistShape(message: ThreadMessage): PersistedShape | null {
     }
     if (part.type !== "data") continue;
     if (part.name === YAYA_PART_NAMES.proposal) {
+      const data = part.data as { proposal_id?: unknown };
+      const proposalId = typeof data.proposal_id === "string" ? data.proposal_id : "未知";
+      fragments.push(
+        summaryFragment(
+          message.id,
+          fragments.length,
+          "待核对提案（原提案 " + proposalId + "）；历史只读，需重新读取后再执行。",
+          toolProvenance()
+        )
+      );
       hasProposal = true;
       if (executionState !== "executed") executionState = "pending_approval";
       continue;
     }
     if (part.name === YAYA_PART_NAMES.receipt) {
-      const data = part.data as { operation_id?: unknown; outcome?: { kind?: unknown } };
-      const kind = typeof data.outcome?.kind === "string" ? data.outcome.kind : "unknown";
-      const succeeded = kind === "saved" || kind === "saved_detail_unavailable";
+      const data = part.data as { operation_id?: unknown; outcome?: unknown };
+      const outcome = data.outcome as YayaOperationQueryOutcome | undefined;
+      const kind = typeof outcome?.kind === "string" ? outcome.kind : "unknown";
+      const succeeded =
+        (outcome?.kind === "saved" || outcome?.kind === "saved_detail_unavailable") &&
+        receiptProvesSuccess(outcome.receipt);
       fragments.push(
         summaryFragment(
           message.id,
@@ -168,7 +181,11 @@ export function persistShape(message: ThreadMessage): PersistedShape | null {
       continue;
     }
     if (part.name === YAYA_PART_NAMES.runError) {
-      const data = part.data as { message?: unknown };
+      const data = part.data as {
+        message?: unknown;
+        client_request_id?: unknown;
+        conversation_id?: unknown;
+      };
       fragments.push(
         summaryFragment(
           message.id,
@@ -177,6 +194,16 @@ export function persistShape(message: ThreadMessage): PersistedShape | null {
           toolProvenance()
         )
       );
+      if (typeof data.client_request_id === "string" && data.client_request_id !== "") {
+        fragments.push(
+          summaryFragment(
+            message.id,
+            fragments.length,
+            "原运行标记：" + data.client_request_id + "；历史只读，重新读取不会自动重发。",
+            toolProvenance()
+          )
+        );
+      }
       continue;
     }
   }

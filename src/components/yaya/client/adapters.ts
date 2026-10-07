@@ -33,8 +33,9 @@ import {
 type RemoteThreadMetadata = Awaited<ReturnType<RemoteThreadListAdapter["fetch"]>>;
 import { useMemo } from "react";
 
-import type { YayaRunWireEvent } from "@/lib/yaya/api-contract";
+import { YAYA_MAX_RUN_ATTACHMENTS, type YayaRunWireEvent } from "@/lib/yaya/api-contract";
 import { receiptProvesSuccess, type YayaOperationQueryOutcome } from "@/lib/yaya/types";
+import { fetchWithAccountAuth } from "@/lib/accounts/client";
 
 import {
   yayaApiErrorToPart,
@@ -46,6 +47,7 @@ import {
   YayaApiError,
   YAYA_CONVERSATIONS_PATH,
 } from "./api";
+import { requestYayaRunCancel } from "./actions";
 import { collectUserFacts, composeRunUserText, persistShape, projectedToThreadMessageLike } from "./mapping";
 import { YAYA_PART_NAMES, type YayaRunErrorPartData } from "./parts";
 import {
@@ -220,6 +222,19 @@ export function createYayaChatModelAdapter(store: YayaClientStore, aui: Assistan
           status: { type: "incomplete", reason: "error" },
         };
       }
+      if (facts.attachmentIds.length > YAYA_MAX_RUN_ATTACHMENTS) {
+        return {
+          content: failureDataParts({
+            stage: "not_wired",
+            status: null,
+            code: "attachment_limit",
+            message: `一次最多引用 ${YAYA_MAX_RUN_ATTACHMENTS} 张图片；未发送本次运行。`,
+            detail: null,
+            conversation_id: remoteId,
+          }),
+          status: { type: "incomplete", reason: "error" },
+        };
+      }
 
       // 上下文 chips 只随本条消息发送；冻结协议没有独立上下文字段，
       // 有限并入 user_text（不写入业务 raw_text，历史保存仍是教师原文）。
@@ -244,21 +259,21 @@ export function createYayaChatModelAdapter(store: YayaClientStore, aui: Assistan
       const runIdentity = { client_request_id: clientRequestId, conversation_id: remoteId };
       let response: Response;
       try {
-        response = await fetch(conversationPath(remoteId, "/runs"), {
+        response = await fetchWithAccountAuth(conversationPath(remoteId, "/runs"), {
           method: "POST",
-          credentials: "same-origin",
           headers: { "content-type": "application/json", accept: "application/x-ndjson" },
           body: JSON.stringify({
             conversation_id: remoteId,
             client_request_id: clientRequestId,
             user_text: userText,
-            attachment_ids: facts.attachmentIds.slice(0, 8),
+            attachment_ids: facts.attachmentIds,
             expected_conversation_revision: wiring.revision ?? 1,
           }),
           signal: options.abortSignal,
         });
       } catch (error) {
         if (options.abortSignal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+          await requestYayaRunCancel(remoteId, clientRequestId, null).catch(() => false);
           throw error;
         }
         return {
@@ -286,11 +301,14 @@ export function createYayaChatModelAdapter(store: YayaClientStore, aui: Assistan
       }
 
       const streamed: ThreadAssistantMessagePart[] = [];
+      let serverRunId: string | null = null;
       const result = await readYayaRunStream(response, options.abortSignal, (event) => {
+        serverRunId = event.run_id;
         for (const part of eventParts(event)) streamed.push(part);
       });
       if (!result.ok) {
         if (result.kind === "aborted") {
+          await requestYayaRunCancel(remoteId, clientRequestId, serverRunId).catch(() => false);
           throw new DOMException("Aborted", "AbortError");
         }
         if (result.kind === "http") {
@@ -419,15 +437,25 @@ export function createYayaThreadHistoryAdapter(store: YayaClientStore, aui: Assi
 
 export function createYayaAttachmentAdapter(): AttachmentAdapter {
   const uploaded = new Map<string, string>();
+  const retryIds = new Map<string, string>();
+
+  const fileKey = (file: File): string =>
+    [file.name, file.size, file.lastModified, file.type].join("\u0000");
+
+  const newId = (): string =>
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `upload-${Date.now().toString(36)}`;
+
   return {
     accept: "image/jpeg,image/png,image/webp",
     async *add({ file }): AsyncGenerator<PendingAttachment, void> {
-      const id =
-        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-          ? crypto.randomUUID()
-          : `upload-${Date.now().toString(36)}`;
+      const key = fileKey(file);
+      const id = retryIds.get(key) ?? newId();
+      retryIds.delete(key);
       const base = { id, type: "image" as const, name: file.name, contentType: file.type, file };
       if (file.size > 10 * 1024 * 1024) {
+        retryIds.set(key, id);
         yield {
           ...base,
           status: { type: "incomplete", reason: "error", message: "单张图片不能超过 10MiB，请压缩后再上传。" },
@@ -435,6 +463,7 @@ export function createYayaAttachmentAdapter(): AttachmentAdapter {
         return;
       }
       if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+        retryIds.set(key, id);
         yield {
           ...base,
           status: { type: "incomplete", reason: "error", message: "只支持 JPEG / PNG / WebP 图片。" },
@@ -491,10 +520,15 @@ export function createYayaAttachmentAdapter(): AttachmentAdapter {
         return;
       }
       uploaded.delete(id);
+      retryIds.set(key, id);
       yield { ...base, status: { type: "incomplete", reason: "error", message: outcome.message } };
     },
     async remove(attachment) {
       uploaded.delete(attachment.id);
+      if (attachment.file !== undefined) {
+        const key = fileKey(attachment.file);
+        if (retryIds.get(key) === attachment.id) retryIds.delete(key);
+      }
     },
     async send(attachment): Promise<CompleteAttachment> {
       let attachmentId = uploaded.get(attachment.id);

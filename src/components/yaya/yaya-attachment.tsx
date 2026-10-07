@@ -22,12 +22,14 @@ export const YAYA_MAX_IMAGE_BYTES = MEDIA_MAX_IMAGE_BYTES;
 
 export function YayaImagePicker({
   onFiles,
+  onLimitExceeded,
   disabled = false,
   max = YAYA_MAX_IMAGES,
   label = "添加图片",
   className,
 }: {
   onFiles: (files: File[]) => void;
+  onLimitExceeded?: (count: number) => void;
   disabled?: boolean;
   max?: number;
   label?: string;
@@ -49,6 +51,7 @@ export function YayaImagePicker({
         onChange={(event) => {
           const files = Array.from(event.target.files ?? []);
           event.target.value = "";
+          if (files.length > max) onLimitExceeded?.(files.length - max);
           if (files.length > 0) onFiles(files.slice(0, max));
         }}
       />
