@@ -448,6 +448,165 @@ function proposalChecks(): void {
     "damaged confirmation payload is not reviewable",
     !proposalPayloadIsReviewable({ kind: "confirm_observation", observation_id: "obs-1", input: {} })
   );
+
+  const rawBasis = {
+    observation_id: "obs-1",
+    quote: "小满把积木搭稳了",
+    quote_source: "raw_text",
+    quote_field: null,
+  } as const;
+  const confirmedBasis = {
+    observation_id: "obs-1",
+    quote: "小满调整策略后完成搭建",
+    quote_source: "confirmed_content",
+    quote_field: "highlight_quote",
+  } as const;
+  const guideDecision = (overrides: Record<string, unknown> = {}) => ({
+    item_id: "guide-item-1",
+    support: "single_event",
+    basis: [rawBasis],
+    ...overrides,
+  });
+  const guidePayload = (mutation: Record<string, unknown>) => ({
+    kind: "guide_decision",
+    observation_id: "obs-1",
+    mutation,
+  });
+  const validGuideMutation = {
+    action: "confirm",
+    expected_guide_revision: 1,
+    decisions: [guideDecision()],
+  };
+  check("valid guide decision remains reviewable", proposalPayloadIsReviewable(guidePayload(validGuideMutation)));
+  check(
+    "valid sustained note remains reviewable",
+    proposalPayloadIsReviewable(
+      guidePayload({
+        action: "confirm",
+        expected_guide_revision: 1,
+        decisions: [
+          guideDecision({
+            support: "sustained",
+            basis: [rawBasis, { ...rawBasis, observation_id: "obs-2" }],
+            sustained_note: {
+              period_start: "2026-09-01",
+              period_end: "2026-09-03",
+              description: "期间内持续观察到幼儿调整策略并完成搭建。",
+            },
+          }),
+        ],
+      })
+    )
+  );
+  check(
+    "sustained without note remains structurally reviewable",
+    proposalPayloadIsReviewable(
+      guidePayload({
+        action: "confirm",
+        expected_guide_revision: 1,
+        decisions: [
+          guideDecision({
+            support: "sustained",
+            basis: [rawBasis, { ...rawBasis, observation_id: "obs-2" }],
+          }),
+        ],
+      })
+    )
+  );
+  check(
+    "empty sustained note is not reviewable",
+    !proposalPayloadIsReviewable(
+      guidePayload({
+        action: "confirm",
+        expected_guide_revision: 1,
+        decisions: [guideDecision({ support: "sustained", sustained_note: {} })],
+      })
+    )
+  );
+  check(
+    "invalid sustained dates and description are not reviewable",
+    !proposalPayloadIsReviewable(
+      guidePayload({
+        action: "confirm",
+        expected_guide_revision: 1,
+        decisions: [
+          guideDecision({
+            support: "sustained",
+            sustained_note: {
+              period_start: "2026-02-30",
+              period_end: "2026-02-01",
+              description: "短",
+            },
+          }),
+        ],
+      })
+    )
+  );
+  check(
+    "invalid support/source/field pairing is not reviewable",
+    !proposalPayloadIsReviewable(
+      guidePayload({
+        action: "confirm",
+        expected_guide_revision: 1,
+        decisions: [
+          guideDecision({
+            support: "invalid_support",
+            basis: [{ ...confirmedBasis, quote_source: "invalid_source", quote_field: "invalid_field" }],
+          }),
+        ],
+      })
+    )
+  );
+  check(
+    "raw text cannot carry quote_field",
+    !proposalPayloadIsReviewable(
+      guidePayload({
+        action: "confirm",
+        expected_guide_revision: 1,
+        decisions: [guideDecision({ basis: [{ ...rawBasis, quote_field: "highlight_quote" }] })],
+      })
+    )
+  );
+  check(
+    "bad adult help and teacher note types are not reviewable",
+    !proposalPayloadIsReviewable(
+      guidePayload({
+        action: "confirm",
+        expected_guide_revision: 1,
+        decisions: [guideDecision({ adult_help_used: "yes", teacher_note: 42 })],
+      })
+    )
+  );
+  check(
+    "valid reject and withdraw payloads remain reviewable",
+    proposalPayloadIsReviewable(
+      guidePayload({ action: "reject", link_id: "link-1", expected_guide_revision: 1, reason: "依据不足" })
+    ) &&
+      proposalPayloadIsReviewable(
+        guidePayload({ action: "withdraw", link_id: "link-1", expected_guide_revision: 1, reason: "教师撤回" })
+      )
+  );
+  check(
+    "valid confirm with nested guide decisions remains reviewable",
+    proposalPayloadIsReviewable({
+      kind: "confirm_observation",
+      observation_id: "obs-1",
+      input: {
+        content: {
+          domain: "语言",
+          sub_domain: "表达",
+          objective_description: "能够清楚表达自己的想法",
+          highlights: ["小满清楚说明了搭建方法"],
+          support_suggestions: ["继续提供开放材料"],
+          highlight_quote: "我换一个更宽的底座",
+        },
+        guide_decisions: {
+          expected_guide_revision: 1,
+          decisions: [guideDecision()],
+        },
+      },
+    })
+  );
 }
 
 async function main(): Promise<void> {

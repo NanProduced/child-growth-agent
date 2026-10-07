@@ -19,7 +19,7 @@
 
 ## RED → GREEN
 
-- 42/42：pnpm exec tsx scripts/yaya/check-ui1-client.ts
+- 52/52：pnpm exec tsx scripts/yaya/check-ui1-client.ts（保留原 42 项，追加指南嵌套字段集中反例）
 - 通过：pnpm validate
 - 通过：pnpm exec next build
 - 通过：git diff --check

@@ -16,6 +16,17 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
+import {
+  GUIDE_EVIDENCE_QUOTE_FIELDS,
+  GUIDE_EVIDENCE_QUOTE_SOURCES,
+  GUIDE_EVIDENCE_SUPPORT_KINDS,
+} from "@/lib/guide/types";
+import {
+  confirmObservationSchema,
+  guideEvidenceBasisInputSchema,
+  guideEvidenceDecisionSchema,
+  guideEvidenceMutationSchema,
+} from "@/lib/validation";
 import { yayaDomainPayloadWireSchema } from "@/lib/yaya/api-contract";
 import type { YayaDomainPayload, YayaOperationQueryOutcome } from "@/lib/yaya/types";
 
@@ -160,78 +171,34 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 function isGuideBasis(value: unknown): boolean {
-  const record = asRecord(value);
-  return (
-    record !== null &&
-    isNonBlank(record.observation_id) &&
-    isNonBlank(record.quote) &&
-    isNonBlank(record.quote_source) &&
-    (record.quote_field === undefined || record.quote_field === null || isNonBlank(record.quote_field))
-  );
+  const parsed = guideEvidenceBasisInputSchema.safeParse(value);
+  if (!parsed.success) return false;
+  const source = parsed.data.quote_source;
+  const field = parsed.data.quote_field ?? null;
+  if (!(GUIDE_EVIDENCE_QUOTE_SOURCES as readonly string[]).includes(source)) return false;
+  if (source === "raw_text") return field === null;
+  return (GUIDE_EVIDENCE_QUOTE_FIELDS as readonly string[]).includes(field ?? "");
 }
 
 function isGuideDecision(value: unknown): boolean {
-  const record = asRecord(value);
-  if (record === null || !isNonBlank(record.support) || !Array.isArray(record.basis)) return false;
-  const hasItem = isNonBlank(record.item_id) || isNonBlank(record.link_id);
-  return (
-    hasItem &&
-    record.basis.length > 0 &&
-    record.basis.every(isGuideBasis) &&
-    (record.sustained_note === undefined ||
-      record.sustained_note === null ||
-      asRecord(record.sustained_note) !== null)
-  );
+  const parsed = guideEvidenceDecisionSchema.safeParse(value);
+  if (!parsed.success) return false;
+  if (!(GUIDE_EVIDENCE_SUPPORT_KINDS as readonly string[]).includes(parsed.data.support)) return false;
+  return parsed.data.basis.every(isGuideBasis);
 }
 
 function isGuideMutation(value: unknown): boolean {
-  const record = asRecord(value);
-  if (record === null || !isNonBlank(record.action)) return false;
-  if (record.action === "suggest") return true;
-  if (record.action === "confirm") {
-    return (
-      typeof record.expected_guide_revision === "number" &&
-      Array.isArray(record.decisions) &&
-      record.decisions.length > 0 &&
-      record.decisions.every(isGuideDecision)
-    );
-  }
-  if (record.action === "reject" || record.action === "withdraw") {
-    return (
-      isNonBlank(record.link_id) &&
-      (record.reason === undefined || typeof record.reason === "string") &&
-      typeof record.expected_guide_revision === "number"
-    );
-  }
-  return false;
+  const parsed = guideEvidenceMutationSchema.safeParse(value);
+  if (!parsed.success) return false;
+  if (parsed.data.action !== "confirm") return true;
+  return parsed.data.decisions.every(isGuideDecision);
 }
 
 function isConfirmInput(value: unknown): boolean {
-  const record = asRecord(value);
-  const content = asRecord(record?.content);
-  if (
-    record === null ||
-    content === null ||
-    !isNonBlank(content.domain) ||
-    !isNonBlank(content.sub_domain) ||
-    !isNonBlank(content.objective_description) ||
-    !isStringArray(content.highlights) ||
-    !isStringArray(content.support_suggestions) ||
-    !isNonBlank(content.highlight_quote)
-  ) {
-    return false;
-  }
-  if (record.teacher_note !== undefined && typeof record.teacher_note !== "string") return false;
-  if (record.clarification !== undefined && typeof record.clarification !== "string") return false;
-  if (record.guide_decisions === undefined || record.guide_decisions === null) return true;
-  const guide = asRecord(record.guide_decisions);
-  return (
-    guide !== null &&
-    typeof guide.expected_guide_revision === "number" &&
-    Array.isArray(guide.decisions) &&
-    guide.decisions.length > 0 &&
-    guide.decisions.every(isGuideDecision)
-  );
+  const parsed = confirmObservationSchema.safeParse(value);
+  if (!parsed.success) return false;
+  const guide = parsed.data.guide_decisions;
+  return guide === undefined || guide.decisions.every(isGuideDecision);
 }
 
 function decodeProposalPayload(value: unknown): YayaDomainPayload | null {
