@@ -28,6 +28,7 @@ import { parseYayaChatRecoveryMark, restrictYayaAssistantProjection } from "../c
 import type { YayaChatRecoveryMark } from "../chat-bind-contract";
 import { evaluateAttachmentAccess, evaluateFragmentSources } from "./access-facts";
 import {
+  effectiveYayaBindingState,
   projectStoredMessageText,
   redactProvenanceForVisibility,
   yayaAssistantReadPolicy,
@@ -77,6 +78,64 @@ export function toAttachmentProjection(evaluation: YayaEvaluatedAttachment): Yay
   }
 }
 
+/** 与冻结 `projectChatMessage`（types.ts）同一组合口径，用于守门后重算消息级可见性 */
+function combineProjectionVisibility(
+  fragments: readonly YayaFragmentProjection[],
+  attachments: readonly YayaAttachmentProjection[],
+): YayaChatMessageProjection["visibility"] {
+  const visible = fragments.filter((fragment) => fragment.visibility !== "hidden");
+  let visibility: YayaChatMessageProjection["visibility"];
+  if (fragments.length === 0) {
+    visibility = "full";
+  } else if (visible.length === fragments.length) {
+    visibility = visible.every((fragment) => fragment.visibility === "full") ? "full" : "partial";
+  } else if (visible.length > 0) {
+    visibility = "partial";
+  } else {
+    const reasons = new Set(fragments.map((fragment) => fragment.reason));
+    visibility =
+      reasons.has("source_unavailable") || reasons.has("evaluation_missing") ? "unavailable" : "hidden";
+  }
+  if (visibility === "full" && attachments.some((attachment) => !attachment.readable)) {
+    visibility = "partial";
+  }
+  if (visibility === "full" && attachments.length > 0 && attachments.every((a) => a.metadata_only)) {
+    visibility = "metadata_only";
+  }
+  return visibility;
+}
+
+/**
+ * 逐片段可信守门（主评审 P1-B）：空来源且未证明独立的片段不得因消息内
+ * 其他片段的可读来源保持正文——整段绑定的来源并集只做消息级判定，不给
+ * 单个片段兜底。非 user 消息适用；已 hidden 的片段保持原样。
+ */
+function enforceFragmentTrust(
+  projection: YayaChatMessageProjection,
+  fragments: readonly YayaStoredFragment[],
+): YayaChatMessageProjection {
+  let changed = false;
+  const guarded = projection.fragments.map((fragmentProjection, index) => {
+    const stored = fragments[index];
+    if (stored === undefined) return fragmentProjection;
+    if (
+      stored.sources.length === 0 &&
+      !stored.independently_readable &&
+      fragmentProjection.visibility !== "hidden"
+    ) {
+      changed = true;
+      return { ...fragmentProjection, visibility: "hidden" as const, reason: "source_unavailable" as const };
+    }
+    return fragmentProjection;
+  });
+  if (!changed) return projection;
+  return {
+    ...projection,
+    fragments: guarded,
+    visibility: combineProjectionVisibility(guarded, projection.attachments),
+  };
+}
+
 async function projectFragments(
   client: TransactionClient,
   principal: Principal,
@@ -111,13 +170,16 @@ async function projectFragments(
     evaluatedAttachments,
   );
   // 读侧绑定兜底：正文/provenance/标题一律基于限制后的投影（绑定不可信时整段降级）
-  const projection =
+  let projection =
     role === "user"
       ? baseProjection
       : restrictYayaAssistantProjection(baseProjection, {
           role,
           policy: yayaAssistantReadPolicy(bindingState, fragments),
         });
+  if (role !== "user") {
+    projection = enforceFragmentTrust(projection, fragments);
+  }
   const visible = projectStoredMessageText(fragments, projection.fragments);
   const projectedFragments: YayaProjectedFragmentView[] = fragments.map((fragment, index) => {
     const fragmentProjection: YayaFragmentProjection = projection.fragments[index] ?? {
@@ -152,7 +214,22 @@ export async function projectMessageRow(
   schoolId: string,
   row: YayaMessageRow,
 ): Promise<YayaProjectedMessageView> {
-  const recovery = parseRecoveryMark(row.recovery_mark);
+  // 恢复标记：结构解析 ≠ 关联证明（P1-B）——必须与行 owner/conversation/run 一致，
+  // 缺失、损坏或关联不符一律 null，且绑定按无法核验降级；不改写原行。
+  const structuralRecovery = parseRecoveryMark(row.recovery_mark);
+  const hasMark = row.recovery_mark !== null && row.recovery_mark !== undefined;
+  const recoveryLinked =
+    structuralRecovery !== null &&
+    structuralRecovery.conversation_id === row.conversation_id &&
+    structuralRecovery.owner_account_id === row.owner_account_id &&
+    structuralRecovery.run !== null &&
+    structuralRecovery.run.run_id === row.run_id;
+  const recovery = recoveryLinked ? structuralRecovery : null;
+  const bindingState = effectiveYayaBindingState(
+    row.binding_state,
+    row.run_id,
+    hasMark && !recoveryLinked,
+  );
   const parsed = parseStoredFragments(row.fragments);
   const attachmentIds = parseStringArray(row.attachment_ids);
   const corrupt = parsed.corrupt || attachmentIds === null;
@@ -201,7 +278,7 @@ export async function projectMessageRow(
     row.owner_account_id,
     row.conversation_id,
     row.role,
-    row.binding_state,
+    bindingState,
     parsed.fragments,
     ids,
   );
@@ -254,9 +331,12 @@ export async function projectConversationView(
     return { ...base, projected_title: view.title, title_restricted: false };
   }
   const messages = await client.query<
-    Pick<YayaMessageRow, "id" | "fragments" | "owner_account_id" | "conversation_id" | "role" | "binding_state">
+    Pick<
+      YayaMessageRow,
+      "id" | "fragments" | "owner_account_id" | "conversation_id" | "role" | "binding_state" | "run_id"
+    >
   >(
-    `SELECT id, fragments, owner_account_id, conversation_id, role, binding_state FROM yaya_messages
+    `SELECT id, fragments, owner_account_id, conversation_id, role, binding_state, run_id FROM yaya_messages
       WHERE conversation_id = $1 AND deleted_at IS NULL`,
     [view.conversation_id],
   );
@@ -271,7 +351,7 @@ export async function projectConversationView(
       if (found) {
         matched = found;
         matchedRole = message.role;
-        matchedBinding = message.binding_state;
+        matchedBinding = effectiveYayaBindingState(message.binding_state, message.run_id);
         break;
       }
     }

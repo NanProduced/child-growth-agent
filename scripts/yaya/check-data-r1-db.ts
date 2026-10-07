@@ -253,14 +253,13 @@ async function main(): Promise<void> {
         expected_conversation_revision: 1,
       }),
     );
-    const privateMessage = {
-      status: 201,
-      json: privateSaved as unknown as Record<string, unknown>,
-      text: JSON.stringify(privateSaved),
-    };
-    check("A 保存受限来源消息 201", privateMessage.status === 201);
-    check("A 受限片段正文不得出现在消息响应", !privateMessage.text.includes(PRIVATE_FRAGMENT));
-    check("A 受限片段 provenance.label 不得出现在消息响应", !privateMessage.text.includes(PRIVATE_PROVENANCE));
+    const privateMessageText = JSON.stringify(privateSaved);
+    check(
+      "A 内部保存受限来源消息成功（repository 层）",
+      privateSaved.replayed === false && privateSaved.message.role === "assistant",
+    );
+    check("A 受限片段正文不得出现在保存结果", !privateMessageText.includes(PRIVATE_FRAGMENT));
+    check("A 受限片段 provenance.label 不得出现在保存结果", !privateMessageText.includes(PRIVATE_PROVENANCE));
 
     const renamedPrivate = await respond(
       conversationPatch(
@@ -315,13 +314,11 @@ async function main(): Promise<void> {
         expected_conversation_revision: 1,
       }),
     );
-    const replay = {
-      status: replaySaved.replayed ? 201 : 200,
-      json: replaySaved as unknown as Record<string, unknown>,
-      text: JSON.stringify(replaySaved),
-    };
     check("A 幂等回放命中 replayed=true", replaySaved.replayed === true);
-    check("A 幂等回放响应不得含原始标题", !replay.text.includes(PRIVATE_TITLE));
+    check(
+      "A 幂等回放结果不得含原始标题",
+      !JSON.stringify(replaySaved).includes(PRIVATE_TITLE),
+    );
 
     const secondMessage = await respond(
       messagesPost(

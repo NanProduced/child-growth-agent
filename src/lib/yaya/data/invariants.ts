@@ -577,6 +577,21 @@ export function yayaAssistantReadPolicy(
 }
 
 /**
+ * 行级绑定完整性（读侧，主评审 P1-B）：`bound` 必须有非空 run 身份；
+ * `markMismatch`（恢复标记存在但与行 owner/conversation/run 关联不一致）同样
+ * 视为绑定无法核验。缺失 / 矛盾一律降级 `unknown`（受限读取），不回填为可信。
+ */
+export function effectiveYayaBindingState(
+  bindingState: string | null | undefined,
+  runId: string | null | undefined,
+  markMismatch = false,
+): string | null {
+  if (bindingState !== "bound") return bindingState ?? null;
+  const runPresent = typeof runId === "string" && runId.trim() !== "";
+  return runPresent && !markMismatch ? "bound" : "unknown";
+}
+
+/**
  * HTTP 通道必须拒绝的绑定伪造字段（仅顶层键；片段内的 sources /
  * independently_readable 属于既有合法 user 输入，不在此列）。
  */

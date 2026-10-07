@@ -112,6 +112,14 @@ export async function saveMessage(
   ) {
     throw new YayaDataError("invalid_request", "HTTP 通道不得携带绑定字段。");
   }
+  // 版本前提在共享 repository 边界守门：HTTP 通道必须携带（缺省 / null 拒绝），
+  // 不依赖公共 route 兜底；run 终态通道可缺省（跳过 CAS，仍行锁串行）
+  if (
+    channel === "http" &&
+    (input.expected_conversation_revision ?? null) === null
+  ) {
+    throw new YayaDataError("invalid_request", "HTTP 通道必须携带会话版本前提。");
+  }
   if (channel === "run_terminal") {
     if (
       input.run === undefined ||
@@ -150,6 +158,18 @@ export async function saveMessage(
     message_kind: input.message_kind,
     fragments: input.fragments,
     attachment_ids: attachmentIds,
+    // run 终态：绑定与恢复身份纳入幂等一致性（HTTP 通道已在上方拒绝这些字段）
+    ...(input.run === undefined
+      ? {}
+      : {
+          binding: {
+            run_id: input.run.run_id,
+            client_request_id: input.run.client_request_id,
+            binding_state: input.binding_state ?? "unknown",
+            execution_state: input.execution_state,
+            recovery: recoveryMark,
+          },
+        }),
   });
 
   if (input.client_message_id !== null) {
@@ -272,7 +292,7 @@ export async function saveRunTerminalMessage(
       execution_state: input.execution_state,
       fragments: input.fragments,
       attachment_ids: input.attachment_ids,
-      expected_conversation_revision: input.expected_conversation_revision,
+      expected_conversation_revision: input.expected_conversation_revision ?? undefined,
       run: { run_id: input.run.run_id, client_request_id: input.run.client_request_id },
       binding_state: input.binding_state,
       recovery: input.recovery ?? null,

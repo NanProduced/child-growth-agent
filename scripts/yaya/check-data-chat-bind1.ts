@@ -62,6 +62,10 @@ const BOUND_PROVENANCE = "BOUND_PROVENANCE_LABEL";
 const BOUND_TITLE = "BOUND_DERIVED_TITLE";
 const UNKNOWN_BODY = "UNKNOWN_BINDING_BODY";
 const USER_CONTROL_BODY = "USER_CONTROL_BODY";
+const MIX_SOURCED_BODY = "R1_MIX_SOURCED_BODY";
+const EMPTY_UNPROVEN_MARKER = "R1_EMPTY_UNPROVEN_MARKER";
+const BADBIND_BODY = "R1_BADBIND_BODY";
+const TAMPER_BODY = "R1_TAMPER_BODY";
 
 /** HTTP 通道必须拒绝的绑定伪造字段（服务端语义字段，客户端一律不得自报） */
 const FORBIDDEN_HTTP_KEYS: readonly Record<string, unknown>[] = [
@@ -413,6 +417,32 @@ async function tryRunSave(
     return null;
   }
   return await withDbTx((tx) => runTerminalFn(tx, principal, SCHOOL, input));
+}
+/** 捕获保存尝试的错误（null = 成功无异常），用于断言精确错误码 */
+async function saveAttempt(principal: Principal, input: Record<string, unknown>): Promise<unknown> {
+  if (runTerminalFn === null) return new Error("saveRunTerminalMessage missing");
+  try {
+    await withDbTx((tx) => runTerminalFn(tx, principal, SCHOOL, input));
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+/** 直接调用共享 repository 默认（http）通道：不经过 route 校验 */
+async function httpSaveAttempt(principal: Principal, input: Record<string, unknown>): Promise<unknown> {
+  try {
+    await withDbTx((tx) =>
+      yayaDataRepository.saveMessage(
+        tx,
+        principal,
+        SCHOOL,
+        input as unknown as Parameters<typeof yayaDataRepository.saveMessage>[3],
+      ),
+    );
+    return null;
+  } catch (error) {
+    return error;
+  }
 }
 async function countMessages(conversationId: string): Promise<number> {
   const rows = await poolQueryFor<{ count: string }>(
@@ -985,6 +1015,179 @@ async function channelDefaultsStage(teacherA: Session): Promise<void> {
   check("D16 拒绝后无消息落库", (await countMessages(convDirect)) === 0);
 }
 
+/**
+ * R1 返修反例（主评审 REVIEW.md P1-A / P1-B / P2-C）：
+ * 幂等必须覆盖绑定与恢复身份、混合片段逐片段守门、坏绑定身份读侧降级、
+ * 默认 HTTP 共享入口必须携带版本前提。全部经实际 shared repository / GET。
+ */
+async function r1IntegrityStage(database: Client, teacherA: Session, classA: string): Promise<void> {
+  stage("D17-D20 R1 绑定幂等、混合片段与坏绑定身份");
+
+  /* D17: 幂等一致性覆盖 run/client_request_id/binding_state/recovery */
+  const convMeta = await createConversation(teacherA.token);
+  const metaRun = `${RUN}-meta`;
+  const metaInput = {
+    ...terminalInput(convMeta, metaRun),
+    fragments: [frag("f-meta", "META_BODY", [], true, "model_text", "META_LABEL")],
+    recovery: { actor_account_id: teacherA.accountId, proposal: null, operations: [] },
+  };
+  const metaFirst = await tryRunSave(teacherA.principal, metaInput, "D17 内部原语可用（绑定幂等）");
+  if (metaFirst === null) return;
+  check("D17 首次保存 replayed=false", metaFirst.replayed === false);
+
+  const metaReplay = await tryRunSave(teacherA.principal, metaInput, "D17 相同绑定重放可用");
+  check("D17 相同绑定重放返回原结果", metaReplay?.replayed === true);
+
+  const conflictRequest = await saveAttempt(teacherA.principal, {
+    ...metaInput,
+    run: { run_id: metaRun, client_request_id: `${metaRun}-other` },
+  });
+  check("D17 异 client_request_id 拒绝", errorCode(conflictRequest) === "idempotency_conflict");
+
+  const conflictBinding = await saveAttempt(teacherA.principal, { ...metaInput, binding_state: "unknown" });
+  check("D17 异 binding_state 拒绝", errorCode(conflictBinding) === "idempotency_conflict");
+
+  check("D17 冲突后无重复落库", (await countMessages(convMeta)) === 1);
+  const metaRows = await poolQueryFor<{
+    binding_state: string | null;
+    run_id: string | null;
+    recovery_mark: { run?: { client_request_id?: string } } | null;
+  }>(
+    dbUrl,
+    "SELECT binding_state, run_id, recovery_mark FROM yaya_messages WHERE conversation_id = $1 AND role = 'assistant'",
+    [convMeta],
+  );
+  check("D17 原消息绑定未被改写", metaRows[0]?.binding_state === "bound" && metaRows[0]?.run_id === metaRun);
+  check(
+    "D17 恢复标记仍指原 request",
+    metaRows[0]?.recovery_mark?.run?.client_request_id === `${metaRun}-req`,
+  );
+
+  /* D18: 混合片段——空来源且未证明独立的片段不得因其他片段的来源保持正文 */
+  const childR1 = randomUUID();
+  await database.query(
+    "INSERT INTO children (id,name,gender,birth_date,class_name) VALUES ($1,'DCB1 R1 child','女','2024-01-01','fixture')",
+    [childR1],
+  );
+  await database.query(
+    "INSERT INTO child_class_enrollments (child_id,class_id,start_date) VALUES ($1,$2,'2026-01-01')",
+    [childR1, classA],
+  );
+  const convMix = await createConversation(teacherA.token);
+  const mixSaved = await tryRunSave(
+    teacherA.principal,
+    {
+      ...terminalInput(convMix, `${RUN}-mix`),
+      fragments: [
+        frag("f-mix-a", MIX_SOURCED_BODY, [childSource(childR1)], false, "model_text", "MIX_SOURCED_LABEL"),
+        frag("f-mix-b", EMPTY_UNPROVEN_MARKER, [], false, "model_text", "MIX_UNPROVEN_LABEL"),
+      ],
+    },
+    "D18 内部原语可用（混合片段）",
+  );
+  if (mixSaved === null) return;
+  const mixBefore = await getMessages(teacherA.token, convMix);
+  const mixView = assistantOf(mixBefore.messages);
+  check("D18 有来源片段可读", mixView?.fragments[0]?.text === MIX_SOURCED_BODY);
+  check("D18 空来源未证明片段不下发", mixView?.fragments[1]?.text === null);
+  check("D18 未证明片段非 full", mixView?.fragments[1]?.visibility !== "full");
+  check("D18 响应不含未证明正文", !mixBefore.text.includes(EMPTY_UNPROVEN_MARKER));
+
+  await database.query("DELETE FROM teacher_class_assignments WHERE account_id = $1 AND class_id = $2", [
+    teacherA.accountId,
+    classA,
+  ]);
+  const mixRevoked = await getMessages(teacherA.token, convMix);
+  const mixRevokedView = assistantOf(mixRevoked.messages);
+  check("D18 撤权后有来源片段不下发", mixRevokedView?.fragments[0]?.text === null);
+  check(
+    "D18 撤权后未证明片段仍不下发",
+    mixRevokedView?.fragments[1]?.text === null && !mixRevoked.text.includes(EMPTY_UNPROVEN_MARKER),
+  );
+  check("D18 撤权后消息级受限", mixRevokedView?.projection.visibility !== "full");
+  await database.query("INSERT INTO teacher_class_assignments (account_id, class_id) VALUES ($1,$2)", [
+    teacherA.accountId,
+    classA,
+  ]);
+
+  /* D19: 坏绑定身份——bound 必须有可核验 run 身份，恢复标记必须与行关联一致 */
+  const convBad = await createConversation(teacherA.token);
+  const badSaved = await tryRunSave(
+    teacherA.principal,
+    {
+      ...terminalInput(convBad, `${RUN}-badbind`),
+      fragments: [frag("f-bad", BADBIND_BODY, [childSource(childR1)], true, "model_text", "BADBIND_LABEL")],
+      recovery: { actor_account_id: teacherA.accountId, proposal: null, operations: [] },
+    },
+    "D19 内部原语可用（坏绑定身份）",
+  );
+  if (badSaved === null) return;
+  const badBefore = await getMessages(teacherA.token, convBad);
+  check("D19 绑定完好时正文可读", assistantOf(badBefore.messages)?.fragments[0]?.text === BADBIND_BODY);
+
+  await database.query("UPDATE yaya_messages SET run_id = NULL WHERE conversation_id = $1 AND role = 'assistant'", [
+    convBad,
+  ]);
+  const badGone = await getMessages(teacherA.token, convBad);
+  const badGoneView = assistantOf(badGone.messages);
+  check(
+    "D19 缺 run 身份降级不下发正文",
+    badGoneView?.fragments[0]?.text === null && !badGone.text.includes(BADBIND_BODY),
+  );
+  check("D19 缺 run 身份消息级受限", badGoneView?.projection.visibility === "unavailable");
+  check("D19 缺 run 身份恢复标记不下发", badGoneView?.recovery === null);
+
+  const convTamper = await createConversation(teacherA.token);
+  const tamperSaved = await tryRunSave(
+    teacherA.principal,
+    {
+      ...terminalInput(convTamper, `${RUN}-tamper`),
+      fragments: [frag("f-tamper", TAMPER_BODY, [childSource(childR1)], true, "model_text", "TAMPER_LABEL")],
+      recovery: { actor_account_id: teacherA.accountId, proposal: null, operations: [] },
+    },
+    "D19 内部原语可用（标记关联）",
+  );
+  if (tamperSaved === null) return;
+  await database.query(
+    "UPDATE yaya_messages SET recovery_mark = jsonb_set(recovery_mark, '{run,run_id}', '\"tampered-run\"') WHERE conversation_id = $1 AND role = 'assistant'",
+    [convTamper],
+  );
+  const tampered = await getMessages(teacherA.token, convTamper);
+  const tamperedView = assistantOf(tampered.messages);
+  check(
+    "D19 标记关联不符不下发",
+    tamperedView?.recovery === null &&
+      tamperedView?.fragments[0]?.text === null &&
+      !tampered.text.includes(TAMPER_BODY),
+  );
+
+  /* D20: 默认 HTTP 共享保存入口必须携带版本前提（不依赖 route 兜底） */
+  const convVersion = await createConversation(teacherA.token);
+  const httpBase = {
+    conversation_id: convVersion,
+    client_message_id: null,
+    role: "user",
+    message_kind: "text",
+    execution_state: "none",
+    fragments: [],
+    attachment_ids: [],
+  };
+  const missingVersion = await httpSaveAttempt(teacherA.principal, httpBase);
+  check("D20 HTTP 缺省版本拒绝", errorCode(missingVersion) === "invalid_request");
+  const nullVersion = await httpSaveAttempt(teacherA.principal, {
+    ...httpBase,
+    expected_conversation_revision: null,
+  });
+  check("D20 HTTP NULL 版本拒绝", errorCode(nullVersion) === "invalid_request");
+  check("D20 拒绝后无落库", (await countMessages(convVersion)) === 0);
+  const versionOk = await httpSaveAttempt(teacherA.principal, {
+    ...httpBase,
+    client_message_id: "d20-ok",
+    expected_conversation_revision: 1,
+  });
+  check("D20 带版本 user 保存仍成功", versionOk === null && (await countMessages(convVersion)) === 1);
+}
+
 async function main(): Promise<void> {
   const cleanupIssues: string[] = [];
   const guard = await startModelRequestGuard();
@@ -1060,6 +1263,7 @@ async function main(): Promise<void> {
     await rollbackStage(teacherA);
     await concurrencyStage(teacherA);
     await channelDefaultsStage(teacherA);
+    await r1IntegrityStage(database, teacherA, classA);
 
     check("模型网关未被调用", guard.hits === 0);
   } finally {

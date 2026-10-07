@@ -222,12 +222,25 @@ export function computeYayaMessageDigest(input: {
   message_kind: string;
   fragments: unknown;
   attachment_ids: readonly string[];
+  /**
+   * run 终态通道的绑定 / 恢复身份：纳入同身份重放的一致性判断
+   * （异 client_request_id / binding_state / recovery / 执行状态 → 冲突）。
+   * 省略时摘要与旧账本逐字节一致，user 消息重放兼容不受影响。
+   */
+  binding?: {
+    run_id: string;
+    client_request_id: string;
+    binding_state: string;
+    execution_state: string;
+    recovery: unknown;
+  };
 }): string {
   const canonical = canonicalizeYayaValue({
     attachment_ids: [...input.attachment_ids],
     fragments: input.fragments,
     message_kind: input.message_kind,
     role: input.role,
+    ...(input.binding === undefined ? {} : { binding: input.binding }),
   });
   return createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex");
 }
@@ -344,8 +357,11 @@ export interface YayaSaveMessageInput {
   execution_state: YayaMessageExecutionState;
   fragments: readonly YayaStoredFragment[];
   attachment_ids: readonly string[];
-  /** 版本前提：与会话当前 revision 不一致时拒绝追加；null/缺省表示跳过（仍取行锁串行） */
-  expected_conversation_revision?: number | null;
+  /**
+   * 版本前提：HTTP（默认）通道**必须**携带，共享 repository 边界直接拒绝缺省 / null，
+   * 不依赖 route 兜底；run 终态通道可缺省或 null（跳过 CAS，仍取会话行锁串行）。
+   */
+  expected_conversation_revision?: number;
   /** run 终态通道专用（HTTP 通道携带即拒绝）：run 身份与绑定状态 */
   run?: { run_id: string; client_request_id: string };
   binding_state?: "bound" | "unknown";
