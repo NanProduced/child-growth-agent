@@ -3123,6 +3123,392 @@ async function main(): Promise<void> {
     );
     await enrollChildInClass({ child_id: facts.childA, class_id: facts.classA });
 
+    /* ============ R4：终态已提交后，发布/恢复门禁的等待跨过会话到期 ============ */
+
+    // 共享可呈现边界（runTerminalPresentable）在来源异步核验（children/历史/图片锁等待）之后
+    // 必须按当前事实再核身份；进入时的 principal 与 session_valid=true 只代表核验开始时有效。
+    // 反例手法：真实终态已提交后，用独立连接持 child 行锁让发布/恢复的来源核验实测等待；
+    // 等待开始时会话有效，放行前用真实墙钟到期；到期后不得输出任何受限正文，
+    // 已提交记录/回执不变，且不得重复派发。
+
+    const r2RacerPid = Number(
+      (await r2Racer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid ?? 0,
+    );
+    const r2LockPid = Number(
+      (await r2Lock.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid ?? 0,
+    );
+
+    /** 实测「有连接被指定 backend pid 阻塞」出现（pg_locks 未授予等待 + pg_blocking_pids 精确指向） */
+    const waitForBlockedBy = async (blockerPid: number, timeoutMs: number): Promise<boolean> => {
+      const db = database;
+      if (db === null) throw new Error('database unavailable');
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const rows = await db.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_locks w
+            WHERE NOT w.granted AND w.pid <> pg_backend_pid()
+              AND pg_blocking_pids(w.pid) @> ARRAY[$1::int]`,
+          [blockerPid],
+        );
+        if ((rows.rows[0]?.n ?? 0) > 0) return true;
+        await sleepMs(50);
+      }
+      return false;
+    };
+    const sessionValidNow = async (tokenHash: string): Promise<boolean> => {
+      const db = database;
+      if (db === null) throw new Error('database unavailable');
+      const rows = await db.query<{ valid: boolean }>(
+        'SELECT expires_at > clock_timestamp() AS valid FROM app_sessions WHERE token_hash = $1',
+        [tokenHash],
+      );
+      return rows.rows[0]?.valid === true;
+    };
+    const waitSessionExpired = async (tokenHash: string, timeoutMs: number): Promise<boolean> => {
+      const db = database;
+      if (db === null) throw new Error('database unavailable');
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const rows = await db.query<{ expired: boolean }>(
+          'SELECT expires_at <= clock_timestamp() AS expired FROM app_sessions WHERE token_hash = $1',
+          [tokenHash],
+        );
+        if (rows.rows[0]?.expired === true) return true;
+        await sleepMs(50);
+      }
+      return false;
+    };
+    const expireWithin = async (tokenHash: string, seconds: number): Promise<void> => {
+      const db = database;
+      if (db === null) throw new Error('database unavailable');
+      await db.query(
+        'UPDATE app_sessions SET expires_at = clock_timestamp() + make_interval(secs => $2) WHERE token_hash = $1',
+        [tokenHash, seconds],
+      );
+    };
+
+    /* ---------- D1：live 发布门禁等待跨期（自身 finalize 提交后的发布阶段） ---------- */
+
+    const d1Session = await directSession(database, facts.teacherA.id, 600);
+    const d1Auth = { cookie: d1Session.cookie, csrf: d1Session.csrf };
+    const d1TokenHash = hashSessionToken(d1Session.token);
+    const d1Id = `r4-live-${randomUUID()}`;
+    const d1Locked = deferred();
+    const d1Gate = deferred();
+    const d1Release = deferred();
+    gates.push(d1Gate.resolve, d1Release.resolve);
+    stub.register('[app1:r4-live-expire]', [
+      { content: actionRead('get_observation', { observation_id: facts.observationA }) },
+      {
+        prepare: async () => {
+          const db = database;
+          if (db === null) throw new Error('database unavailable');
+          const rows = await db.query<{ id: string }>(
+            'SELECT id FROM yaya_runs WHERE client_request_id = $1',
+            [d1Id],
+          );
+          const serviceRunId = rows.rows[0]?.id;
+          if (!serviceRunId) throw new Error('r4 live run not found');
+          await r2Lock!.query('BEGIN');
+          await r2Lock!.query('SELECT id FROM yaya_runs WHERE id = $1 FOR UPDATE', [serviceRunId]);
+          d1Locked.resolve();
+          void (async () => {
+            await d1Release.promise;
+            await r2Lock!.query('COMMIT').catch(() => undefined);
+          })();
+        },
+        hold: d1Gate.promise,
+        content: actionAnswer('R4_LIVE_MARKER 不应发布。', [`observation:${facts.observationA}`]),
+      },
+    ]);
+    const d1CallsBefore = stub.total;
+    const d1Promise = postRun(
+      base,
+      d1Auth,
+      c1Conv.conversation_id,
+      runBody({
+        conversation_id: c1Conv.conversation_id,
+        client_request_id: d1Id,
+        user_text: '[app1:r4-live-expire] 终态提交后发布等待跨期',
+        expected_conversation_revision: c1Saved.revision,
+      }),
+    );
+    await d1Locked.promise;
+    // 收紧会话 TTL 必须先于 finalize 的 verify（其会话 FOR SHARE 会挡住行更新；
+    // 且 run 锁/来源锁交错会形成行使测试自锁的等待链）。6s 覆盖到发布门禁开始，
+    // 并在发布来源等待（racer2 持 childA）期间自然到期。
+    await expireWithin(d1TokenHash, 6);
+    d1Gate.resolve();
+    const d1Stream = openNdjson(await d1Promise);
+    const d1Action = await readUntilActionParsed(d1Stream, 'answer');
+    check('R4-D live：answer 动作已解析（进入保存边界）', d1Action);
+    // childC 行锁：finalize 已持 childA 共享锁后必然卡在 childC（与 R3 同一锁序）
+    await r2Racer.query('BEGIN');
+    await r2Racer.query('SELECT id FROM children WHERE id = $1 FOR UPDATE', [childC]);
+    d1Release.resolve();
+    const d1SaveWait = await waitForBlockedBy(r2RacerPid, 10_000);
+    // racer2 排在 finalize 的 childA 共享锁之后：finalize 提交时由它接住 childA，发布门禁必然等待
+    await r2Lock.query('BEGIN');
+    void r2Lock
+      .query('SELECT id FROM children WHERE id = $1 FOR UPDATE', [facts.childA])
+      .catch(() => undefined);
+    await r2Racer.query('COMMIT');
+    const d1PublishWait = await waitForBlockedBy(r2LockPid, 10_000);
+    const d1Row = await database.query<{ state: string; kind: string }>(
+      "SELECT state, outcome->>'kind' AS kind FROM yaya_runs WHERE client_request_id = $1",
+      [d1Id],
+    );
+    const d1ValidAtWait = await sessionValidNow(d1TokenHash);
+    check(
+      'R4-D live：终态已提交且发布来源核验实测等待（等待开始时会话有效）',
+      d1SaveWait &&
+        d1PublishWait &&
+        d1Row.rows[0]?.state === 'terminal' &&
+        d1Row.rows[0]?.kind === 'answered' &&
+        d1ValidAtWait,
+    );
+    const d1Expired = await waitSessionExpired(d1TokenHash, 20_000);
+    check('R4-D live：放行前会话已自然到期（等待期间墙钟跨期）', d1Expired);
+    await r2Lock.query('COMMIT');
+    const d1Parsed = parseLines(await d1Stream.collect());
+    check(
+      'R4-D live：到期后不发布正文（无 answer/标记，唯一 run_end stopped session_invalid）',
+      d1Parsed.allParsed &&
+        d1Parsed.verdict.ok &&
+        !d1Parsed.events.some((event) => event.type === 'answer') &&
+        d1Parsed.verdict.outcome.kind === 'stopped' &&
+        d1Parsed.verdict.outcome.reason === 'session_invalid',
+    );
+    const d1Db = await database.query<{ state: string; outcome: string }>(
+      "SELECT state, outcome::text AS outcome FROM yaya_runs WHERE client_request_id = $1",
+      [d1Id],
+    );
+    check(
+      'R4-D live：已提交终态未被覆盖且未重复派发（库内 answered + 标记，模型恰 2 次）',
+      d1Db.rows[0]?.state === 'terminal' &&
+        (d1Db.rows[0]?.outcome ?? '').includes('R4_LIVE_MARKER') &&
+        stub.total - d1CallsBefore === 2,
+    );
+    const d1ExpiredLookup = await lookupRun(base, d1Auth, c1Conv.conversation_id, d1Id);
+    check('R4-D live：过期令牌查询被拒（unauthenticated 401）', d1ExpiredLookup.status === 401);
+    const d1Fresh = await directSession(database, facts.teacherA.id);
+    const d1FreshLookup = await lookupRun(base, d1Fresh, c1Conv.conversation_id, d1Id);
+    const d1FreshBody = (await d1FreshLookup.json()) as {
+      status?: string;
+      outcome?: { content?: string };
+    };
+    check(
+      'R4-D live：同 owner 新会话合法恢复旧终态（finished + 标记）',
+      d1FreshLookup.status === 200 &&
+        d1FreshBody.status === 'finished' &&
+        (d1FreshBody.outcome?.content ?? '').includes('R4_LIVE_MARKER'),
+    );
+
+    /* ---------- D2/D2b：已存终态（peer 先提交）发布门禁等待跨期与未跨期对照 ---------- */
+
+    const d2Conv = await createConversation(base, authA);
+    check('R4-D 前置：已存终态对照会话已建立', d2Conv.status === 201);
+
+    async function storedPublishProbe(
+      tag: string,
+      requestId: string,
+      body: string,
+      expire: boolean,
+    ): Promise<{
+      waitObserved: boolean;
+      rowState: string;
+      outcomeText: string;
+      validAtWait: boolean;
+      expired: boolean;
+      parsed: ReturnType<typeof parseLines>;
+      calls: number;
+    }> {
+      const db = database;
+      const racer = r2Racer;
+      const lock = r2Lock;
+      const modelStub = stub;
+      if (db === null || racer === null || lock === null || modelStub === null) {
+        throw new Error('r4 stored probe unavailable');
+      }
+      const session = await directSession(db, facts.teacherA.id, 600);
+      const tokenHash = hashSessionToken(session.token);
+      const locked = deferred();
+      const gate = deferred();
+      const release = deferred();
+      gates.push(gate.resolve, release.resolve);
+      modelStub.register(tag, [
+        { content: actionRead('get_observation', { observation_id: facts.observationA }) },
+        {
+          prepare: async () => {
+            const rows = await db.query<{ id: string; owner_instance: string }>(
+              'SELECT id, owner_instance FROM yaya_runs WHERE client_request_id = $1',
+              [requestId],
+            );
+            const run = rows.rows[0];
+            if (!run) throw new Error('r4 stored run not found');
+            // 可信 peer 先以真实 finalize 原语提交 answered 终态，再占 run 锁：
+            // 本 run 的 finalize 必然停在 run 锁上，且引擎在下一异步边界按 run_replaced 停止。
+            const peer = await finalizeYayaRun(run.id, run.owner_instance, {
+              kind: 'answered',
+              content: `R4_STORED_MARKER ${requestId} 不应发布。`,
+              sources: [],
+            });
+            if (peer === null) throw new Error('r4 peer terminal not committed');
+            await lock.query('BEGIN');
+            await lock.query('SELECT id FROM yaya_runs WHERE id = $1 FOR UPDATE', [run.id]);
+            locked.resolve();
+            void (async () => {
+              await release.promise;
+              await lock.query('COMMIT').catch(() => undefined);
+            })();
+          },
+          hold: gate.promise,
+          content: actionAnswer('R4_STORED_ENGINE_MARKER 不应发布。'),
+        },
+      ]);
+      const callsBefore = modelStub.total;
+      const responsePromise = postRun(
+        base,
+        { cookie: session.cookie, csrf: session.csrf },
+        d2Conv.conversation_id,
+        body,
+      );
+      await locked.promise;
+      // 同 D1：收紧 TTL 必须先于 finalize 的 verify（会话 FOR SHARE 挡行更新），
+      // 且要在 run 锁放行之前完成，使到期落在发布门禁的来源等待窗口内。
+      if (expire) await expireWithin(tokenHash, 6);
+      gate.resolve();
+      // run 锁被占：抢住 childA 必须先于 run 锁放行，放行后发布门禁的来源核验必然等待
+      await racer.query('BEGIN');
+      await racer.query('SELECT id FROM children WHERE id = $1 FOR UPDATE', [facts.childA]);
+      release.resolve();
+      const waitObserved = await waitForBlockedBy(r2RacerPid, 10_000);
+      const row = await db.query<{ state: string; outcome: string }>(
+        "SELECT state, outcome::text AS outcome FROM yaya_runs WHERE client_request_id = $1",
+        [requestId],
+      );
+      const validAtWait = await sessionValidNow(tokenHash);
+      const expired = expire ? await waitSessionExpired(tokenHash, 20_000) : false;
+      await racer.query('COMMIT');
+      const parsed = parseLines(await openNdjson(await responsePromise).collect());
+      return {
+        waitObserved,
+        rowState: row.rows[0]?.state ?? '',
+        outcomeText: row.rows[0]?.outcome ?? '',
+        validAtWait,
+        expired,
+        parsed,
+        calls: modelStub.total - callsBefore,
+      };
+    }
+
+    const d2Id = `r4-stored-${randomUUID()}`;
+    const d2Body = runBody({
+      conversation_id: d2Conv.conversation_id,
+      client_request_id: d2Id,
+      user_text: '[app1:r4-stored-expire] 已存终态发布等待跨期',
+      expected_conversation_revision: d2Conv.revision,
+    });
+    const d2Probe = await storedPublishProbe('[app1:r4-stored-expire]', d2Id, d2Body, true);
+    check(
+      'R4-D stored：已存终态已提交且发布来源核验实测等待（等待开始时会话有效）',
+      d2Probe.waitObserved &&
+        d2Probe.rowState === 'terminal' &&
+        d2Probe.outcomeText.includes('R4_STORED_MARKER') &&
+        d2Probe.validAtWait,
+    );
+    check('R4-D stored：放行前会话已自然到期', d2Probe.expired);
+    check(
+      'R4-D stored：到期后不发布已存正文（无 answer/标记，唯一 run_end stopped session_invalid）',
+      d2Probe.parsed.allParsed &&
+        d2Probe.parsed.verdict.ok &&
+        !d2Probe.parsed.events.some((event) => event.type === 'answer') &&
+        d2Probe.parsed.verdict.outcome.kind === 'stopped' &&
+        d2Probe.parsed.verdict.outcome.reason === 'session_invalid',
+    );
+    check(
+      'R4-D stored：已提交 peer 终态未被覆盖且未重复派发（库内标记仍在，模型恰 2 次）',
+      d2Probe.outcomeText.includes('R4_STORED_MARKER') && d2Probe.calls === 2,
+    );
+
+    const d2bId = `r4-stored-ok-${randomUUID()}`;
+    const d2bBody = runBody({
+      conversation_id: d2Conv.conversation_id,
+      client_request_id: d2bId,
+      user_text: '[app1:r4-stored-ok] 已存终态发布未跨期对照',
+      expected_conversation_revision: d2Conv.revision,
+    });
+    const d2bProbe = await storedPublishProbe('[app1:r4-stored-ok]', d2bId, d2bBody, false);
+    check(
+      'R4-D 对照：已存终态发布等待未跨期 → 正常发布（answered + 已存标记）',
+      d2bProbe.waitObserved &&
+        d2bProbe.validAtWait &&
+        d2bProbe.parsed.allParsed &&
+        d2bProbe.parsed.verdict.ok &&
+        d2bProbe.parsed.verdict.outcome.kind === 'answered' &&
+        d2bProbe.parsed.events.some(
+          (event) => event.type === 'answer' && event.content.includes('R4_STORED_MARKER'),
+        ),
+    );
+
+    /* ---------- D3：GET 原 run 恢复来源核验等待期间到期 ---------- */
+
+    const d3Session = await directSession(database, facts.teacherA.id, 600);
+    const d3TokenHash = hashSessionToken(d3Session.token);
+    await r2Racer.query('BEGIN');
+    await r2Racer.query('SELECT id FROM children WHERE id = $1 FOR UPDATE', [facts.childA]);
+    await expireWithin(d3TokenHash, 6);
+    const d3Pending = lookupRun(base, d3Session, d2Conv.conversation_id, d2Id);
+    const d3WaitObserved = await waitForBlockedBy(r2RacerPid, 10_000);
+    const d3ValidAtWait = await sessionValidNow(d3TokenHash);
+    const d3Expired = await waitSessionExpired(d3TokenHash, 20_000);
+    check(
+      'R4-D lookup：恢复来源核验实测等待、开始时有效、放行前到期',
+      d3WaitObserved && d3ValidAtWait && d3Expired,
+    );
+    await r2Racer.query('COMMIT');
+    const d3Response = await d3Pending;
+    const d3Text = await d3Response.text();
+    check(
+      'R4-D lookup：到期后拒绝旧正文（401 unauthenticated，无已存标记）',
+      d3Response.status === 401 && !d3Text.includes('R4_STORED_MARKER'),
+    );
+
+    /* ---------- D4：同 client_request_id 的终态回放等待期间到期 ---------- */
+
+    const d4Session = await directSession(database, facts.teacherA.id, 600);
+    const d4TokenHash = hashSessionToken(d4Session.token);
+    await r2Racer.query('BEGIN');
+    await r2Racer.query('SELECT id FROM children WHERE id = $1 FOR UPDATE', [facts.childA]);
+    await expireWithin(d4TokenHash, 6);
+    const d4Pending = postRun(base, d4Session, d2Conv.conversation_id, d2Body);
+    const d4WaitObserved = await waitForBlockedBy(r2RacerPid, 10_000);
+    const d4ValidAtWait = await sessionValidNow(d4TokenHash);
+    const d4Expired = await waitSessionExpired(d4TokenHash, 20_000);
+    check(
+      'R4-D 回放：同键回放来源核验实测等待、开始时有效、放行前到期',
+      d4WaitObserved && d4ValidAtWait && d4Expired,
+    );
+    await r2Racer.query('COMMIT');
+    const d4Response = await d4Pending;
+    const d4Text = await d4Response.text();
+    check(
+      'R4-D 回放：到期后拒绝回放过旧内容（401 unauthenticated，无已存标记）',
+      d4Response.status === 401 && !d4Text.includes('R4_STORED_MARKER'),
+    );
+
+    /* ---------- D5 对照：同 owner 新会话对已存终态的合法只读恢复 ---------- */
+
+    const d5Fresh = await directSession(database, facts.teacherA.id);
+    const d5Lookup = await lookupRun(base, d5Fresh, d2Conv.conversation_id, d2Id);
+    const d5Body = (await d5Lookup.json()) as { status?: string; outcome?: { content?: string } };
+    check(
+      'R4-D 对照：同 owner 新会话合法恢复已存终态（finished + 标记）',
+      d5Lookup.status === 200 &&
+        d5Body.status === 'finished' &&
+        (d5Body.outcome?.content ?? '').includes('R4_STORED_MARKER'),
+    );
+
     /* ============================== 中断恢复标记 ============================== */
 
     await database.query(

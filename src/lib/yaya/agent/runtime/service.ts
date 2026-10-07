@@ -239,11 +239,22 @@ async function runTerminalPresentable(
       { run_id: run.run_id, identity, sources: [], image_ids: [] },
       { principal },
     );
-    return verdict.ok;
+    if (!verdict.ok) return false;
   } catch {
     // 查询路径重核不可用：保守不展示旧内容
     return false;
   }
+  // R4：来源重核会等待 children/历史/图片等资源锁，等待可能跨过会话自然到期；
+  // 进入时的 principal 与 session_valid=true 只代表核验开始时有效。全部异步核验完成后
+  // 按当前事实再核一次身份（复用 AUTH 私有读守门与错误语义，与引擎边界在重核收尾处
+  // 再次 guardRun 的规则一致），绝不把旧身份快照当成此刻仍有效。
+  try {
+    await withPrivateRead(carrier, async () => undefined);
+  } catch (error) {
+    if (error instanceof AccountsError) throw error;
+    return false;
+  }
+  return true;
 }
 
 /** 终局事件只能从**已持久化裁决**的终态构造，保证事件流与库逐字一致 */

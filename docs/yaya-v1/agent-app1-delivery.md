@@ -367,3 +367,81 @@ harness/package/lock 未改；模型调用保持事务外；API 流仍唯一一�
 分层同 §9/§10：真实 next dev HTTP、真实 AUTH/PG/DATA/READ1/sharp+本地对象根、两连接真实行锁交错；
 模型替身为本地 StepFun 协议服务（真实 `llm.ts` 路径）；真实 provider/搜索/S3/托管库请求 0。
 NOT_RUN 同 §7：真实模型质量、真实浏览器、生产迁移/部署、代理长连接仍不在本轮。
+
+## 12. R4 返修：终态提交后，发布/恢复门禁的等待跨过会话到期
+
+起点 `4631fc069e6dab00896b304c5df93a5aaa4124c6`（主评审 R3 报告 P1：发布门禁 `publishableOutcome` 进入
+`withPrivateRead` 后，`runTerminalPresentable` 的来源重核等待（children/历史/图片锁）跨过会话自然到期，
+仍发布正文/已存终态）。只改 APP1 runtime 的 `service.ts`、专属检查与本文件；**无 DDL 变更**；冻结
+types/API0/内核/LLM/AUTH/DATA/MEDIA/READ1/harness/package/lock 未改；不新增认证框架/状态码/查询第六态/
+全局锁或第二套授权规则；未回滚 R3 三项修复、未重做 C2 或 Agent 内核；不把只允许 active run 的保存钩子
+用于已存终态；模型调用保持事务外；流保持合法、单一一致终局（不先发 answer 再改 stopped）。
+
+### 12.1 RED→GREEN
+
+先按真实时序反例入库（真实终态提交后，发布/恢复的来源核验用独立连接持 child 行锁实测等待，
+等待开始时会话有效、放行前用真实墙钟到期），在起点实测 RED：`178/182`，失败 4 项（live 发布、
+已存终态发布、GET 恢复、同键回放）；原 164 项全部保留通过。在共享可呈现边界修一处根因后 GREEN：
+`182/182`，`failures: []`，连续两轮干净实跑（run_id `agent-app1-muxvstta-ea1adf4b`、
+`agent-app1-muxvxnr8-ab76bfc0`；插桩期一轮亦 182/182，`agent-app1-muxvman0-dd6f0fb3`）。
+调试期临时插桩（stage 标记、`SET lock_timeout`）已全部移除并复跑确认。
+
+| 场景 | RED（R4 反例实测） | GREEN（R4 实测） |
+|---|---|---|
+| live 发布（D1） | 自身 finalize 已提交后，发布门禁的来源重核等待 childA 共享锁；等待期会话到期，放行后仍发 answer + 合成私域标记 | 全部来源异步核验完成后按当前事实再核身份（AUTH 只读守门）；到期 → `stopped(session_invalid)`、无 answer；已提交 answered 记录与回执不变、模型恰 2 次 |
+| 已存终态发布（D2） | 可信 peer 先提交 answered 终态，本 run finalize 停在 run 锁；放行后发布门禁等待来源锁期间到期，仍发布 peer 标记 | 同一共享守门：到期 → `stopped(session_invalid)`、无标记；库内 peer 终态不变；对照（未跨期）正常发布标记 |
+| GET 恢复（D3） | 查询恢复的来源核验等待 childA 期间到期，放行后仍返回旧正文（200 + 标记） | 到期 → `401 unauthenticated`、无标记（不冒充 missing/空数据/成功） |
+| 同键回放（D4） | 同 `client_request_id` 终态回放等待期间到期，放行后仍回放旧内容 | 到期 → `401 unauthenticated`、无标记 |
+| 正向对照 | — | 同 owner 新会话合法恢复（200 + 标记）；过期令牌查询 401；原 164 项（A/B/C 与全部回归）通过 |
+
+### 12.2 实现要点
+
+- `service.ts::runTerminalPresentable`（live/stored/fallback 发布、GET 恢复、同键回放共用的唯一可呈现边界）：
+  来源层级重核（`revalidateYayaRunContext`，含 children/历史/图片锁等待）完成后，**再** 以 `withPrivateRead(carrier)`
+  按当前事实核当前会话/账号/身份（复用既有 AUTH 私有读守门与错误语义；与引擎边界在重核收尾处再次 `guardRun`
+  的既有规则一致）。`AccountsError` 原样抛出：发布路径按既有 `publishableOutcome` 映射落到 `session_invalid` 等；
+  查询/回放路径按既有 401/403 语义；非 AUTH 异常保守不可呈现。
+- 进入时的 principal 与 `session_valid=true` 仅作核验输入，不再作为发布/恢复时刻的身份依据；合法终态与
+  合法恢复不受影响（不判 `run_replaced`、不关闭终态发布）。
+
+### 12.3 专属检查装置要点（新增 18 项，164→182）
+
+- **D1（live 发布跨期）**：`directSession` TTL 先收紧到 6s、**先于** finalize 的 verify（其会话 FOR SHARE 会挡
+  行更新、run 锁/来源锁交错会让测试自锁——插桩实测抓到并修正）；等 answer 的 `action_parsed` 后：childC 行锁
+  把 finalize 卡在来源重核（同 R3 锁序），run 锁放行后 finalize 提交；racer2 排在 finalize 的 childA 共享锁
+  之后接住 childA → 发布门禁来源核验实测等待（`pg_locks` 未授予 + `pg_blocking_pids` 精确指向阻塞方）。
+  等待开始时会话有效、放行前到期；到期后无 answer/标记、唯一 `run_end stopped session_invalid`；
+  库内 answered+标记不变、模型恰 2 次；过期令牌查询 401；同 owner 新会话恢复 200+标记。
+- **D2/D2b（已存终态发布）**：peer 以真实 `finalizeYayaRun` 先提交终态、run 锁占位（本 run finalize 停在锁上、
+  引擎按 `run_replaced` 停止）；racer 持 childA；放行后发布门禁实测等待。到期版拒绝发布（无标记、库内 peer
+  终态不变）；未跨期对照正常发布标记。
+- **D3（GET 恢复跨期）**：对已存终态 run 实测恢复来源等待期间到期 → 401 unauthenticated、无标记。
+- **D4（同键回放跨期）**：同 `client_request_id` 同内容回放，等待期间到期 → 401、无标记。
+- **D5 对照**：同 owner 新会话合法恢复已存终态（finished + 标记）。
+
+### 12.4 R4 文件清单（在 R3 五文件基础上）
+
+| 文件 | 变更 |
+|---|---|
+| `src/lib/yaya/agent/runtime/service.ts` | `runTerminalPresentable`：全部来源异步核验完成后按当前事实再核身份（共享边界单点修复，+13 行） |
+| `scripts/yaya/check-agent-app1.ts` | R4 正反例 18 项（164→182）：live/stored 发布、GET 恢复、同键回放的提交后到期与正向对照 |
+| `docs/yaya-v1/agent-app1-delivery.md` | 本 R4 章节 |
+
+`context.ts`/`identity.ts`/`store.ts`、迁移与表结构本轮未改。
+
+### 12.5 R4 验收（本候选实跑）
+
+| 检查 | 结果 |
+|---|---|
+| 专属验收 | **182/182** 连续两轮干净实跑，`failures: []`，清理闸门通过 |
+| `pnpm validate` / `pwsh scripts/build.ps1` | 通过 |
+| API0 `check-api-contract` / Agent engine | 57/57 / 29/29（`real_model_requests: 0`） |
+| 契约回归 `check-contract` / `check-preflight` | 68/68 / 15/15 |
+| `git diff --check` | 通过 |
+
+分层：同一 182 套件（真实 next dev HTTP、一次性隔离 PostgreSQL、真实 AUTH 会话/CSRF、真实两连接行锁交错、
+本地 StepFun 协议替身模型走真实 `llm.ts` 路径）；真实 provider/搜索/S3/托管库请求 0，不新增 20 次真实额度。
+主评审旧诊断 `publish-expiry-r3.ts` 与 `probes.ts` C 段未在本轮运行或作为判据（前者为 R3 观测用；后者时序已不适用）。
+仓库内不存在 `RTK.md`（按纪律记录，未补造）。
+
+NOT_RUN 同 §7/§9：真实模型质量、真实浏览器、生产迁移/部署、代理长连接；DATA/TOOLS/UI 正式组合接线不在本轮。
