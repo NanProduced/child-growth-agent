@@ -2,6 +2,15 @@ import { HeaderUtils } from 'coze-coding-dev-sdk';
 
 const PROJECT = '7690843235199139866';
 
+/** Server-only per-run cap, including retries; never controlled by chat input. */
+export function configuredChatModelCallLimit(ceiling: number): number {
+  const raw = process.env.YAYA_CHAT_MAX_MODEL_CALLS;
+  if (raw === undefined || raw === '') return ceiling;
+  const limit = Number(raw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > ceiling) throw Error('聊天请求上限配置不合法。');
+  return limit;
+}
+
 /** Explicit compatibility with the platform-injected workload protocol.
  * No CLI/PAT extraction, environment mutation, private SDK fields or user keys.
  */

@@ -2,19 +2,23 @@
 import assert from 'node:assert/strict';
 import { createLlmYayaModelGateway } from '../../src/lib/yaya/agent/gateway';
 import { invokeChatLlm, parseCozeModelWire } from '../../src/lib/llm';
-import { platformWorkloadHeaders } from '../../src/lib/coze-runtime';
+import { platformWorkloadHeaders, configuredChatModelCallLimit } from '../../src/lib/coze-runtime';
 import { S3MediaObjectStore } from '../../src/lib/media/object-store-s3';
 import { loadMediaStorageConfig } from '../../src/lib/media/config';
 import { sha256Hex } from '../../src/lib/media/object-store';
 import { Readable } from 'node:stream';
 
-const keys = ['YAYA_PLATFORM_AUTH','COZE_PROJECT_ID','COZE_PROJECT_ENV','COZE_WORKLOAD_IDENTITY_API_KEY','YAYA_CHAT_TEXT_PROVIDER','YAYA_CHAT_IMAGE_PROVIDER','YAYA_COZE_MODEL','STEPFUN_API_KEY','STEPFUN_BASE_URL','LLM_PROVIDER'];
+const keys = ['YAYA_CHAT_MAX_MODEL_CALLS','YAYA_PLATFORM_AUTH','COZE_PROJECT_ID','COZE_PROJECT_ENV','COZE_WORKLOAD_IDENTITY_API_KEY','YAYA_CHAT_TEXT_PROVIDER','YAYA_CHAT_IMAGE_PROVIDER','YAYA_COZE_MODEL','STEPFUN_API_KEY','STEPFUN_BASE_URL','LLM_PROVIDER'];
 const prior = new Map(keys.map(k => [k, process.env[k]]));
 const originalFetch = globalThis.fetch;
 let checks = 0;
 const ok = (value: unknown) => { assert.ok(value); checks++; };
 async function main() {
   try {
+    delete process.env.YAYA_CHAT_MAX_MODEL_CALLS; ok(configuredChatModelCallLimit(8) === 8);
+    process.env.YAYA_CHAT_MAX_MODEL_CALLS = '2'; ok(configuredChatModelCallLimit(8) === 2);
+    for (const invalid of ['0', '9', '1.5', 'bad']) { process.env.YAYA_CHAT_MAX_MODEL_CALLS = invalid; assert.throws(() => configuredChatModelCallLimit(8)); checks++; }
+    delete process.env.YAYA_CHAT_MAX_MODEL_CALLS;
     process.env.YAYA_PLATFORM_AUTH='workload'; process.env.COZE_PROJECT_ID='7690843235199139866'; process.env.COZE_PROJECT_ENV='DEV'; process.env.COZE_WORKLOAD_IDENTITY_API_KEY='offline-workload';
     const headers=platformWorkloadHeaders('model', {'x-run-mode':'test_run','authorization':'forged','cookie':'private'});
     ok(headers.Authorization==='Bearer offline-workload' && !('cookie' in headers) && !('x-run-mode' in headers));

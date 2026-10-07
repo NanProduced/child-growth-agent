@@ -10,6 +10,7 @@
  *   不进入事件（停止详情统一 safeYayaStopDetail）。
  */
 import { randomUUID } from 'node:crypto';
+import { configuredChatModelCallLimit } from '@/lib/coze-runtime';
 
 import { NextResponse } from 'next/server';
 
@@ -379,7 +380,7 @@ async function driveRun(input: {
         if (TERMINAL_AGENT_EVENT_TYPES.has(event.type)) return;
         writeAgent(event);
       },
-    });
+    }, { ...DEFAULT_YAYA_AGENT_LIMITS, max_model_calls: configuredChatModelCallLimit(DEFAULT_YAYA_AGENT_LIMITS.max_model_calls) });
     let stored: YayaRunRecord | null = null;
     let finalizeThrew = false;
     let finalizationRejected: YayaRunOutcome | null = null;
