@@ -44,7 +44,7 @@ import {
   type YayaChatRecoveryMark,
 } from "../../src/lib/yaya/chat-bind-contract";
 import type { TransactionClient } from "../../src/storage/database/pg-client";
-import { POST as conversationsPost } from "../../src/app/api/yaya/conversations/route";
+import { GET as conversationsListGet, POST as conversationsPost } from "../../src/app/api/yaya/conversations/route";
 import { GET as conversationGet, PATCH as conversationPatch } from "../../src/app/api/yaya/conversations/[id]/route";
 import { GET as messagesGet, POST as messagesPost } from "../../src/app/api/yaya/conversations/[id]/messages/route";
 
@@ -476,12 +476,18 @@ async function revisionOf(token: string, conversationId: string): Promise<number
 async function getMessages(
   token: string,
   conversationId: string,
-): Promise<{ status: number; text: string; messages: SavedMessageView[] }> {
+): Promise<{
+  status: number;
+  text: string;
+  messages: SavedMessageView[];
+  conversation: Record<string, unknown> | null;
+}> {
   const res = await respond(
     messagesGet(req(token, "GET", undefined, `/api/yaya/conversations/${conversationId}/messages`), params(conversationId)),
   );
   const messages = (res.json.messages ?? []) as unknown as SavedMessageView[];
-  return { status: res.status, text: res.text, messages };
+  const conversation = (res.json.conversation ?? null) as Record<string, unknown> | null;
+  return { status: res.status, text: res.text, messages, conversation };
 }
 
 interface ColumnShape {
@@ -1188,6 +1194,151 @@ async function r1IntegrityStage(database: Client, teacherA: Session, classA: str
   check("D20 带版本 user 保存仍成功", versionOk === null && (await countMessages(convVersion)) === 1);
 }
 
+/** 同一消息的三个对外整包（消息列表 / 会话详情 / 会话列表）标题投影断言（R2） */
+async function assertTitlePackages(
+  token: string,
+  conversationId: string,
+  title: string,
+  body: string,
+  label: string,
+  restricted: boolean,
+): Promise<void> {
+  const msgs = await getMessages(token, conversationId);
+  const msgConv = msgs.conversation ?? {};
+  const detail = await conversationDetail(token, conversationId);
+  const list = await respond(conversationsListGet(req(token, "GET", undefined, "/api/yaya/conversations")));
+  const listConv = ((list.json.conversations ?? []) as Array<Record<string, unknown>>).find(
+    (entry) => entry.conversation_id === conversationId,
+  );
+  if (restricted) {
+    check(
+      `${label} 消息列表整包不含原标题与正文`,
+      !msgs.text.includes(title) && !msgs.text.includes(body),
+    );
+    check(
+      `${label} 消息列表标题受限`,
+      msgConv.projected_title !== title && msgConv.title_restricted === true,
+    );
+    check(
+      `${label} 会话详情标题受限`,
+      detail.projected_title !== title && detail.title_restricted === true,
+    );
+    check(
+      `${label} 会话列表整包不含原标题且受限`,
+      list.status === 200 &&
+        !list.text.includes(title) &&
+        listConv?.projected_title !== title &&
+        listConv?.title_restricted === true,
+    );
+  } else {
+    check(
+      `${label} 消息列表标题可读`,
+      msgs.status === 200 &&
+        msgs.text.includes(title) &&
+        msgConv.projected_title === title &&
+        msgConv.title_restricted === false,
+    );
+    check(
+      `${label} 会话详情标题可读`,
+      detail.projected_title === title && detail.title_restricted === false,
+    );
+    check(
+      `${label} 会话列表标题可读`,
+      list.status === 200 && listConv?.projected_title === title && listConv?.title_restricted === false,
+    );
+  }
+}
+
+/**
+ * R2 返修反例（REVIEW-R1.md 剩余 P1）：恢复标记与消息行关联不符时，
+ * 正文已受限但派生标题仍经三个对外整包旁路返回。分别测坏 run 关联、
+ * 坏 owner 关联、损坏标记 + 合法对照；不删除原 167 项覆盖。
+ */
+async function r2TitleStage(database: Client, teacherA: Session, classA: string): Promise<void> {
+  stage("D21 恢复关联核验与派生标题旁路");
+  const childR2 = randomUUID();
+  await database.query(
+    "INSERT INTO children (id,name,gender,birth_date,class_name) VALUES ($1,'DCB1 R2 child','男','2024-02-01','fixture')",
+    [childR2],
+  );
+  await database.query(
+    "INSERT INTO child_class_enrollments (child_id,class_id,start_date) VALUES ($1,$2,'2026-01-01')",
+    [childR2, classA],
+  );
+
+  const variants: { slug: string; label: string; title: string; body: string; tamper?: { sql: string; value?: string } }[] = [
+    { slug: "ctrl", label: "D21 合法对照", title: "D21_CTRL_TITLE", body: "D21_CTRL_BODY" },
+    {
+      slug: "badrun",
+      label: "D21 坏run关联",
+      title: "D21_BADRUN_TITLE",
+      body: "D21_BADRUN_BODY",
+      tamper: {
+        sql: "UPDATE yaya_messages SET recovery_mark = jsonb_set(recovery_mark,'{run,run_id}','\"d21-tampered-run\"') WHERE conversation_id = $1 AND role = 'assistant'",
+      },
+    },
+    {
+      slug: "badowner",
+      label: "D21 坏owner关联",
+      title: "D21_BADOWNER_TITLE",
+      body: "D21_BADOWNER_BODY",
+      tamper: {
+        sql: "UPDATE yaya_messages SET recovery_mark = jsonb_set(recovery_mark,'{owner_account_id}',to_jsonb($2::text)) WHERE conversation_id = $1 AND role = 'assistant'",
+        value: randomUUID(),
+      },
+    },
+    {
+      slug: "corrupt",
+      label: "D21 损坏标记",
+      title: "D21_CORRUPT_TITLE",
+      body: "D21_CORRUPT_BODY",
+      tamper: {
+        sql: "UPDATE yaya_messages SET recovery_mark = '{\"bogus\":true}'::jsonb WHERE conversation_id = $1 AND role = 'assistant'",
+      },
+    },
+  ];
+
+  for (const variant of variants) {
+    const conv = await createConversation(teacherA.token);
+    const fragmentId = `f-d21-${variant.slug}`;
+    const saved = await tryRunSave(
+      teacherA.principal,
+      {
+        ...terminalInput(conv, `${RUN}-t21-${variant.slug}`),
+        fragments: [frag(fragmentId, variant.body, [childSource(childR2)], false, "model_text", `D21_${variant.slug}_LABEL`)],
+        recovery: { actor_account_id: teacherA.accountId, proposal: null, operations: [] },
+      },
+      `${variant.label} 内部原语可用`,
+    );
+    if (saved === null) return;
+    const revision = await revisionOf(teacherA.token, conv);
+    const renamed = await respond(
+      conversationPatch(
+        req(
+          teacherA.token,
+          "PATCH",
+          { title: variant.title, expected_revision: revision, title_source_fragments: [fragmentId] },
+          `/api/yaya/conversations/${conv}`,
+        ),
+        params(conv),
+      ),
+    );
+    check(`${variant.label} 改名 200`, renamed.status === 200);
+    if (variant.tamper) {
+      const values = variant.tamper.value === undefined ? [conv] : [conv, variant.tamper.value];
+      await database.query(variant.tamper.sql, values);
+    }
+    await assertTitlePackages(
+      teacherA.token,
+      conv,
+      variant.title,
+      variant.body,
+      variant.label,
+      variant.tamper !== undefined,
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const cleanupIssues: string[] = [];
   const guard = await startModelRequestGuard();
@@ -1264,6 +1415,7 @@ async function main(): Promise<void> {
     await concurrencyStage(teacherA);
     await channelDefaultsStage(teacherA);
     await r1IntegrityStage(database, teacherA, classA);
+    await r2TitleStage(database, teacherA, classA);
 
     check("模型网关未被调用", guard.hits === 0);
   } finally {

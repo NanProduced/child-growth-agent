@@ -208,14 +208,19 @@ function parseRecoveryMark(value: unknown): YayaChatRecoveryMark | null {
   return parsed.ok ? parsed.value : null;
 }
 
-export async function projectMessageRow(
-  client: TransactionClient,
-  principal: Principal,
-  schoolId: string,
-  row: YayaMessageRow,
-): Promise<YayaProjectedMessageView> {
-  // 恢复标记：结构解析 ≠ 关联证明（P1-B）——必须与行 owner/conversation/run 一致，
-  // 缺失、损坏或关联不符一律 null，且绑定按无法核验降级；不改写原行。
+/**
+ * 行级绑定 / 恢复关联核验——正文与标题共用的单一规则（R2）：
+ * 结构解析 ≠ 关联证明，标记必须与行 owner/conversation/run 一致；
+ * 缺失、损坏或关联不符 → recovery 下发 null 且绑定降 unknown。
+ * 不改写原行、不回填、不引入第二套授权。
+ */
+function resolveRowBindingIntegrity(row: {
+  recovery_mark: unknown;
+  owner_account_id: string;
+  conversation_id: string;
+  run_id: string | null;
+  binding_state: string | null;
+}): { recovery: YayaChatRecoveryMark | null; bindingState: string | null } {
   const structuralRecovery = parseRecoveryMark(row.recovery_mark);
   const hasMark = row.recovery_mark !== null && row.recovery_mark !== undefined;
   const recoveryLinked =
@@ -224,12 +229,19 @@ export async function projectMessageRow(
     structuralRecovery.owner_account_id === row.owner_account_id &&
     structuralRecovery.run !== null &&
     structuralRecovery.run.run_id === row.run_id;
-  const recovery = recoveryLinked ? structuralRecovery : null;
-  const bindingState = effectiveYayaBindingState(
-    row.binding_state,
-    row.run_id,
-    hasMark && !recoveryLinked,
-  );
+  return {
+    recovery: recoveryLinked ? structuralRecovery : null,
+    bindingState: effectiveYayaBindingState(row.binding_state, row.run_id, hasMark && !recoveryLinked),
+  };
+}
+
+export async function projectMessageRow(
+  client: TransactionClient,
+  principal: Principal,
+  schoolId: string,
+  row: YayaMessageRow,
+): Promise<YayaProjectedMessageView> {
+  const { recovery, bindingState } = resolveRowBindingIntegrity(row);
   const parsed = parseStoredFragments(row.fragments);
   const attachmentIds = parseStringArray(row.attachment_ids);
   const corrupt = parsed.corrupt || attachmentIds === null;
@@ -333,10 +345,17 @@ export async function projectConversationView(
   const messages = await client.query<
     Pick<
       YayaMessageRow,
-      "id" | "fragments" | "owner_account_id" | "conversation_id" | "role" | "binding_state" | "run_id"
+      | "id"
+      | "fragments"
+      | "owner_account_id"
+      | "conversation_id"
+      | "role"
+      | "binding_state"
+      | "run_id"
+      | "recovery_mark"
     >
   >(
-    `SELECT id, fragments, owner_account_id, conversation_id, role, binding_state, run_id FROM yaya_messages
+    `SELECT id, fragments, owner_account_id, conversation_id, role, binding_state, run_id, recovery_mark FROM yaya_messages
       WHERE conversation_id = $1 AND deleted_at IS NULL`,
     [view.conversation_id],
   );
@@ -351,7 +370,8 @@ export async function projectConversationView(
       if (found) {
         matched = found;
         matchedRole = message.role;
-        matchedBinding = effectiveYayaBindingState(message.binding_state, message.run_id);
+        // 与正文同一完整性规则（R2）：标题路径也核验恢复标记关联，不只看 run_id 非空
+        matchedBinding = resolveRowBindingIntegrity(message).bindingState;
         break;
       }
     }
