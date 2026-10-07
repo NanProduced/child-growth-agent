@@ -9,6 +9,7 @@
  */
 import type { TransactionClient } from '@/storage/database/pg-client';
 
+import { assertTeacherTargetEligibleWithClient } from '@/lib/accounts/repository';
 import { parseResourceRef } from '../../data/rows';
 import { YayaDataError, type YayaItemResourceRef } from '../../storage-types';
 import type { YayaDomainPayload } from '../../types';
@@ -121,5 +122,10 @@ export async function assertProposalItemBinding(
   const declaredRef = parseResourceRef(item.resource_ref);
   if (declaredRef === null || !sameResourceRef(declaredRef, derived.ref)) {
     throw new YayaDataError('invalid_request', '提案条目标与 payload 目标不一致。');
+  }
+  // 目标账号资格守门（先于业务锁）：不存在目标与非教师目标按既有 AUTH 语义拒绝
+  // （not_found / forbidden_role）；业务原语的锁后复核保留。
+  if (payload.kind === 'manage_teacher' && payload.teacher_account_id) {
+    await assertTeacherTargetEligibleWithClient(client, payload.teacher_account_id);
   }
 }

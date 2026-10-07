@@ -409,6 +409,27 @@ async function lockTeacherAccount(
 }
 
 /**
+ * 目标账号资格预检（不取锁）：与 `lockTeacherAccount` 同一判定口径，
+ * 供 TOOLS 共享绑定边界在取得业务目标锁之前提前拒绝不存在/非教师目标；
+ * `lockTeacherAccount` 的锁后复核保留（锁后角色/状态可能被并发修改，两处缺一不可）。
+ */
+export async function assertTeacherTargetEligibleWithClient(
+  client: TransactionClient,
+  accountId: string,
+): Promise<void> {
+  const found = await client.query<{ role: string; status: string }>(
+    `SELECT role, status FROM app_accounts WHERE id = $1`,
+    [accountId],
+  );
+  const row = found.rows[0];
+  if (!row) throw new AccountNotFoundError();
+  asStatus(row.status);
+  if (asRole(row.role) !== "teacher") {
+    throw new ForbiddenTargetError();
+  }
+}
+
+/**
  * 启停教师的显式 client 原语（TOOLS1 批准执行同一事务内使用）：
  * 停用原子撤销该账号全部会话；响应不包含任何密码/哈希/令牌。
  */
