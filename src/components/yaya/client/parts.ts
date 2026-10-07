@@ -18,6 +18,7 @@ export const YAYA_PART_NAMES = {
   runError: "yaya-run-error",
   historyState: "yaya-history-state",
   historyNote: "yaya-history-note",
+  recovery: "yaya-recovery",
 } as const;
 
 export interface YayaSourcesPartData {

@@ -290,6 +290,33 @@ export async function getProposal(
  * 非 full 的项 `payload=null`；图片引用按业务记录/上传者口径投影（含历史只读元数据）。
  * 内部执行读取仍走 getProposal，不用本函数。
  */
+async function readableTargetDetails(client: TransactionClient, ref: YayaItemResourceRef, payload: YayaDomainPayload): Promise<Record<string, string | null>> {
+  if (payload.kind === 'create_child') {
+    const found = ref.kind === 'class' && ref.class_id === payload.target_class_id ? await client.query<{ name: string }>('SELECT name FROM classes WHERE id=$1', [ref.class_id]) : null;
+    return { target_label: '新成长档案：' + payload.name, child_name: payload.name, class_name: found?.rows[0]?.name ?? null };
+  }
+  if (payload.kind === 'manage_class' && payload.operation === 'create') return { target_label: '新班级：' + payload.name };
+  if (payload.kind === 'manage_teacher') {
+    const found = await client.query<{ display_name: string }>("SELECT display_name FROM app_accounts WHERE id=$1 AND role='teacher'", [payload.teacher_account_id]);
+    return { target_label: found.rows[0]?.display_name ?? null };
+  }
+  if (ref.kind === 'observation') {
+    const found = await client.query<{ child_name: string; raw_text: string; observed_at: string }>('SELECT c.name AS child_name,o.raw_text,o.observed_at::text AS observed_at FROM observations o JOIN children c ON c.id=o.child_id WHERE o.id=$1', [ref.observation_id]);
+    const details = found.rows[0];
+    return details ? { ...details, target_label: details.child_name + ' · ' + details.observed_at + ' 的观察' } : { target_label: null };
+  }
+  if (ref.kind === 'child' || ref.kind === 'transfer') {
+    const found = await client.query<{ name: string }>('SELECT name FROM children WHERE id=$1', [ref.child_id]);
+    const target = ref.kind === 'transfer' ? await client.query<{ name: string }>('SELECT name FROM classes WHERE id=$1', [ref.target_class_id]) : null;
+    return { target_label: found.rows[0]?.name ?? null, child_name: found.rows[0]?.name ?? null, class_name: target?.rows[0]?.name ?? null };
+  }
+  if (ref.kind === 'class' && ref.class_id !== null) {
+    const found = await client.query<{ name: string }>('SELECT name FROM classes WHERE id=$1', [ref.class_id]);
+    return { target_label: found.rows[0]?.name ?? null, class_name: found.rows[0]?.name ?? null };
+  }
+  return { target_label: null };
+}
+
 export async function getProjectedProposal(
   client: TransactionClient,
   principal: Principal,
@@ -315,7 +342,10 @@ export async function getProjectedProposal(
       resource: item.resource,
       resource_ref: item.resource_ref,
     });
+    // 名称和原文仅在当前 full 授权后补查；不进入 payload/digest，也不作为权限依据。
+    const targetDetails = access === 'full' ? await readableTargetDetails(client, ref, item.payload as YayaDomainPayload) : { target_label: null };
     projectedItems.push({
+      ...targetDetails,
       item_key: item.item_key,
       operation_id: item.operation_id,
       target_id: item.target_id,

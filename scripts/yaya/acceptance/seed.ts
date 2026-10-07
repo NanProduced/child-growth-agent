@@ -122,6 +122,8 @@ async function runMigrations(resources: AcceptanceResources): Promise<void> {
     await client.query(fs.readFileSync(path.join(ROOT, "scripts", "upgrade-guide-evidence-v1.sql"), "utf8"));
     await client.query(fs.readFileSync(path.join(ROOT, "scripts", "upgrade-auth-v1.sql"), "utf8"));
     await client.query(fs.readFileSync(path.join(ROOT, "scripts", "upgrade-yaya-v1.sql"), "utf8"));
+    await client.query(fs.readFileSync(path.join(ROOT, "scripts", "upgrade-yaya-runs-v1.sql"), "utf8"));
+    await client.query(fs.readFileSync(path.join(ROOT, "scripts", "upgrade-yaya-chat-bind-v1.sql"), "utf8"));
   } finally {
     await client.end();
   }
@@ -812,7 +814,11 @@ async function seedAll(
     fragments: YayaStoredFragment[],
   ): Promise<void> => {
     const result = await tx((client) =>
-      yayaDataRepository.saveMessage(client, principal, ACCEPTANCE_SCHOOL_ID, {
+      role === "assistant" ? yayaDataRepository.saveRunTerminalMessage(client, principal, ACCEPTANCE_SCHOOL_ID, {
+        conversation_id: conversationId, role: "assistant", message_kind: "text", execution_state: "none", fragments,
+        attachment_ids: [], expected_conversation_revision: revision,
+        run: { run_id: clientMessageId, client_request_id: clientMessageId }, binding_state: "bound",
+      }) : yayaDataRepository.saveMessage(client, principal, ACCEPTANCE_SCHOOL_ID, {
         conversation_id: conversationId,
         client_message_id: clientMessageId,
         role,
@@ -879,9 +885,9 @@ async function seedAll(
     }),
   );
   await tx((client) =>
-    yayaDataRepository.saveMessage(client, principalB, ACCEPTANCE_SCHOOL_ID, {
+    yayaDataRepository.saveRunTerminalMessage(client, principalB, ACCEPTANCE_SCHOOL_ID, {
       conversation_id: conversationB.conversation_id,
-      client_message_id: `${seedId}-b1`,
+      run: { run_id: `${seedId}-b1`, client_request_id: `${seedId}-b1` }, binding_state: "bound",
       role: "assistant",
       message_kind: "text",
       execution_state: "none",

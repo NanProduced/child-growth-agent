@@ -3,7 +3,7 @@
 /**
  * 会话历史列表：新建 / 切换 / 删除（删除二次确认，仅删会话与私有草稿）。
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ThreadListItemPrimitive,
   ThreadListPrimitive,
@@ -92,6 +92,9 @@ function YayaThreadListItem() {
 }
 
 export function YayaThreadList({ className }: { className?: string }) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+  if (!mounted) return <div className={className} aria-busy="true"><p className="p-3 text-sm text-muted-foreground">正在读取历史会话…</p></div>;
   return (
     <ThreadListPrimitive.Root className={className}>
       <div className="flex items-center justify-between px-3 py-2">

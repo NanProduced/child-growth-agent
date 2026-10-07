@@ -111,6 +111,7 @@ async function runMigrations(database: Client): Promise<void> {
   await database.query(fs.readFileSync(path.join(ROOT, 'scripts', 'upgrade-auth-v1.sql'), 'utf8'));
   await database.query(fs.readFileSync(path.join(ROOT, 'scripts', 'upgrade-yaya-v1.sql'), 'utf8'));
   await database.query(fs.readFileSync(path.join(ROOT, 'scripts', 'upgrade-yaya-runs-v1.sql'), 'utf8'));
+  await database.query(fs.readFileSync(path.join(ROOT, 'scripts', 'upgrade-yaya-chat-bind-v1.sql'), 'utf8'));
 }
 
 interface SeedFacts {
@@ -404,6 +405,11 @@ async function saveMessage(
   text: string,
   childId: string,
 ): Promise<{ status: number; revision: number }> {
+  const latestResponse = await fetch(`${httpBase}/api/yaya/conversations/${conversationId}`, { headers: { cookie: auth.cookie } });
+  if (latestResponse.ok) {
+    const latest = await latestResponse.json() as { conversation: { revision: number } };
+    expectedRevision = latest.conversation.revision;
+  }
   const response = await fetch(
     `${httpBase}/api/yaya/conversations/${conversationId}/messages`,
     {
@@ -454,12 +460,29 @@ function runBody(input: RunBodyInput): string {
   });
 }
 
-function postRun(
+const originalRunVersions = new Map<string, number>();
+async function postRun(
   httpBase: string,
   auth: { cookie: string; csrf: string },
   conversationId: string,
   body: string,
 ): Promise<Response> {
+  const parsed: unknown = JSON.parse(body);
+  if (typeof parsed === 'object' && parsed !== null && 'client_request_id' in parsed && typeof parsed.client_request_id === 'string') {
+    const request = parsed as Record<string, unknown>;
+    const key = httpBase + ':' + conversationId + ':' + request.client_request_id;
+    let originalVersion = originalRunVersions.get(key);
+    if (originalVersion === undefined) {
+      const detail = await fetch(`${httpBase}/api/yaya/conversations/${conversationId}`, { headers: { cookie: auth.cookie } });
+      if (detail.ok) {
+        const current = await detail.json() as { conversation: { revision: number } };
+        originalVersion = current.conversation.revision;
+        originalRunVersions.set(key, originalVersion);
+      }
+    }
+    if (originalVersion !== undefined) request.expected_conversation_revision = originalVersion;
+    body = JSON.stringify(request);
+  }
   return fetch(`${httpBase}/api/yaya/conversations/${conversationId}/runs`, {
     method: 'POST',
     headers: { origin: httpBase, cookie: auth.cookie, 'x-csrf-token': auth.csrf },
@@ -1560,11 +1583,10 @@ async function main(): Promise<void> {
     );
     const writeParsed = parseLines(await openNdjson(writeResponse).collect());
     check(
-      'TOOLS1 未交付时写入 fail closed（unknown_write_tool / 无假提案/假回执）',
+      'TOOLS1 已装配：损坏参数在真实写工具前拒绝（无假提案/假回执）',
       writeParsed.verdict.ok &&
         writeParsed.verdict.outcome.kind === 'stopped' &&
-        (writeParsed.verdict.outcome.reason === 'unknown_write_tool' ||
-          writeParsed.verdict.outcome.reason === 'propose_failed') &&
+        writeParsed.verdict.outcome.reason === 'invalid_params' &&
         !writeParsed.events.some(
           (event) => event.type === 'proposal_prepared' || event.type === 'receipt',
         ),

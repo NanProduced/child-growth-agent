@@ -47,7 +47,7 @@ function YayaWorkspaceBody() {
   const threadAvailability = useYayaThreadAvailability();
   const [view, setView] = useState<"thread" | "list">("thread");
   return (
-    <div className="mx-auto flex h-[calc(100dvh-8.5rem)] min-h-[32rem] w-full max-w-[1536px] overflow-hidden rounded-xl border bg-background">
+    <div className="mx-auto flex h-[calc(100dvh-11rem)] min-h-0 w-full max-w-[1536px] overflow-hidden rounded-xl border bg-background xl:h-[calc(100dvh-8.5rem)]">
       <aside className="hidden w-64 shrink-0 flex-col border-r lg:flex">
         <YayaThreadList className="flex min-h-0 flex-1 flex-col" />
       </aside>

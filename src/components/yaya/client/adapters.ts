@@ -242,6 +242,12 @@ export function createYayaChatModelAdapter(store: YayaClientStore, aui: Assistan
 
       try {
         await wiring.waitForWrites();
+        if (wiring.persistedMessageId(lastUser.id) === null) {
+          const history = await yayaGetJson(conversationPath(remoteId, "/messages?limit=200"), conversationMessagesResponseSchema);
+          const saved = history.messages.find(message => message.role === "user" && message.message_id === lastUser.id);
+          if (!saved) throw new YayaApiError(0, "message_unverified", "用户消息尚未核实保存，请重新读取后再发送。");
+          wiring.bindPersistedMessage(lastUser.id, saved.message_id);
+        }
         if (wiring.revision === null) {
           const { conversation } = await yayaGetJson(conversationPath(remoteId), conversationResponseSchema);
           wiring.setRevision(conversation.revision);
@@ -347,6 +353,7 @@ export function createYayaChatModelAdapter(store: YayaClientStore, aui: Assistan
       if (streamed.length === 0 && result.outcome.kind === "answered") {
         streamed.push({ type: "text", id: "answer", text: result.outcome.content, status: { type: "complete" } });
       }
+      wiring.invalidateRevision(); // 服务器终态消息已推进会话版本，下一次写入重新读取。
       return { content: streamed, status: { type: "complete", reason: "stop" } };
     },
   };
@@ -358,6 +365,8 @@ export function createYayaChatModelAdapter(store: YayaClientStore, aui: Assistan
 
 export function createYayaThreadHistoryAdapter(store: YayaClientStore, aui: AssistantClient): ThreadHistoryAdapter {
   const save = async (message: ThreadMessage): Promise<void> => {
+    // 助手/工具消息由 run 终态同事务保存，客户端没有该写入通道。
+    if (message.role !== "user") return;
     const remoteId = await ensureRemoteId(aui);
     if (remoteId === null) return;
     const shape = persistShape(message);
@@ -388,6 +397,7 @@ export function createYayaThreadHistoryAdapter(store: YayaClientStore, aui: Assi
         saveMessageResponseSchema
       );
       wiring.setRevision(result.conversation.revision);
+      wiring.bindPersistedMessage(message.id, result.message.message_id);
     };
     try {
       await attempt();
@@ -413,6 +423,7 @@ export function createYayaThreadHistoryAdapter(store: YayaClientStore, aui: Assi
       const items: ExportedMessageRepository["messages"] = [];
       let parentId: string | null = null;
       for (const view of response.messages) {
+        if (view.role === "user") store.threadWiring(remoteId).bindPersistedMessage(view.message_id, view.message_id);
         const like = projectedToThreadMessageLike(view);
         if (like === null || like.id === undefined) continue;
         items.push({

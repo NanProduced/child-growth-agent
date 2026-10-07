@@ -23,6 +23,7 @@ import {
   YayaToolResultPart,
 } from "./yaya-parts";
 import { YayaProposalCard } from "./yaya-proposal";
+import { YayaRecoveryPart } from './yaya-recovery';
 import { YAYA_PART_NAMES } from "./client/parts";
 
 function AssistantText({ text }: TextMessagePartProps) {
@@ -53,6 +54,7 @@ const DATA_COMPONENTS = {
     [YAYA_PART_NAMES.runError]: YayaRunErrorPart,
     [YAYA_PART_NAMES.historyState]: YayaHistoryStatePart,
     [YAYA_PART_NAMES.historyNote]: YayaHistoryNotePart,
+    [YAYA_PART_NAMES.recovery]: YayaRecoveryPart,
   },
   Fallback: undefined,
 } as const;

@@ -90,6 +90,13 @@ const IMAGE: YayaAuthorizedImage = {
 };
 
 function main(): void {
+  check('prompt/unused-fields-explicit-and-real-invalid-output-still-rejected', () => {
+    assert.ok(YAYA_ACTION_PROTOCOL.includes('answer/clarify：tool 和 params_json 必须为 ""'));
+    assert.ok(YAYA_ACTION_PROTOCOL.includes('read/propose_write：content 必须为 ""，source_refs 必须为 []'));
+    const realFailureShape = { action: 'propose_write', content: '已准备提案，请确认。', tool: 'create_observation', params_json: '{}', source_refs: ['child:synthetic-id'] };
+    assert.equal(yayaAgentActionSchema.safeParse(realFailureShape).success, false);
+    assert.equal(yayaAgentActionSchema.safeParse({ ...realFailureShape, content: '', source_refs: [] }).success, true);
+  });
   check('prompt/scope-tone-and-long-answers', () => {
     assert.ok(YAYA_SYSTEM_PROMPT.includes('保教'));
     assert.ok(YAYA_SYSTEM_PROMPT.includes('温和、专业、克制'));

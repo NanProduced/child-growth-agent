@@ -9,6 +9,7 @@ import { NextRequest } from 'next/server';
 
 import { lookupYayaRun, startYayaRun } from '@/lib/yaya/agent/runtime';
 import { yayaRouteError } from '@/lib/yaya/data';
+import { createPlatformWriteBinding } from '@/lib/yaya/agent/runtime/platform-binding';
 
 export const runtime = 'nodejs';
 
@@ -18,7 +19,7 @@ export async function POST(
 ): Promise<Response> {
   const { id } = await params;
   try {
-    return await startYayaRun(request, id);
+    return await startYayaRun(request, id, { write: (state) => createPlatformWriteBinding(state, request) });
   } catch (error) {
     return yayaRouteError(error);
   }

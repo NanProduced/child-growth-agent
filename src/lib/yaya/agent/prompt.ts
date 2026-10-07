@@ -29,6 +29,8 @@ export const YAYA_SYSTEM_PROMPT = `你是「芽芽」，幼儿园保教工作助
 
 export const YAYA_ACTION_PROTOCOL = `动作协议（每次只输出一个 JSON 对象，不要输出解释文字或代码块标记）：
 {"action":"answer|read|clarify|propose_write","content":"string","tool":"string","params_json":"string","source_refs":["string"]}
+- answer/clarify：tool 和 params_json 必须为 ""；clarify 的 source_refs 必须为 []。
+- read/propose_write：content 必须为 ""，source_refs 必须为 []；不能同时解释、引用或声称操作已准备/保存，提案卡与回执由服务端真实结果显示。
 - answer：直接回答。content 为回答正文；source_refs 只能引用服务端提供的来源 id，没有引用就用空数组。
 - clarify：只在一个具体歧义会改变答案时才提问，content 为要问的一个问题；不要为流程完整而提问。
 - read：读取一个已授权只读工具。tool 必须是可用只读工具名；params_json 是符合该工具参数 JSON Schema 的 JSON 对象字符串（无参数填 "{}"），不得添加 Schema 未列出的字段。

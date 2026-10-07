@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { connection } from 'next/server';
 import './globals.css';
 import '@/components/home-v2/home-fonts.css';
 import { Toaster } from '@/components/ui/sonner';
@@ -23,17 +24,20 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Account-specific navigation and assistant state must resolve per request,
+  // never from a build-time fallback captured in a static page.
+  await connection();
   const resolved = await resolveServerAuth();
   const initial = { state: resolved.state, session: resolved.session, csrf: resolved.csrf };
   return (
     <html lang="zh-CN">
       <body className="min-h-screen bg-background antialiased">
         <TeacherProvider initial={initial}>
-          <YayaSurface auth={resolved}>
+          <YayaSurface auth={initial}>
             <TopNav />
             <main className="mx-auto w-full max-w-[1536px] px-4 pb-16 pt-6 sm:px-6 lg:px-10">{children}</main>
-            <YayaEntry auth={resolved} />
-            <YayaPanel auth={resolved} />
+            <YayaEntry auth={initial} />
+            <YayaPanel auth={initial} />
           </YayaSurface>
         </TeacherProvider>
         <Toaster richColors position="top-center" />

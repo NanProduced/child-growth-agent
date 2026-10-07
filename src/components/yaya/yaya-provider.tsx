@@ -16,7 +16,7 @@ import {
   useRemoteThreadListRuntime,
   type AssistantRuntime,
 } from "@assistant-ui/react";
-import { createContext, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { authIdentityKey } from "@/lib/accounts/client";
 import type { AuthStatusResponse } from "@/lib/accounts/types";
@@ -59,7 +59,9 @@ export function useYayaRuntimeReady(): boolean {
  * UI 只在 "ready" 时渲染会话区；加载中显示骨架，列表读取失败显示说明。
  */
 export function useYayaThreadAvailability(): "loading" | "ready" | "unavailable" {
-  return useAuiState((state) => {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+  const availability = useAuiState((state) => {
     try {
       if (state.threads.isLoading) return "loading";
       if (state.threads.loadError != null) return "unavailable";
@@ -70,6 +72,7 @@ export function useYayaThreadAvailability(): "loading" | "ready" | "unavailable"
       return "loading";
     }
   });
+  return mounted ? availability : "loading";
 }
 
 function YayaRuntimeMount({ store, children }: { store: YayaClientStore; children: ReactNode }) {

@@ -185,7 +185,7 @@ function isGuideDecision(value: unknown): boolean {
   if (!parsed.success) return false;
   if (!(GUIDE_EVIDENCE_SUPPORT_KINDS as readonly string[]).includes(parsed.data.support)) return false;
   const note = parsed.data.sustained_note;
-  if (note !== undefined && note.period_start > note.period_end) return false;
+  if (note != null && note.period_start > note.period_end) return false;
   return parsed.data.basis.every(isGuideBasis);
 }
 
@@ -340,12 +340,15 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
   const payloadRecord = asRecord(payload);
   const resourceRecord = asRecord(item.resource_ref);
   const childName =
+    readText(item, ["child_name"]) ??
     readText(payload, ["child_name", "childName"]) ??
     readText(resourceRecord, ["child_name", "childName", "label"]);
   const observationLabel =
+    readText(item, ["target_label"]) ??
     readText(payload, ["observation_label", "observation_name"]) ??
     readText(resourceRecord, ["observation_label", "observation_name", "label"]);
   const className =
+    readText(item, ["class_name"]) ??
     readText(payload, ["class_name", "target_class_name", "targetClassName"]) ??
     readText(resourceRecord, ["class_name", "target_class_name", "targetClassName", "label"]);
   let targetLabel: string | null = null;
@@ -362,8 +365,10 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
     case "organize_observation":
       targetLabel = childName ?? observationLabel;
       if (targetLabel === null) missing.push("幼儿或观察名称");
-      missing.push("待整理的原文与草稿");
-      addLine(lines, "整理目标", "服务端准备内容未随当前投影提供");
+      const organizeRaw = readText(item, ["raw_text"]);
+      if (organizeRaw === null) missing.push("待整理的原始观察");
+      addLine(lines, "原始观察", organizeRaw);
+      addLine(lines, "整理目标", "生成 AI 草稿，仍需教师核对后才能归档");
       break;
     case "follow_up_observation":
       targetLabel = childName ?? observationLabel;
@@ -373,8 +378,8 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
     case "confirm_observation":
       targetLabel = childName ?? observationLabel;
       if (targetLabel === null) missing.push("幼儿或观察名称");
-      const confirmedObservedAt = readText(payloadRecord, ["observed_at", "observation_date"]);
-      const confirmedRawText = readText(payloadRecord, ["raw_text", "observation_text"]);
+      const confirmedObservedAt = readText(item, ["observed_at"]) ?? readText(payloadRecord, ["observed_at", "observation_date"]);
+      const confirmedRawText = readText(item, ["raw_text"]) ?? readText(payloadRecord, ["raw_text", "observation_text"]);
       if (confirmedObservedAt === null) missing.push("观察日期");
       if (confirmedRawText === null) missing.push("原始观察");
       addLine(lines, "观察日期", confirmedObservedAt);
@@ -457,7 +462,7 @@ function proposalContentDetails(item: ProjectedProposalItem): ProposalContentDet
   }
 
   if (payloadRecord !== null && targetLabel === null) {
-    targetLabel = readText(payloadRecord, ["target_label", "label"]);
+    targetLabel = readText(item, ["target_label"]) ?? readText(payloadRecord, ["target_label", "label"]);
   }
   return { payload, targetLabel, lines, missing: [...new Set(missing)] };
 }
@@ -683,7 +688,7 @@ export function YayaProposalPanel({
 
   const savedCount = Object.values(results).filter((entry) => receiptShowsSuccess(entry)).length;
   const pendingCount = eligible.length;
-  const restrictedCount = items.length - eligible.length;
+  const restrictedCount = items.filter(item => item.status === "pending" && results[item.operation_id] === undefined && (item.access !== "full" || proposalContentDetails(item).missing.length > 0)).length;
 
   return (
     <section
@@ -700,7 +705,7 @@ export function YayaProposalPanel({
         {proposal !== null ? (
           <>
             <Badge variant="secondary" className="bg-amber-100 text-amber-700">
-              {proposal.status === "open" ? "待核对" : proposal.status === "cancelled" ? "已取消" : "已结束"}
+              {proposal.status === "open" ? savedCount === items.length && savedCount > 0 ? "回执已核对" : "待核对" : proposal.status === "cancelled" ? "已取消" : "已结束"}
             </Badge>
             <span className="text-xs text-muted-foreground">
               本批 {proposal.items.length} 条 · 待核对 {pendingCount} · 已完成回执 {savedCount}
@@ -878,7 +883,7 @@ export function YayaProposalPanel({
             取消提案
           </Button>
           <p className="w-full text-xs text-muted-foreground">
-            确认后才成为正式记录；取消提案不会执行任何写入，也不会撤销已提交的业务。
+            批准只执行卡片中的操作；保存原文或整理草稿不等于确认归档。取消提案不会撤销已提交的业务。
           </p>
         </footer>
       ) : null}

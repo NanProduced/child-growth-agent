@@ -47,11 +47,12 @@ import {
   revalidateYayaRunContextWithClient,
 } from './context';
 import { createYayaRunDependencies, type YayaRunDependencyOptions } from './deps';
+import { persistRunTerminalMessage } from './terminal-message';
+import { loadAccountsConfig } from '@/lib/accounts/config';
 import {
   boundaryStopForIdentity,
   isYayaRunOwnedByThisProcess,
   resolveYayaRunBoundaryIdentity,
-  verifyYayaRunBoundaryIdentity,
 } from './identity';
 import {
   abortYayaRunProcess,
@@ -165,11 +166,7 @@ export async function startYayaRun(
       conversationId,
     );
     if (conversation === null) throw new YayaDataError('not_found', '会话不存在。');
-    if (conversation.revision !== input.expected_conversation_revision) {
-      throw new YayaDataError('revision_conflict', '会话已在其他位置更新，请刷新后重试。');
-    }
-    await assertYayaRunAttachments(client, principal.account_id, input.attachment_ids);
-    return registerYayaRun(client, {
+    const registered = await registerYayaRun(client, {
       run_id: randomUUID(),
       owner_account_id: principal.account_id,
       conversation_id: conversationId,
@@ -181,6 +178,13 @@ export async function startYayaRun(
       owner_instance: ownerInstance,
       deadline_at: new Date(Date.now() + DEFAULT_YAYA_AGENT_LIMITS.deadline_ms).toISOString(),
     });
+    if (registered.kind === 'created') {
+      // 新请求核对锁后的会话版本；原身份重放不因权威消息追加而被旧版本误拒。
+      const latest = await client.query<{ revision: number }>('SELECT revision FROM yaya_conversations WHERE id=$1 AND account_id=$2 AND deleted_at IS NULL FOR SHARE', [conversationId, principal.account_id]);
+      if (latest.rows[0]?.revision !== input.expected_conversation_revision) throw new YayaDataError('revision_conflict', '会话已在其他位置更新，请刷新后重试。');
+      await assertYayaRunAttachments(client, principal.account_id, input.attachment_ids);
+    }
+    return registered;
   });
 
   if (registration.kind === 'conflict') {
@@ -378,16 +382,23 @@ async function driveRun(input: {
     });
     let stored: YayaRunRecord | null = null;
     let finalizeThrew = false;
+    let finalizationRejected: YayaRunOutcome | null = null;
+    let terminalPrincipal: Principal | null = null;
     // 最后保存边界：身份阶段（账号/会话/任教共享锁）→ run 行锁等待 → 来源阶段
     // （锁后重核全部已装载投影 + 身份重核）；墙钟到期/撤权/转班跨过锁等待时按当前事实停止。
     try {
       stored = await finalizeYayaRun(run.run_id, ownerInstance, result.outcome, {
-        verify: async (client) => verifyYayaRunBoundaryIdentity(client, { run, token }),
+        verify: async (client) => {
+          const identity = await resolveYayaRunBoundaryIdentity(client, { run, token });
+          const stop = boundaryStopForIdentity(identity, run);
+          terminalPrincipal = stop === null ? identity.principal : null;
+          return stop;
+        },
         verifyProjections: async (client) => {
           // run 行锁等待完成后重新解析身份：锁等待可能跨过会话到期时刻。
           const identity = await resolveYayaRunBoundaryIdentity(client, { run, token });
           const identityStop = boundaryStopForIdentity(identity, run);
-          if (identityStop !== null) return identityStop;
+          if (identityStop !== null) { terminalPrincipal = null; return identityStop; }
           if (identity.principal === null) return null;
           const verdict = await revalidateYayaRunContextWithClient(
             state,
@@ -397,7 +408,21 @@ async function driveRun(input: {
           );
           if (!verdict.ok) return { kind: 'stopped', reason: 'context_revoked', detail: null };
           // 来源重核本身也会等待 child 共享锁：提交前再确认一次身份，覆盖整段锁等待。
-          return verifyYayaRunBoundaryIdentity(client, { run, token });
+          const finalIdentity = await resolveYayaRunBoundaryIdentity(client, { run, token });
+          const finalStop = boundaryStopForIdentity(finalIdentity, run);
+          terminalPrincipal = finalStop === null ? finalIdentity.principal : null;
+          return finalStop;
+        },
+        persistTerminal: async (client, terminal) => {
+          if (terminalPrincipal === null) return;
+          await persistRunTerminalMessage(client, terminalPrincipal, loadAccountsConfig()?.schoolId ?? 'single-school', terminal);
+          // Canonical messages can wait on the conversation row too. Recheck after
+          // that await, so an expired session cannot commit a successful message.
+          const identity = await resolveYayaRunBoundaryIdentity(client, { run, token });
+          finalizationRejected = boundaryStopForIdentity(identity, run);
+          const deadline = await client.query<{ expired: boolean }>('SELECT deadline_at <= clock_timestamp() AS expired FROM yaya_runs WHERE id=$1', [run.run_id]);
+          if (finalizationRejected === null && deadline.rows[0]?.expired) finalizationRejected = { kind: 'stopped', reason: 'deadline', detail: null };
+          if (finalizationRejected !== null) throw new YayaDataError('source_conflict', '终态消息保存期间前提失效。');
         },
       });
     } catch {
@@ -413,7 +438,7 @@ async function driveRun(input: {
     if (finalizeThrew) {
       // 持久化失败/结果未知：绝不先显示成功再改失败；标记中断，流以协议停止终态结束。
       await markYayaRunInterrupted(run.run_id, ownerInstance).catch(() => null);
-      publishPersistedOutcome(stoppedOutcome('model_failed'));
+      publishPersistedOutcome(finalizationRejected ?? stoppedOutcome('model_failed'));
       return;
     }
     const fallback = await loadYayaRun(run.run_id).catch(() => null);

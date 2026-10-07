@@ -404,6 +404,8 @@ export interface YayaRunFinalizeOptions {
    * 以锁后的当前事实重核已装载来源/历史/图片投影；返回非空停止候选时按该停止落账。
    */
   verifyProjections?: (client: TransactionClient) => Promise<unknown | null>;
+  /** 同一事务内保存权威终态消息；失败连同终态一起回滚。旧终态读取不回填。 */
+  persistTerminal?: (client: TransactionClient, run: YayaRunRecord) => Promise<void>;
 }
 
 /**
@@ -462,7 +464,9 @@ export async function finalizeYayaRun(
         JSON.stringify(candidate ?? null),
       ],
     );
-    return updated.rows[0] ? parseYayaRunRecord(updated.rows[0].data) : null;
+    const terminal = updated.rows[0] ? parseYayaRunRecord(updated.rows[0].data) : null;
+    if (terminal !== null && options.persistTerminal) await options.persistTerminal(client, terminal);
+    return terminal;
   });
 }
 

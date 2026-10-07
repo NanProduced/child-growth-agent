@@ -22,6 +22,8 @@ export interface YayaThreadWiring {
   waitForWrites(): Promise<void>;
   /** 同一用户消息的 client_request_id 跨重试稳定。 */
   clientRequestId(parentMessageId: string): string;
+  bindPersistedMessage(localId: string, serverId: string): void;
+  persistedMessageId(localId: string): string | null;
 }
 
 export interface YayaThreadNotice {
@@ -51,6 +53,7 @@ function createThreadWiring(): YayaThreadWiring {
   let revision: number | null = null;
   let chain: Promise<void> = Promise.resolve();
   const requestIds = new Map<string, string>();
+  const persistedIds = new Map<string, string>();
   return {
     get revision() {
       return revision;
@@ -75,10 +78,12 @@ function createThreadWiring(): YayaThreadWiring {
     clientRequestId(parentMessageId: string) {
       const existing = requestIds.get(parentMessageId);
       if (existing !== undefined) return existing;
-      const next = randomId();
+      const next = persistedIds.get(parentMessageId) ?? randomId();
       requestIds.set(parentMessageId, next);
       return next;
     },
+    bindPersistedMessage(localId, serverId) { persistedIds.set(localId, serverId); },
+    persistedMessageId(localId) { return persistedIds.get(localId) ?? null; },
   };
 }
 

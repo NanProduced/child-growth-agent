@@ -53,7 +53,11 @@ export const attachmentProjectionSchema = z.looseObject({
 
 export const messageProjectionSchema = z.looseObject({
   visibility: z.enum(["full", "partial", "metadata_only", "hidden", "unavailable"]),
-  fragments: z.array(fragmentProjectionSchema),
+  fragments: z.array(z.looseObject({
+    fragment_id: z.string().min(1),
+    visibility: z.enum(["full", "historical_read_only", "hidden"]),
+    reason: z.string().min(1),
+  })),
   attachments: z.array(attachmentProjectionSchema),
   metadata: z.unknown().nullable(),
   execution_allowed: z.literal(false),

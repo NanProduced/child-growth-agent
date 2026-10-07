@@ -127,7 +127,7 @@ export interface YayaRunWriteBinding {
 
 export interface YayaRunDependencyOptions {
   readRegistry?: YayaReadRegistry;
-  write?: YayaRunWriteBinding;
+  write?: YayaRunWriteBinding | ((state: YayaRunRuntimeState) => YayaRunWriteBinding);
 }
 
 const failClosedProposeWrite = async (): Promise<YayaProposeWriteOutcome> => ({
@@ -141,7 +141,7 @@ export function createYayaRunDependencies(
   options: YayaRunDependencyOptions = {},
 ): YayaAgentDependencies {
   const readRegistry = options.readRegistry ?? createYayaReadRegistry();
-  const write = options.write;
+  const write = typeof options.write === 'function' ? options.write(state) : options.write;
   return {
     model: createLlmYayaModelGateway(),
     resolveCurrentIdentity: ({ run_id }) =>

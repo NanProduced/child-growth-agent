@@ -10,6 +10,7 @@ import { receiptProvesSuccess, type YayaOperationQueryOutcome, type YayaSourceRe
 import { yayaAttachmentContentUrl, yayaAttachmentIdFromUrl } from "./api";
 import { YAYA_PART_NAMES } from "./parts";
 import type { ProjectedMessage } from "./schemas";
+import { parseYayaChatRecoveryMark } from "@/lib/yaya/chat-bind-contract";
 
 function fragmentIdFor(messageId: string, index: number): string {
   return `${messageId}:f${index}`;
@@ -283,6 +284,10 @@ export function projectedToThreadMessageLike(view: ProjectedMessage): ThreadMess
       name: YAYA_PART_NAMES.historyNote,
       data: { text: "这条历史消息当前不可读。" },
     });
+  }
+  const recovery = parseYayaChatRecoveryMark(view.recovery);
+  if (view.role === "assistant" && recovery.ok) {
+    parts.push({ type: "data", id: "recovery-" + view.message_id, name: YAYA_PART_NAMES.recovery, data: recovery.value });
   }
   return {
     role: view.role,
