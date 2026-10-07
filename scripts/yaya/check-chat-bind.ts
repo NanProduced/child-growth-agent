@@ -1,12 +1,14 @@
 /**
- * YAYA-CHAT-BIND0 离线参考检查（reference_only）。
+ * YAYA-CHAT-BIND0 离线参考检查（reference_only）。CHAT-BIND0-R1 扩充。
  *
  * 只做纯检查：不连数据库、不调用模型 / 搜索 / 对象存储、不发真实 HTTP、
  * 不写任何业务数据，通过也不证明真实认证 / 真实事务 / 生产可用。
  *
- * 覆盖两条最小接口的反例：
+ * 覆盖两条最小接口的反例（原 14 组 + R1 5 组）：
  * 私域答案丢来源、只给模型引用但漏依赖、一般问答正向对照、错 owner / 会话 / run / 内容、
- * 历史恢复不执行、错回执身份、终态撤权、旧无绑定消息、重复持久化、未知只查原身份。
+ * 历史恢复不执行、错回执身份、终态撤权、旧无绑定消息、重复持久化、未知只查原身份、
+ * 保存详情不可读、finished 终态、标记不是批准、浏览器边界；
+ * R1：混合依赖漏守门、回执本体核验、重复 / 矛盾事实顺序无关、路径身份编码、提案投影恢复。
  *
  * 运行：pnpm exec tsx scripts/yaya/check-chat-bind.ts
  */
@@ -107,9 +109,7 @@ const FACTS: YayaRecoveryFacts = {
   conversation_id: "conv-1",
   owner_account_id: OWNER,
   run: { run_id: "run-1", client_request_id: "req-1" },
-  operations: [
-    { planned: PLANNED, content_digest: DIGEST, outcome: { kind: "saved", receipt: RECEIPT } },
-  ],
+  operations: [{ planned: PLANNED, content_digest: DIGEST, receipts: [RECEIPT] }],
 };
 
 function messageRef(overrides: {
@@ -189,15 +189,15 @@ check("只给模型引用但漏依赖：引用不作依赖，依赖不完整核�
   assert.equal(citationsOnlyPolicy.independently_readable, false);
   assert.deepEqual(citationsOnlyPolicy.sources, []);
 
-  // 资源级依赖为空，但存在无法映射的依赖条目：仍不构成“无私域依赖”
+  // 资源级依赖为空，但存在无法映射的依赖条目：整段绑定保持 unknown（R1）
   const unmapped = buildYayaRunSourceBinding({
     resource_dependencies: [],
     unmapped_dependency_count: 1,
     private_dependency_proven_absent: true,
   });
-  assert.equal(unmapped.state, "bound");
-  assert.equal(unmapped.state === "bound" && unmapped.general_qa_proven, false);
+  assert.equal(unmapped.state, "unknown");
   const unmappedPolicy = resolveYayaAssistantFragmentPolicy(unmapped);
+  assert.equal(unmappedPolicy.binding_state, "unknown");
   assert.equal(unmappedPolicy.independently_readable, false);
   assert.deepEqual(unmappedPolicy.sources, [], "漏依赖不得凭空补成可信来源");
 
@@ -275,7 +275,7 @@ check("历史恢复不执行：标记只派生 GET，且只含身份查询参数
   assert.equal(YAYA_RECOVERY_PATHS.operations_query, YAYA_API_PATHS.operations_query);
 
   const requests = yayaRecoveryLookupRequests(MARK);
-  assert.ok(requests.length >= 3);
+  assert.ok(requests.length >= 4);
   // operations 的 GET / POST 共用路径，方法是唯一区分：本清单只允许 GET
   const writeOnlyPaths: readonly string[] = [
     YAYA_API_PATHS.run_start,
@@ -290,11 +290,20 @@ check("历史恢复不执行：标记只派生 GET，且只含身份查询参数
       assert.deepEqual(Object.keys(request.query), ["operation_id"], "operations 只按原身份查询");
     }
   }
-  assert.equal(requests[0]?.path, "/api/yaya/conversations/conv-1/messages");
-  assert.deepEqual(requests[1]?.query, { client_request_id: "req-1" });
-  assert.deepEqual(requests[2]?.query, { operation_id: "op-1" });
   assert.deepEqual(
-    Object.keys(requests[2]?.query ?? {}),
+    requests.map((request) => request.path),
+    [
+      "/api/yaya/conversations/conv-1/messages",
+      "/api/yaya/conversations/conv-1/runs",
+      "/api/yaya/proposals",
+      "/api/yaya/operations",
+    ],
+    "恢复清单 = 历史 + 原运行 + 提案投影 + 原操作，全为只读",
+  );
+  assert.deepEqual(requests[1]?.query, { client_request_id: "req-1" });
+  assert.deepEqual(requests[3]?.query, { operation_id: "op-1" });
+  assert.deepEqual(
+    Object.keys(requests[3]?.query ?? {}),
     ["operation_id"],
     "恢复查询只带身份参数，不带批准 / 身份自报字段",
   );
@@ -324,7 +333,7 @@ check("错回执身份：actor 不一致或回执身份与预期不符都不算�
     operations: [
       {
         ...FACTS.operations[0],
-        outcome: { kind: "unknown", reason: "contradictory_receipts" },
+        receipts: [RECEIPT, { ...RECEIPT, status: "failed" }],
       },
     ],
   });
@@ -428,13 +437,19 @@ check("重复持久化：助手 / 工具消息只有一个通道放行，UI 不�
     reason: "user_write_requires_client_channel",
   });
 
-  // 同一角色不可能被两个通道同时放行 ⇒ 重复落账在协议层不可能
+  // 能力边界：同一角色最多一个放行通道（角色互斥）
   for (const role of ["user", "assistant", "tool"] as const) {
     const accepted = (["http", "run_terminal"] as const).filter(
       (channel) => authorizeYayaMessageWrite({ channel, role }).accepted,
     );
     assert.equal(accepted.length <= 1, true, `role=${role} 只能有一个写入 owner`);
   }
+
+  // 但同一允许通道可重复放行：本函数不承担幂等（R1 收紧）
+  const once = authorizeYayaMessageWrite({ channel: "run_terminal", role: "assistant" });
+  const twice = authorizeYayaMessageWrite({ channel: "run_terminal", role: "assistant" });
+  assert.equal(once.accepted, true);
+  assert.deepEqual(twice, once, "重复调用同一允许通道仍放行 ⇒ 幂等靠确定性消息身份（交付文档 §2.4）");
 });
 
 check("未知只查原身份：查无 / 未知不产生新操作身份，也不自动重发", () => {
@@ -513,6 +528,241 @@ check("标记不是批准：自报权威 / 秘密 / 角色字段一律拒绝", (
     operations: [{ ...MARK.operations[0], content_digest: "not-a-digest" }],
   });
   assert.equal(badDigest.ok, false);
+});
+
+/* ------------------------------- R1 反例（主评审三个 P1 + 路径 P2） ------------------------------- */
+
+check("混合依赖漏守门：已映射来源 + 未映射依赖整段不可完整核验，不得 full", () => {
+  const mixed = buildYayaRunSourceBinding({
+    resource_dependencies: [CHILD_SOURCE],
+    unmapped_dependency_count: 1,
+    private_dependency_proven_absent: false,
+  });
+  assert.equal(mixed.state, "unknown", "任一依赖条目无法映射 ⇒ 整段绑定 unknown");
+  const policy = resolveYayaAssistantFragmentPolicy(mixed);
+  assert.deepEqual(policy.sources, [], "混合集合不得只保留已映射部分当可信来源");
+  assert.equal(policy.independently_readable, false);
+
+  const before = projectChatMessage(
+    messageRef({ sources: policy.sources, independentlyReadable: policy.independently_readable }),
+    { account_id: OWNER, role: "teacher" },
+    [{ fragment_id: "frag-1", source_index: 0, access: "full" }],
+    [{ attachment_id: "att-1", access: "full" }],
+  );
+  const after = restrictYayaAssistantProjection(before, { role: "assistant", policy });
+  assert.equal(after.visibility, "unavailable", "混合依赖不得保持 full");
+  assert.equal(after.fragments[0]?.visibility, "hidden");
+
+  // 正向对照：同一依赖集合但全部已映射 ⇒ bound，读侧不降级
+  const mapped = buildYayaRunSourceBinding({
+    resource_dependencies: [CHILD_SOURCE],
+    unmapped_dependency_count: 0,
+    private_dependency_proven_absent: false,
+  });
+  assert.equal(mapped.state, "bound");
+  const mappedPolicy = resolveYayaAssistantFragmentPolicy(mapped);
+  const mappedProjection = projectChatMessage(
+    messageRef({ sources: mappedPolicy.sources, independentlyReadable: mappedPolicy.independently_readable }),
+    { account_id: OWNER, role: "teacher" },
+    [{ fragment_id: "frag-1", source_index: 0, access: "full" }],
+    [{ attachment_id: "att-1", access: "full" }],
+  );
+  assert.equal(
+    restrictYayaAssistantProjection(mappedProjection, { role: "assistant", policy: mappedPolicy })
+      .visibility,
+    "full",
+    "完整映射的正向对照仍可读",
+  );
+
+  // 计数非法（负数 / 小数 / 非有限数）不接受为可核验绑定
+  for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(
+      buildYayaRunSourceBinding({
+        resource_dependencies: [],
+        unmapped_dependency_count: bad,
+        private_dependency_proven_absent: true,
+      }).state,
+      "unknown",
+      `非法计数 ${bad} 不得成为 bound`,
+    );
+  }
+});
+
+check("回执本体核验：计划一致但回执属他身份 / 无成功证明不得算成功", () => {
+  // 正向对照：回执与标记派生的原计划一致 ⇒ 按原计划重算出 saved
+  assert.deepEqual(verifyYayaRecoveryIdentity(MARK, FACTS), {
+    verifiable: true,
+    outcomes: [{ kind: "saved", receipt: RECEIPT }],
+  });
+
+  // 外层计划与标记全一致，回执的 operation / batch / actor / target 全换成别人的身份
+  const foreignBody: YayaOperationReceipt = {
+    ...RECEIPT,
+    operation_id: "op-9",
+    batch_id: "batch-9",
+    actor_account_id: "acc-other",
+    target_id: "obs-9",
+  };
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, {
+      ...FACTS,
+      operations: [{ ...FACTS.operations[0], receipts: [foreignBody] }],
+    }),
+    { verifiable: false, reason: "operation_mismatch" },
+    "回执本体不属于该操作 ⇒ 不可核验",
+  );
+
+  // 回执只换 actor（operation_id 相同）：按原计划重算为身份不匹配，不返回 saved
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, {
+      ...FACTS,
+      operations: [{ ...FACTS.operations[0], receipts: [{ ...RECEIPT, actor_account_id: "acc-other" }] }],
+    }),
+    { verifiable: false, reason: "actor_mismatch" },
+  );
+
+  // 回执只换 target 同理
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, {
+      ...FACTS,
+      operations: [{ ...FACTS.operations[0], receipts: [{ ...RECEIPT, target_id: "obs-9" }] }],
+    }),
+    { verifiable: false, reason: "target_mismatch" },
+  );
+
+  // saved + effect=unknown + 无业务标识：成功证明不完整 ⇒ unknown，不得原样算 saved
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, {
+      ...FACTS,
+      operations: [
+        { ...FACTS.operations[0], receipts: [{ ...RECEIPT, effect: "unknown", business_object_id: null }] },
+      ],
+    }),
+    { verifiable: true, outcomes: [{ kind: "unknown", reason: "invalid_success_proof" }] },
+    "证明不完整的回执只能给 unknown",
+  );
+
+  // 查无回执仍按冻结语义给 unknown/no_receipt（保留原 unknown 语义）
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, { ...FACTS, operations: [{ ...FACTS.operations[0], receipts: [] }] }),
+    { verifiable: true, outcomes: [{ kind: "unknown", reason: "no_receipt" }] },
+  );
+});
+
+check("重复 / 矛盾事实与重复标记：判定与遍历顺序无关，重复不产生重复结果", () => {
+  const valid = FACTS.operations[0];
+  const corrupted = { ...valid, planned: { ...PLANNED, target_id: "obs-2" } };
+
+  const validFirst = verifyYayaRecoveryIdentity(MARK, { ...FACTS, operations: [valid, corrupted] });
+  const corruptedFirst = verifyYayaRecoveryIdentity(MARK, { ...FACTS, operations: [corrupted, valid] });
+  assert.deepEqual(validFirst, { verifiable: false, reason: "target_mismatch" });
+  assert.deepEqual(corruptedFirst, validFirst, "同操作矛盾事实：正常在前 / 异常在前判定一致");
+
+  // 同一事实重复返回：规范为一个结果，不产生重复成功
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, { ...FACTS, operations: [valid, valid] }),
+    { verifiable: true, outcomes: [{ kind: "saved", receipt: RECEIPT }] },
+  );
+
+  // 完全相同的重复回执（合法幂等重放）仍只给一个结果
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, {
+      ...FACTS,
+      operations: [{ ...valid, receipts: [RECEIPT, RECEIPT] }],
+    }),
+    { verifiable: true, outcomes: [{ kind: "saved", receipt: RECEIPT }] },
+  );
+
+  // 同操作矛盾回执 ⇒ 拒绝
+  assert.deepEqual(
+    verifyYayaRecoveryIdentity(MARK, {
+      ...FACTS,
+      operations: [{ ...valid, receipts: [RECEIPT, { ...RECEIPT, status: "failed" }] }],
+    }),
+    { verifiable: false, reason: "contradictory_receipt" },
+  );
+
+  // 标记身份重复：核验层不可核验（不返回 2 份结果），解析层拒绝
+  const duplicateMark: YayaChatRecoveryMark = {
+    ...MARK,
+    operations: [MARK.operations[0], MARK.operations[0]],
+  };
+  assert.deepEqual(verifyYayaRecoveryIdentity(duplicateMark, FACTS), {
+    verifiable: false,
+    reason: "operation_mismatch",
+  });
+  const duplicateParse = parseYayaChatRecoveryMark(duplicateMark);
+  assert.equal(duplicateParse.ok, false);
+  assert.equal(firstCode(duplicateParse), "malformed_request");
+
+  // 同提案条目身份重复（item_key 重复、operation_id 不同）同样拒绝
+  const duplicateItem = parseYayaChatRecoveryMark({
+    ...MARK,
+    operations: [MARK.operations[0], { ...MARK.operations[0], operation_id: "op-2" }],
+  });
+  assert.equal(duplicateItem.ok, false, "item_key 必须唯一");
+});
+
+check("不透明身份按路径编码：保留字符不改写路径，查询值交 URLSearchParams", () => {
+  const identity = "c/../../admin/teachers?a=1#b%20c";
+  const parsed = parseYayaChatRecoveryMark({ ...MARK, conversation_id: identity });
+  assert.equal(parsed.ok, true, "身份本身不因含保留字符被判非法");
+  if (!parsed.ok) return;
+
+  const requests = yayaRecoveryLookupRequests(parsed.value);
+  const prefix = "/api/yaya/conversations/";
+  const messages = requests[0];
+  assert.equal(messages?.path, `${prefix}${encodeURIComponent(identity)}/messages`);
+
+  const segment = (messages?.path ?? "").slice(prefix.length, (messages?.path ?? "").length - "/messages".length);
+  assert.equal(decodeURIComponent(segment), identity, "解码必须还原原身份（不删字符）");
+  assert.equal(/[/?#]/.test(segment), false, "路径段内不得残留原始分隔符");
+
+  const run = requests.find((request) => request.path.endsWith("/runs"));
+  assert.equal(run?.path, `${prefix}${encodeURIComponent(identity)}/runs`);
+  // 查询值保持独立参数原值，由 URLSearchParams 负责编码
+  assert.deepEqual(run?.query, { client_request_id: "req-1" });
+  assert.equal(new URLSearchParams(run?.query).get("client_request_id"), "req-1");
+  assert.deepEqual(requests.find((request) => request.path === "/api/yaya/operations")?.query, {
+    operation_id: "op-1",
+  });
+});
+
+check("提案投影恢复：标记提案身份派生只读提案读取，不靠保留 ID 猜内容", () => {
+  // 模板 = API0 冻结 approval 路径的父路径 + 单参数，不 fork 独立字面量
+  assert.equal(
+    YAYA_RECOVERY_PATHS.proposals_query,
+    `${YAYA_API_PATHS.approval.replace("/{proposal_id}/approval", "")}?proposal_id={proposal_id}`,
+  );
+
+  // pending proposal-only（无 run、无操作）仍可按 proposal_id 读到可核对内容
+  const proposalOnly = parseYayaChatRecoveryMark({ ...MARK, run: null, operations: [] });
+  assert.equal(proposalOnly.ok, true);
+  if (!proposalOnly.ok) return;
+  const requests = yayaRecoveryLookupRequests(proposalOnly.value);
+  assert.deepEqual(
+    requests.map((request) => request.path),
+    ["/api/yaya/conversations/conv-1/messages", "/api/yaya/proposals"],
+    "只有标记身份时仍给出提案投影读取入口",
+  );
+  assert.equal(requests[1]?.method, "GET");
+  assert.deepEqual(requests[1]?.query, { proposal_id: "prop-1" });
+  assert.equal(
+    requests.some((request) => request.path === YAYA_API_PATHS.approval),
+    false,
+    "提案读取不得派生批准写路径",
+  );
+
+  // 无提案身份的标记不派生提案读取（正向对照的反面）
+  const noProposal = parseYayaChatRecoveryMark({ ...MARK, proposal: null, operations: [] });
+  assert.equal(noProposal.ok, true);
+  if (!noProposal.ok) return;
+  const noProposalPaths = yayaRecoveryLookupRequests(noProposal.value).map((request) => request.path);
+  assert.deepEqual(noProposalPaths, [
+    "/api/yaya/conversations/conv-1/messages",
+    "/api/yaya/conversations/conv-1/runs",
+  ]);
+  assert.equal(noProposalPaths.includes("/api/yaya/proposals"), false);
 });
 
 /* ------------------------------- 协议边界 ------------------------------- */

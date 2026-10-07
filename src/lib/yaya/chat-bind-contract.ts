@@ -18,23 +18,33 @@
  * 2. 原身份恢复标记：只带“重新 GET 原查询所需身份”，不是批准，
  *    不含会话令牌 / 密码 / 客户端 Principal；owner 先于角色。
  *
+ * CHAT-BIND0-R1（主评审三个 P1 + 路径 P2 收紧）：
+ * - 混合依赖（已映射 + 未映射）一律 `unknown`，已映射部分不能让绑定保持 `bound`；
+ * - 回执本体按**标记派生的原计划**用冻结 `queryOperationOutcome` 重算，
+ *   不信任事实里自带的结论，也不从回执反建 expected；
+ * - 同 operation 的事实分组全量核验，判定与遍历顺序无关；标记 operation_id /
+ *   item_key 唯一，重复不产生重复结果；
+ * - 恢复清单的路径身份 `encodeURIComponent`，查询值保持独立参数交 URLSearchParams。
+ *
  * 浏览器消费边界：UI1 可直接打包（esbuild platform=browser），
  * 不得引入 `node:` / Next / 数据库 / 模型模块。
  */
 import { z } from "zod";
 
 import {
-  YAYA_API_PATHS,
   findSecretFields,
   isYayaDigestHexWire,
+  YAYA_API_PATHS,
   type YayaApiParseResult,
   type YayaApiViolation,
 } from "./api-contract";
-import type {
-  YayaChatMessageProjection,
-  YayaMessageSourceRef,
-  YayaOperationQueryOutcome,
-  YayaPlannedOperation,
+import {
+  queryOperationOutcome,
+  type YayaChatMessageProjection,
+  type YayaMessageSourceRef,
+  type YayaOperationQueryOutcome,
+  type YayaOperationReceipt,
+  type YayaPlannedOperation,
 } from "./types";
 
 /** 增量协议版本：只在本模块内自洽，不改动 yaya-v1.0 冻结版本号 */
@@ -58,7 +68,11 @@ export type YayaMessageWriteVerdict =
 
 /**
  * 助手消息唯一写入 owner 的可执行口径：HTTP 只写 user，run 终态只写
- * assistant / tool，两条通道对同一角色恰好一个放行 ⇒ 重复落账在协议层不可能。
+ * assistant / tool，两条通道对同一角色恰好一个放行。
+ *
+ * **能力边界（R1 收紧）**：本函数只判定“谁有资格写”，是互斥能力声明；
+ * 它**不能**证明重复落账在协议层不可能 —— 同一允许通道仍可被调用两次。
+ * 幂等靠确定性消息身份 + 现有 `client_message_id` 约束（见交付文档 §2.4）。
  * 本函数只判定写入权，不校验内容；内容与 run 的绑定由服务端核验。
  */
 export function authorizeYayaMessageWrite(input: {
@@ -81,7 +95,7 @@ export function authorizeYayaMessageWrite(input: {
  * 服务端来源绑定：
  * - `bound`：run 记录可完整核验，`dependencies` 是整段答案继承的资源级累计依赖；
  *   `general_qa_proven` 表示服务端已证明整段无私域依赖且依赖集合为空。
- * - `unknown`：依赖缺失 / 损坏 / 失联 / 无法完整核验；保持受限，不回填可信。
+ * - `unknown`：依赖缺失 / 损坏 / 失联 / 无法完整核验（含混合集合里的未映射条目）；保持受限，不回填可信。
  */
 export type YayaRunSourceBinding =
   | {
@@ -94,7 +108,7 @@ export type YayaRunSourceBinding =
 export interface YayaRunSourceBindingInput {
   /** run 记录中可表达为资源级来源的累计依赖；null = 无法完整核验（损坏 / 失联 / 映射不全） */
   readonly resource_dependencies: readonly YayaMessageSourceRef[] | null;
-  /** run 记录中无法表达为资源级来源的依赖条目数（图片 / 历史片段 / 工具引用） */
+  /** run 记录中无法表达为资源级来源的依赖条目数（图片 / 历史片段 / 工具引用）；必须是有限非负整数 */
   readonly unmapped_dependency_count: number;
   /** 服务端已证明整段无私域依赖；依赖集合非空或存在未映射依赖时必须为 false */
   readonly private_dependency_proven_absent: boolean;
@@ -104,14 +118,21 @@ export interface YayaRunSourceBindingInput {
  * run 记录 → 来源绑定（AGENT-APP1 落地）。
  * 模型最终引用（outcome.sources）不是本函数的入参：引用只做展示，
  * 既不能替代依赖，也不能因缺引用而缩小依赖。
+ *
+ * R1：依赖完整性按**整段**判定 —— 只要存在任一未映射 / 无法核验的依赖条目，
+ * 或计数本身非法（负数 / 小数 / 非有限数），整段绑定即 `unknown`；
+ * 已映射的可读来源不能让混合集合保持 `bound`，
+ * `independently_readable:false` 也不能替代依赖完整性。
  */
 export function buildYayaRunSourceBinding(input: YayaRunSourceBindingInput): YayaRunSourceBinding {
   if (input.resource_dependencies === null) return { state: "unknown" };
+  const unmapped = input.unmapped_dependency_count;
+  if (!Number.isFinite(unmapped) || !Number.isInteger(unmapped) || unmapped < 0) {
+    return { state: "unknown" };
+  }
+  if (unmapped > 0) return { state: "unknown" };
   const dependencies = [...input.resource_dependencies];
-  const generalQaProven =
-    input.private_dependency_proven_absent &&
-    input.unmapped_dependency_count === 0 &&
-    dependencies.length === 0;
+  const generalQaProven = input.private_dependency_proven_absent && dependencies.length === 0;
   return { state: "bound", dependencies, general_qa_proven: generalQaProven };
 }
 
@@ -214,6 +235,19 @@ const yayaRecoveryMarkSchema: z.ZodType<YayaChatRecoveryMark> = z
     if (value.operations.length > 0 && value.proposal === null) {
       ctx.addIssue({ code: "custom", path: ["proposal"], message: "带操作身份的标记必须同时带提案身份" });
     }
+    // R1：标记内 operation_id / item_key 必须唯一，重复身份不得产生重复结果
+    const seenOperations = new Set<string>();
+    const seenItems = new Set<string>();
+    value.operations.forEach((operation, index) => {
+      if (seenOperations.has(operation.operation_id)) {
+        ctx.addIssue({ code: "custom", path: ["operations", index, "operation_id"], message: "operation_id 必须唯一" });
+      }
+      if (seenItems.has(operation.item_key)) {
+        ctx.addIssue({ code: "custom", path: ["operations", index, "item_key"], message: "item_key 必须唯一" });
+      }
+      seenOperations.add(operation.operation_id);
+      seenItems.add(operation.item_key);
+    });
   });
 
 /**
@@ -264,7 +298,8 @@ export type YayaRecoveryUnverifiableReason = (typeof YAYA_RECOVERY_UNVERIFIABLE_
 export interface YayaRecoveryOperationFacts {
   readonly planned: YayaPlannedOperation;
   readonly content_digest: string;
-  readonly outcome: YayaOperationQueryOutcome;
+  /** 原 `operation_id` 查询返回的回执本体；结论由核验方按原计划重算，不采信自带结论 */
+  readonly receipts: readonly YayaOperationReceipt[];
 }
 
 export interface YayaRecoveryFacts {
@@ -282,8 +317,75 @@ function unverifiable(reason: YayaRecoveryUnverifiableReason): YayaRecoveryVerdi
   return { verifiable: false, reason };
 }
 
+/** 判定与遍历顺序无关：多个原因同时出现时按原因枚举的固定次序取最优先 */
+function pickReason(
+  current: YayaRecoveryUnverifiableReason | null,
+  candidate: YayaRecoveryUnverifiableReason,
+): YayaRecoveryUnverifiableReason {
+  if (current === null) return candidate;
+  return YAYA_RECOVERY_UNVERIFIABLE_REASONS.indexOf(current) <=
+    YAYA_RECOVERY_UNVERIFIABLE_REASONS.indexOf(candidate)
+    ? current
+    : candidate;
+}
+
+function markOperationIdentitiesUnique(mark: YayaChatRecoveryMark): boolean {
+  const operations = new Set<string>();
+  const items = new Set<string>();
+  for (const operation of mark.operations) {
+    if (operations.has(operation.operation_id) || items.has(operation.item_key)) return false;
+    operations.add(operation.operation_id);
+    items.add(operation.item_key);
+  }
+  return true;
+}
+
+/** 单条事实 ↔ 标记派生的原计划：逐字段核对，原因词汇与冻结判定同一口径 */
+function operationFactMismatch(
+  entry: YayaRecoveryOperationFacts,
+  expected: YayaPlannedOperation,
+  contentDigest: string,
+): YayaRecoveryUnverifiableReason | null {
+  const planned = entry.planned;
+  if (
+    planned.proposal_id !== expected.proposal_id ||
+    planned.batch_id !== expected.batch_id ||
+    planned.item_key !== expected.item_key ||
+    planned.operation_id !== expected.operation_id
+  ) {
+    return "operation_mismatch";
+  }
+  if (planned.actor_account_id !== expected.actor_account_id) return "actor_mismatch";
+  if (planned.target_id !== expected.target_id) return "target_mismatch";
+  if (entry.content_digest !== contentDigest) return "content_mismatch";
+  return null;
+}
+
+/** 冻结判定给出 `identity_mismatch` 后的精确诊断（operation_id 已在调用前过滤） */
+function diagnoseReceiptIdentityMismatch(
+  receipts: readonly YayaOperationReceipt[],
+  expected: YayaPlannedOperation,
+): YayaRecoveryUnverifiableReason {
+  for (const receipt of receipts) {
+    if (receipt.actor_account_id !== expected.actor_account_id) return "actor_mismatch";
+    if (receipt.target_id !== expected.target_id) return "target_mismatch";
+  }
+  return "operation_mismatch";
+}
+
 /**
  * 标记 ↔ 服务端事实的身份核验（owner 先于角色；本函数没有 role 入参）。
+ *
+ * R1 口径：
+ * 1. 原计划只由**标记**派生，不从回执 / 事实反建 expected（调用方无法自证）；
+ * 2. 回执本体用冻结 `queryOperationOutcome` 按原计划重算，事实里自带的结论不采信；
+ *    `unknown/identity_mismatch` → 不可核验并精确诊断，`unknown/contradictory_receipts`
+ *    → 不可核验；`invalid_success_proof` / `no_receipt` / `verification_required`
+ *    以及 `unchanged` / `saved_detail_unavailable` / `in_progress` / `failed` / `conflict`
+ *    按冻结语义原样返回（不新增第六种 run 状态）；
+ * 3. 同 operation 的事实先分组，组内每条都核对，矛盾拒绝且与遍历顺序无关；
+ *    完全相同的重复事实 / 重复回执规范为一个结果；
+ * 4. 标记 operation_id / item_key 唯一，否则不可核验（不产生重复结果）。
  * 任一身份不一致或回执矛盾都保持不可核验；只返回原查询结论，不新建任何身份。
  */
 export function verifyYayaRecoveryIdentity(
@@ -301,28 +403,55 @@ export function verifyYayaRecoveryIdentity(
       return unverifiable("run_mismatch");
     }
   }
+  if (!markOperationIdentitiesUnique(mark)) return unverifiable("operation_mismatch");
+
+  const factsByOperation = new Map<string, YayaRecoveryOperationFacts[]>();
+  for (const entry of facts.operations) {
+    const bucket = factsByOperation.get(entry.planned.operation_id);
+    if (bucket === undefined) factsByOperation.set(entry.planned.operation_id, [entry]);
+    else bucket.push(entry);
+  }
+
   const outcomes: YayaOperationQueryOutcome[] = [];
   for (const operation of mark.operations) {
     if (mark.proposal === null) return unverifiable("operation_mismatch");
-    const fact = facts.operations.find(
-      (entry) => entry.planned.operation_id === operation.operation_id,
-    );
-    if (fact === undefined) return unverifiable("operation_missing");
-    const planned = fact.planned;
-    if (
-      planned.proposal_id !== mark.proposal.proposal_id ||
-      planned.batch_id !== mark.proposal.batch_id ||
-      planned.item_key !== operation.item_key
-    ) {
-      return unverifiable("operation_mismatch");
+    const group = factsByOperation.get(operation.operation_id);
+    if (group === undefined) return unverifiable("operation_missing");
+
+    const expected: YayaPlannedOperation = {
+      batch_id: mark.proposal.batch_id,
+      proposal_id: mark.proposal.proposal_id,
+      item_key: operation.item_key,
+      operation_id: operation.operation_id,
+      target_id: operation.target_id,
+      actor_account_id: mark.actor_account_id,
+    };
+
+    let identityReason: YayaRecoveryUnverifiableReason | null = null;
+    const receipts: YayaOperationReceipt[] = [];
+    for (const entry of group) {
+      const reason = operationFactMismatch(entry, expected, operation.content_digest);
+      if (reason !== null) identityReason = pickReason(identityReason, reason);
+      for (const receipt of entry.receipts) {
+        if (receipt.operation_id !== expected.operation_id) {
+          identityReason = pickReason(identityReason, "operation_mismatch");
+        } else {
+          receipts.push(receipt);
+        }
+      }
     }
-    if (planned.actor_account_id !== mark.actor_account_id) return unverifiable("actor_mismatch");
-    if (planned.target_id !== operation.target_id) return unverifiable("target_mismatch");
-    if (fact.content_digest !== operation.content_digest) return unverifiable("content_mismatch");
-    if (fact.outcome.kind === "unknown" && fact.outcome.reason === "contradictory_receipts") {
-      return unverifiable("contradictory_receipt");
+    if (identityReason !== null) return unverifiable(identityReason);
+
+    const outcome = queryOperationOutcome(receipts, expected);
+    if (outcome.kind === "unknown") {
+      if (outcome.reason === "identity_mismatch") {
+        return unverifiable(diagnoseReceiptIdentityMismatch(receipts, expected));
+      }
+      if (outcome.reason === "contradictory_receipts") {
+        return unverifiable("contradictory_receipt");
+      }
     }
-    outcomes.push(fact.outcome);
+    outcomes.push(outcome);
   }
   return { verifiable: true, outcomes };
 }
@@ -330,23 +459,35 @@ export function verifyYayaRecoveryIdentity(
 /* ------------------------------- 恢复只读路径 ------------------------------- */
 
 /**
- * 恢复可用路径：只有历史投影与原回执查询；模板直接引用 API0 冻结常量，
+ * 恢复可用路径：历史投影、原运行、原回执查询与提案投影；模板直接引用 API0
+ * 冻结常量（proposals 为冻结 `approval` 路径的父路径，由检查项锁定），
  * 保证发起 / 执行 / 批准三个写路径不可能混入。
  */
 export const YAYA_RECOVERY_PATHS = {
   messages: "/api/yaya/conversations/{conversation_id}/messages",
   run_lookup: YAYA_API_PATHS.run_lookup,
   operations_query: YAYA_API_PATHS.operations_query,
+  /** 提案投影读取（pending proposal-only 消息按 proposal_id 恢复可核对内容） */
+  proposals_query: `${YAYA_API_PATHS.approval.replace("/{proposal_id}/approval", "")}?proposal_id={proposal_id}`,
 } as const;
 
 export interface YayaRecoveryRequest {
   readonly method: "GET";
   readonly path: string;
+  /** 独立参数原值（不做路径编码）；消费方必须用 URLSearchParams 拼接 */
   readonly query: Readonly<Record<string, string>>;
 }
 
-function substitute(template: string, vars: Readonly<Record<string, string>>): string {
-  return template.replace(/\{([a-z_]+)\}/g, (whole, name: string) => vars[name] ?? whole);
+function replacePlaceholder(
+  template: string,
+  vars: Readonly<Record<string, string>>,
+  encode: boolean,
+): string {
+  return template.replace(/\{([a-z_]+)\}/g, (whole, name: string) => {
+    const value = vars[name];
+    if (value === undefined) return whole;
+    return encode ? encodeURIComponent(value) : value;
+  });
 }
 
 function buildRecoveryRequest(
@@ -359,14 +500,15 @@ function buildRecoveryRequest(
     for (const pair of queryTemplate.split("&")) {
       if (pair === "") continue;
       const [key, value] = pair.split("=");
-      query[decodeURIComponent(key)] = substitute(decodeURIComponent(value ?? ""), vars);
+      query[decodeURIComponent(key)] = replacePlaceholder(decodeURIComponent(value ?? ""), vars, false);
     }
   }
-  return { method: "GET", path: substitute(pathTemplate, vars), query };
+  // 路径变量按原身份编码，保留字符不得改变目标路径（R1 / P2）
+  return { method: "GET", path: replacePlaceholder(pathTemplate, vars, true), query };
 }
 
 /**
- * 标记 → 只读查询清单：历史 GET、原运行 GET、逐原操作 GET。
+ * 标记 → 只读查询清单：历史 GET、原运行 GET、提案投影 GET、逐原操作 GET。
  * 不含 POST：不重新发起 run、不执行旧批准、不产生业务写。
  */
 export function yayaRecoveryLookupRequests(
@@ -380,6 +522,13 @@ export function yayaRecoveryLookupRequests(
       buildRecoveryRequest(YAYA_RECOVERY_PATHS.run_lookup, {
         conversation_id: mark.conversation_id,
         client_request_id: mark.run.client_request_id,
+      }),
+    );
+  }
+  if (mark.proposal !== null) {
+    requests.push(
+      buildRecoveryRequest(YAYA_RECOVERY_PATHS.proposals_query, {
+        proposal_id: mark.proposal.proposal_id,
       }),
     );
   }
