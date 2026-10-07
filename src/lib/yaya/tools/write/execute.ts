@@ -45,6 +45,7 @@ import {
   type YayaPreparedItemView,
 } from '../../storage-types';
 import type { YayaApprovalSubmitter, YayaPlannedOperation } from '../../types';
+import { assertProposalItemBinding } from './binding';
 import { createUnavailableMediaStore } from './registry';
 import type {
   YayaOperationsExecutionResult,
@@ -180,6 +181,9 @@ export function createYayaOperationsExecutor(options: {
         if (!entry) {
           throw new YayaDataError('invalid_request', `未注册的写操作：${item.payload.kind}`);
         }
+        // 共享执行入口绑定：payload 形状 + 推导出的真实动作/资源/目标必须与
+        // 批准条目声明一致（模型与回执之前，批准不消费）。
+        await assertProposalItemBinding(client, item);
         loaded.push({
           planned: view.planned,
           item,

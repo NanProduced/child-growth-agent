@@ -3,6 +3,7 @@ import type { AccessAction, AccessResourceKind } from "@/lib/accounts/types";
 import { yayaDataRepository, withPrivateRead, withPrivateWrite, yayaRouteError } from "@/lib/yaya/data";
 import { YayaDataError, type YayaPrepareItemInput } from "@/lib/yaya/storage-types";
 import type { YayaToolAuth } from "@/lib/yaya/types";
+import { parseWritePayload } from "@/lib/yaya/tools/write/schemas";
 
 function parseToolAuth(value: unknown): YayaToolAuth {
   if (typeof value !== "object" || value === null) {
@@ -40,12 +41,16 @@ function parsePrepareItems(value: unknown): YayaPrepareItemInput[] {
       typeof record.payload !== "object" ||
       record.payload === null ||
       !Array.isArray(record.attachment_associations) ||
-      (record.business_revision !== null &&
-        record.business_revision !== undefined &&
-        typeof record.business_revision !== "string")
+        (record.business_revision !== null &&
+          record.business_revision !== undefined &&
+          typeof record.business_revision !== "string")
     ) {
       throw new YayaDataError("invalid_request", "提案条目不合法。");
     }
+    // 保存 payload 形状校验（表外 kind / 密码类操作 / 形状不合法一律拒绝）。
+    // 声明与 payload 的绑定不在这里做：绑定需要执行期语义，由执行入口
+    // loadOperations 的 assertProposalItemBinding 统一负责。
+    parseWritePayload(record.payload);
     for (const association of record.attachment_associations) {
       if (
         typeof association !== "object" ||

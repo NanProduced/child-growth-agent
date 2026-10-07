@@ -194,7 +194,9 @@ export interface YayaVerifiedApprovedOperations {
 }
 
 /**
- * 目标业务行锁（稳定顺序：children → classes → observations → teacher accounts）。
+ * 目标业务行锁（稳定顺序：children → app_accounts → classes → observations）。
+ * 与既有调用链全局一致：任教服务先锁 teacher 账号再 INSERT 任教关系（FK 需要
+ * classes 行锁），转班先锁 children 再碰 classes；工具按同一顺序取锁即无环。
  * 锁后读取并核对批准版本，消除“先读旧修订、等待行锁后被并发覆盖”的窗口；
  * 只锁当前操作明确指向的目标行，不给普通只读 getter 加锁。
  */
@@ -209,8 +211,12 @@ async function lockExecutionTargets(
   for (const item of items) {
     const ref = parseResourceRef(item.resource_ref);
     if (ref === null) continue;
+    const payload = item.payload as YayaProposalItem["payload"];
     if (ref.kind === "child" || ref.kind === "transfer") add(0, "children", ref.child_id);
-    if (ref.kind === "class" && ref.class_id !== null) add(1, "classes", ref.class_id);
+    if (payload.kind === "manage_teacher" && payload.teacher_account_id) {
+      add(1, "app_accounts", payload.teacher_account_id);
+    }
+    if (ref.kind === "class" && ref.class_id !== null) add(2, "classes", ref.class_id);
     if (ref.kind === "observation") {
       const found = await client.query<{ child_id: string }>(
         "SELECT child_id FROM observations WHERE id = $1",
@@ -218,13 +224,7 @@ async function lockExecutionTargets(
       );
       const childId = found.rows[0]?.child_id;
       if (childId) add(0, "children", childId);
-      add(2, "observations", ref.observation_id);
-    }
-    if (ref.kind === "school") {
-      const payload = item.payload as YayaProposalItem["payload"];
-      if (payload.kind === "manage_teacher" && payload.teacher_account_id) {
-        add(3, "app_accounts", payload.teacher_account_id);
-      }
+      add(3, "observations", ref.observation_id);
     }
   }
   const ordered = [...targets.values()].sort(
@@ -402,12 +402,17 @@ export async function verifyApprovedOperations(
       approval_item: approvalItem,
       proposal_origin: proposal.proposal_origin,
     };
-    if (approvalItem.business_revision !== null) {
-      if (!input.resolveBusinessRevision) {
-        reasons.push("business_version_changed");
+    if (input.resolveBusinessRevision) {
+      const resolved = await input.resolveBusinessRevision(context);
+      if (approvalItem.business_revision === null) {
+        // 批准快照是 null（缺版本前提）：当前事实存在版本即前提不成立，保守拒绝；
+        // 当前也无版本（创建/附件 CAS 等真正无版本动作）才继续。
+        if (resolved !== null) reasons.push("business_version_changed");
       } else {
-        businessRevision = await input.resolveBusinessRevision(context);
+        businessRevision = resolved;
       }
+    } else if (approvalItem.business_revision !== null) {
+      reasons.push("business_version_changed");
     }
     executions.push({
       item_key: approvalItem.item_key,
