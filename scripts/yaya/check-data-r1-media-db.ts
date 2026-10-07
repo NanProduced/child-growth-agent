@@ -229,6 +229,7 @@ async function main(): Promise<void> {
     await database.query(fs.readFileSync(`${ROOT}scripts/initialize-demo-db.sql`, "utf8"));
     await database.query(fs.readFileSync(`${ROOT}scripts/upgrade-auth-v1.sql`, "utf8"));
     await database.query(fs.readFileSync(`${ROOT}scripts/upgrade-yaya-v1.sql`, "utf8"));
+    await database.query(fs.readFileSync(`${ROOT}scripts/upgrade-yaya-chat-bind-v1.sql`, "utf8"));
 
     const classA = randomUUID();
     const classB = randomUUID();

@@ -30,6 +30,7 @@ export const yayaDataRepository = {
   renameConversation: conversations.renameConversation,
   deleteConversation: conversations.deleteConversation,
   saveMessage: messages.saveMessage,
+  saveRunTerminalMessage: messages.saveRunTerminalMessage,
   listMessages: messages.listMessages,
   prepareProposal: proposals.prepareProposal,
   getProposal: proposals.getProposal,

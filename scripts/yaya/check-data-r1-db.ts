@@ -185,6 +185,7 @@ async function main(): Promise<void> {
     await database.query(fs.readFileSync(`${ROOT}scripts/initialize-demo-db.sql`, "utf8"));
     await database.query(fs.readFileSync(`${ROOT}scripts/upgrade-auth-v1.sql`, "utf8"));
     await database.query(fs.readFileSync(`${ROOT}scripts/upgrade-yaya-v1.sql`, "utf8"));
+    await database.query(fs.readFileSync(`${ROOT}scripts/upgrade-yaya-chat-bind-v1.sql`, "utf8"));
     const classA = randomUUID();
     const classB = randomUUID();
     const classC = randomUUID();
@@ -226,40 +227,39 @@ async function main(): Promise<void> {
     );
     check("A 创建会话 201", created.status === 201);
     const convPrivate = (created.json.conversation as Record<string, unknown>).conversation_id as string;
-    const privateMessage = await respond(
-      messagesPost(
-        req(
-          teacherA.token,
-          "POST",
+    const privateSaved = await withRawTransaction(database, (tx) =>
+      yayaDataRepository.saveRunTerminalMessage(tx, teacherA.principal, "single-school", {
+        conversation_id: convPrivate,
+        role: "assistant",
+        message_kind: "text",
+        execution_state: "none",
+        fragments: [
           {
-            client_message_id: "r1-m1",
-            role: "assistant",
-            message_kind: "text",
-            fragments: [
-              {
-                fragment_id: "f-priv",
-                text: PRIVATE_FRAGMENT,
-                sources: [{ kind: "child", child_id: childC, current_class_id: null }],
-                independently_readable: true,
-                provenance: {
-                  kind: "child_fact",
-                  ref_id: obsA,
-                  label: PRIVATE_PROVENANCE,
-                  derived_from: null,
-                },
-              },
-            ],
-            attachment_ids: [],
-            expected_conversation_revision: 1,
+            fragment_id: "f-priv",
+            text: PRIVATE_FRAGMENT,
+            sources: [{ kind: "child", child_id: childC, current_class_id: null }],
+            independently_readable: true,
+            provenance: {
+              kind: "child_fact",
+              ref_id: obsA,
+              label: PRIVATE_PROVENANCE,
+              derived_from: null,
+            },
           },
-          `/api/yaya/conversations/${convPrivate}/messages`,
-        ),
-        params(convPrivate),
-      ),
+        ],
+        attachment_ids: [],
+        run: { run_id: `${RUN}-r1-m1`, client_request_id: `${RUN}-r1-m1-req` },
+        binding_state: "bound",
+        expected_conversation_revision: 1,
+      }),
     );
-    check("A 保存受限来源消息 201", privateMessage.status === 201);
-    check("A 受限片段正文不得出现在消息响应", !privateMessage.text.includes(PRIVATE_FRAGMENT));
-    check("A 受限片段 provenance.label 不得出现在消息响应", !privateMessage.text.includes(PRIVATE_PROVENANCE));
+    const privateMessageText = JSON.stringify(privateSaved);
+    check(
+      "A 内部保存受限来源消息成功（repository 层）",
+      privateSaved.replayed === false && privateSaved.message.role === "assistant",
+    );
+    check("A 受限片段正文不得出现在保存结果", !privateMessageText.includes(PRIVATE_FRAGMENT));
+    check("A 受限片段 provenance.label 不得出现在保存结果", !privateMessageText.includes(PRIVATE_PROVENANCE));
 
     const renamedPrivate = await respond(
       conversationPatch(
@@ -288,38 +288,37 @@ async function main(): Promise<void> {
     );
     check("A 详情响应不得含受限正文/provenance 标记", !detail.text.includes(PRIVATE_FRAGMENT) && !detail.text.includes(PRIVATE_PROVENANCE));
 
-    const replay = await respond(
-      messagesPost(
-        req(
-          teacherA.token,
-          "POST",
+    const replaySaved = await withRawTransaction(database, (tx) =>
+      yayaDataRepository.saveRunTerminalMessage(tx, teacherA.principal, "single-school", {
+        conversation_id: convPrivate,
+        role: "assistant",
+        message_kind: "text",
+        execution_state: "none",
+        fragments: [
           {
-            client_message_id: "r1-m1",
-            role: "assistant",
-            message_kind: "text",
-            fragments: [
-              {
-                fragment_id: "f-priv",
-                text: PRIVATE_FRAGMENT,
-                sources: [{ kind: "child", child_id: childC, current_class_id: null }],
-                independently_readable: true,
-                provenance: {
-                  kind: "child_fact",
-                  ref_id: obsA,
-                  label: PRIVATE_PROVENANCE,
-                  derived_from: null,
-                },
-              },
-            ],
-            attachment_ids: [],
-            expected_conversation_revision: 1,
+            fragment_id: "f-priv",
+            text: PRIVATE_FRAGMENT,
+            sources: [{ kind: "child", child_id: childC, current_class_id: null }],
+            independently_readable: true,
+            provenance: {
+              kind: "child_fact",
+              ref_id: obsA,
+              label: PRIVATE_PROVENANCE,
+              derived_from: null,
+            },
           },
-          `/api/yaya/conversations/${convPrivate}/messages`,
-        ),
-        params(convPrivate),
-      ),
+        ],
+        attachment_ids: [],
+        run: { run_id: `${RUN}-r1-m1`, client_request_id: `${RUN}-r1-m1-req` },
+        binding_state: "bound",
+        expected_conversation_revision: 1,
+      }),
     );
-    check("A 幂等回放响应不得含原始标题", !replay.text.includes(PRIVATE_TITLE));
+    check("A 幂等回放命中 replayed=true", replaySaved.replayed === true);
+    check(
+      "A 幂等回放结果不得含原始标题",
+      !JSON.stringify(replaySaved).includes(PRIVATE_TITLE),
+    );
 
     const secondMessage = await respond(
       messagesPost(
