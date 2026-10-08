@@ -33,6 +33,7 @@ import type { MediaServiceDeps } from "../../src/lib/media/runtime";
 import {
   contentAttachmentId,
   deterministicAttachmentId,
+  recycledContentAttachmentId,
   uploadImages,
 } from "../../src/lib/media/upload-service";
 
@@ -441,14 +442,16 @@ async function main(): Promise<void> {
     assert.equal((await listFiles(CHECK_ROOT)).length, before + 3);
   });
 
-  await check("B5 补偿删除未知：不宣称清理成功", async () => {
+  await check("B5 回收后稳定身份失败：保留共享对象、不宣称清理成功", async () => {
     metadata.clearFailpoints();
-    // 内容身份已被回收 → 重新上传走随机兜底身份，对象阶段失败才会精确补偿；
-    // 补偿删除返回 unknown 时必须如实报错，不宣称清理成功。
+    // Recycled identities are deterministic too: a failed sibling never owns
+    // exclusive deletion rights. Unknown deletion remains covered by A7.
     const content = await pngBuffer(150, 150);
     const recycled = await uploadOne(deps, OWNER_A, content);
     assert.equal((await recycleAttachment(deps, { attachment_id: recycled.attachment_id, actor_account_id: OWNER_A })).status, "deleted");
     const recordsBefore = metadata.countAttachments();
+    const objectsBefore = (await listFiles(CHECK_ROOT)).length;
+    let deleteAttempts = 0;
     const unknownStore = {
       putOnce: async (input: { key: string; content_type: string; body: Buffer }) => {
         if (input.key.endsWith("/thumbnail")) {
@@ -458,6 +461,7 @@ async function main(): Promise<void> {
       },
       get: store.get.bind(store),
       delete: async (key: string) => {
+          deleteAttempts++;
         if (key.endsWith("/original")) return "unknown" as const;
         return store.delete(key);
       },
@@ -468,8 +472,14 @@ async function main(): Promise<void> {
       files: [{ filename: "b5.png", declared_content_type: null, body: content, client_upload_id: null }],
     });
     const first = batch.uploads[0];
-    assert.ok(first && !first.ok && first.code === "compensation_unknown");
+    assert.ok(first && !first.ok && first.code === "object_store_unavailable");
     assert.equal(metadata.countAttachments(), recordsBefore);
+    assert.equal(deleteAttempts, 0, "failed request cannot delete objects shared by a stable identity");
+    assert.equal((await listFiles(CHECK_ROOT)).length, objectsBefore + 1, "partial original remains retryable");
+    const retry = await uploadOne(deps, OWNER_A, content);
+    assert.equal(retry.attachment_id, recycledContentAttachmentId(OWNER_A, sha256Hex(content), recycled.attachment_id));
+    assert.equal(metadata.countAttachments(), recordsBefore + 1);
+    assert.equal((await listFiles(CHECK_ROOT)).length, objectsBefore + 3, "retry completes the same object family without orphan duplication");
   });
 
   await check("B6 同键同内容恢复；同键异内容明确冲突", async () => {
