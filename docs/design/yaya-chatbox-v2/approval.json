@@ -1,0 +1,17 @@
+{
+  "approved": true,
+  "approval_date": "2026-10-08",
+  "approval_scope": "overall_design_direction_only",
+  "user_statement": "可以采用，后续可以按此设计稿作为设计大方向进行代码实现，然后再根据实际页面效果做UI/UX打磨",
+  "generator": "image_gen.imagegen",
+  "model": null,
+  "usage": null,
+  "synthetic_design_data": true,
+  "pixel_fidelity_required": false,
+  "deployment_authorized_by_this_approval": false,
+  "images": [
+    { "file": "desktop-companion.png", "prompt": "desktop-companion.png.prompt.txt", "width": 1487, "height": 1058, "sha256": "7e6e71ef7cff0f65a62c8e9e27e60fe2037af350aaaea98c9fc2325353b97bcf" },
+    { "file": "desktop-review.png", "prompt": "desktop-review.png.prompt.txt", "width": 1487, "height": 1058, "sha256": "82c1a4859344a042df05ef33a02a754bc632d2b4894877b0e805930f7bc5e4e5" },
+    { "file": "mobile-conversation.png", "prompt": "mobile-conversation.png.prompt.txt", "width": 853, "height": 1844, "sha256": "d43c41b6a4893a06bf31dd4dd0c0d49ed2dc0fe19b268b110dee37a8ee02e345" }
+  ]
+}

@@ -150,4 +150,7 @@ body {
   .yaya-workspace-thread [data-yaya-proposal] {
     display: none;
   }
+  .yaya-workspace-thread [data-yaya-proposal-summary] {
+    display: block;
+  }
 }
