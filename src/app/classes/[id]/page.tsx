@@ -199,7 +199,7 @@ export default async function ClassDetailPage({
           </div>
         </div>
 
-        <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-slate-100 pt-4 sm:grid-cols-4">
+        {dbError ? null : <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-slate-100 pt-4 sm:grid-cols-4">
           <div className="min-w-0">
             <dt className="text-xs text-slate-500">成长档案</dt>
             <dd className="mt-1 text-sm font-medium text-slate-800">{children.length} 份</dd>
@@ -220,7 +220,7 @@ export default async function ClassDetailPage({
               {latest ? formatDateCn(latest.observed_at) : '还没有记录'}
             </dd>
           </div>
-        </dl>
+        </dl>}
       </section>
 
       {!klass.is_active ? (

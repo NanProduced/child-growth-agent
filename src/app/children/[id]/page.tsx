@@ -265,8 +265,8 @@ export default async function ChildDetailPage({
       </Button>
 
       <section className="rounded-2xl border bg-white p-5 sm:p-6">
-        <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
-          <div className="flex min-w-0 items-start gap-4">
+        <div className="flex flex-col flex-wrap gap-5 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-start gap-4 sm:basis-[20rem] sm:flex-1">
             <span className="flex size-14 shrink-0 items-center justify-center rounded-full bg-amber-100 text-4xl">
               {child.avatar_emoji ?? '🧒'}
             </span>
@@ -282,7 +282,7 @@ export default async function ChildDetailPage({
                 {child.current_class ? (
                   <Link
                     href={`/classes/${child.current_class.id}`}
-                    className="inline-flex min-h-11 items-center text-sm text-emerald-700 hover:text-emerald-800"
+                    className="inline-flex min-h-11 min-w-11 shrink-0 items-center text-sm text-emerald-700 hover:text-emerald-800"
                   >
                     查看班级
                   </Link>
@@ -296,7 +296,7 @@ export default async function ChildDetailPage({
               ) : null}
             </div>
           </div>
-          <div className="flex shrink-0 flex-wrap gap-2">
+          <div className="flex min-w-0 max-w-full shrink-0 flex-wrap gap-2">
             <Button asChild variant="outline" className="min-h-11">
               <Link href={`/children/${encodeURIComponent(child.id)}/evidence?${evidenceEntryQuery(child.class_stage)}`}>
                 查看指南证据册

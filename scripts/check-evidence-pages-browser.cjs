@@ -95,6 +95,46 @@ async function main() {
         const itemId = seed.manifest.guide_items.behavior_item_id;
         const classPath = `/classes/${klass.id}/evidence?age_band=3-4`;
         const childPath = `/children/${child.id}/evidence?age_band=3-4`;
+        // Bounded closeout of two platform-audit findings; not another whole-site visual pass.
+        const contrastContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+        try {
+            const guest = await contrastContext.newPage();
+            await guest.goto(base, { waitUntil: "networkidle" });
+            const ratios = await guest.locator('[aria-label="小班至中班至大班持续追踪"] span').evaluateAll((elements) => {
+                const canvas = document.createElement("canvas"), ctx = canvas.getContext("2d");
+                const rgb = (color) => { ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = color; ctx.fillRect(0, 0, 1, 1); return [...ctx.getImageData(0, 0, 1, 1).data]; };
+                const luminance = (color) => color.slice(0, 3).map(v => { const x = v / 255; return x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4; }).reduce((sum, x, i) => sum + x * [.2126, .7152, .0722][i], 0);
+                return elements.map(el => { const s = getComputedStyle(el), fg = rgb(s.color), bg = rgb(s.backgroundColor), a = luminance(fg), b = luminance(bg); return { text: el.textContent, ratio: (Math.max(a, b) + .05) / (Math.min(a, b) + .05), opaque: fg[3] === 255 && bg[3] === 255 }; });
+            });
+            check("guest mobile stage labels have opaque measured colors", ratios.length === 3 && ratios.every(row => row.opaque), "real_browser_computed_style");
+            check("guest mobile stage labels contrast at least 4.5", ratios.every(row => row.ratio >= 4.5), "real_browser_computed_style");
+            node_fs_1.default.writeFileSync(node_path_1.default.join(OUT, "platform-contrast.json"), JSON.stringify(ratios, null, 2));
+            await guest.screenshot({ path: node_path_1.default.join(OUT, "guest-contrast-390.png"), scale: "css" });
+        } finally { await contrastContext.close(); }
+        const stressContext = await browser.newContext({ viewport: { width: 768, height: 900 } });
+        try {
+            const login = await stressContext.request.post(base + "/api/auth/login", { headers: { origin: base, "x-cga-auth-request": "1" }, data: creds.teacher_a });
+            check("typeset closeout uses real teacher login", login.status() === 200);
+            const stressPage = await stressContext.newPage();
+            await stressPage.goto(`${base}/children/${child.id}`, { waitUntil: "networkidle" });
+            // Same DOM text-size stress as the audit; this is not native browser zoom evidence.
+            await stressPage.evaluate(() => { document.documentElement.style.fontSize = "200%"; });
+            const classLink = stressPage.getByRole("link", { name: "查看班级", exact: true }).filter({ visible: true });
+            await classLink.scrollIntoViewIfNeeded();
+            const box = await classLink.boundingBox();
+            check("200 percent text-size class link remains at least 44 by 44", box && box.width >= 43.5 && box.height >= 43.5, "browser_dom_text_scale_double");
+            check("200 percent text-size class link is not obscured", await classLink.evaluate(el => { const r = el.getBoundingClientRect(), hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return hit && el.contains(hit); }), "browser_dom_text_scale_double");
+            const title = await stressPage.locator('[data-platform-surface="child-detail"] h1:visible').evaluate(el => { const r = el.getBoundingClientRect(), s = getComputedStyle(el); return { width: r.width, height: r.height, fontSize: parseFloat(s.fontSize), lineHeight: parseFloat(s.lineHeight) }; });
+            node_fs_1.default.writeFileSync(node_path_1.default.join(OUT, "platform-text-scale.json"), JSON.stringify({ box, title, native_zoom: "NOT_RUN" }, null, 2));
+            await stressPage.screenshot({ path: node_path_1.default.join(OUT, "child-text-scale-200percent.png"), scale: "css" });
+            // Two glyphs excludes the old one-character column without mistaking tight letter spacing for failure.
+            check("200 percent text-size child identity is not squeezed into a character column", title.width >= title.fontSize * 2 && title.height <= title.lineHeight * 2 + 1, "browser_dom_text_scale_double");
+        } finally { await stressContext.close(); }
+        if (process.env.PLATFORM_CLOSEOUT_ONLY === "1") {
+            check("closeout model guard zero attempts", guard.hits === 0, "egress_guard");
+            completed = true;
+            return;
+        }
         for (const viewport of [
             { width: 1440, height: 900 }, { width: 1440, height: 1024 },
             { width: 1024, height: 768 }, { width: 768, height: 1024 }, { width: 390, height: 844 },
