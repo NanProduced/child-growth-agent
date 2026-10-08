@@ -128,9 +128,10 @@ async function main() {
             const overview = await overviewResponse.json();
             check("real roster denominator 3, not design 20", overview.roster.child_count === 3);
             await page.goto(base + classPath, { waitUntil: "domcontentloaded" });
-            const root = page.locator("[data-testid=class-evidence-overview]");
+            const root = page.locator("[data-testid=class-evidence-overview]:visible");
             await root.waitFor();
-            await page.locator("[data-testid=class-evidence-overview][data-client-ready=true]").waitFor({ timeout: 60000 }).catch(async (error) => {
+            check("exactly one visible class page", await root.count() === 1);
+            await page.locator("[data-testid=class-evidence-overview][data-client-ready=true]:visible").waitFor({ timeout: 60000 }).catch(async (error) => {
                 await page.screenshot({ path: node_path_1.default.join(OUT, "class-client-failure.png"), scale: "css" });
                 node_fs_1.default.writeFileSync(node_path_1.default.join(OUT, "class-client-failure.json"), JSON.stringify({ errors, scriptErrors: await page.evaluate(() => window.__evidenceScriptErrors), text: await page.locator("body").innerText() }, null, 2));
                 throw error;
@@ -240,9 +241,10 @@ async function main() {
                 await nextPanel.getByRole("button", { name: "返回指南条目", exact: true }).click();
             }
             await page.goto(base + childPath, { waitUntil: "domcontentloaded" });
-            const childRoot = page.locator("[data-testid=child-evidence-book]");
+            const childRoot = page.locator("[data-testid=child-evidence-book]:visible");
             await childRoot.waitFor();
-            await page.locator("[data-testid=child-evidence-book][data-client-ready=true]").waitFor({ timeout: 30000 }).catch(async (error) => {
+            check("exactly one visible child page", await childRoot.count() === 1);
+            await page.locator("[data-testid=child-evidence-book][data-client-ready=true]:visible").waitFor({ timeout: 30000 }).catch(async (error) => {
                 await page.screenshot({ path: node_path_1.default.join(OUT, "child-client-failure.png"), scale: "css" });
                 node_fs_1.default.writeFileSync(node_path_1.default.join(OUT, "child-client-failure.json"), JSON.stringify({ errors, text: await page.locator("body").innerText(), scripts: await page.locator("script[src]").evaluateAll((elements) => elements.map((element) => element.getAttribute("src"))) }, null, 2));
                 throw error;
@@ -272,10 +274,10 @@ async function main() {
         check("admin real login", adminLogin.status() === 200);
         const adminPage = await admin.newPage();
         await adminPage.goto(base + childPath, { waitUntil: "domcontentloaded" });
-        await adminPage.locator("[data-testid=child-evidence-book]").waitFor();
+        await adminPage.locator("[data-testid=child-evidence-book]:visible").waitFor();
         check("admin child evidence has no record-writing button", await adminPage.locator("[data-testid=record-observation]").count() === 0);
         await adminPage.goto(base + classPath, { waitUntil: "domcontentloaded" });
-        await adminPage.locator(`[data-item-id="${itemId}"] [data-testid=item-disclosure]`).click();
+        await adminPage.locator(`[data-item-id="${itemId}"] [data-testid=item-disclosure]:visible`).click();
         check("admin class inspector has no teaching write buttons", await adminPage.locator("[data-testid=record-observation], [data-testid=open-activity-support]").count() === 0);
         await admin.close();
         const otherTeacher = await browser.newContext();
