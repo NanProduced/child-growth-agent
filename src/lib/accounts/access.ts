@@ -55,7 +55,7 @@ export async function resolveServerAuth(): Promise<ResolvedRequestAuth> {
   return resolveRequestAuth(await serverRequest(), config);
 }
 
-async function demandSessionValid(client: TransactionClient, sessionId: string): Promise<void> {
+export async function demandSessionValid(client: TransactionClient, sessionId: string): Promise<void> {
   try {
     const validity = await client.query<{ valid: boolean }>(
       "SELECT revoked_at IS NULL AND expires_at > clock_timestamp() AS valid FROM app_sessions WHERE id = $1", [sessionId],

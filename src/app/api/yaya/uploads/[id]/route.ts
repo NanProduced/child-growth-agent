@@ -4,7 +4,8 @@ import {
   attachmentMetadataView,
   evaluateAttachmentRead,
 } from "@/lib/media/content-service";
-import { requireMediaReadPrincipal } from "@/lib/media/request-guard";
+import { withPrivateRead } from "@/lib/yaya/data/private-auth";
+import { bindDataAttachmentMetadataPort } from "@/lib/media/data-adapter";
 import { createDatabaseRecordAccessLoader } from "@/lib/media/record-access";
 import { mediaRouteError } from "@/lib/media/route-error";
 import { mediaRuntimeOrThrow } from "@/lib/media/runtime";
@@ -22,15 +23,16 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const principal = await requireMediaReadPrincipal(request);
     const { id } = await params;
-    const runtime = mediaRuntimeOrThrow();
-    const evaluation = await evaluateAttachmentRead(runtime, {
-      attachment_id: id,
-      viewer: { account_id: principal.account_id, role: principal.role },
-      loadRecordAccess: createDatabaseRecordAccessLoader(principal),
+    return await withPrivateRead(request, async ({ client, principal, schoolId }) => {
+      const runtime = mediaRuntimeOrThrow();
+      const evaluation = await evaluateAttachmentRead({ ...runtime, metadata: bindDataAttachmentMetadataPort(client) }, {
+        attachment_id: id,
+        viewer: { account_id: principal.account_id, role: principal.role },
+        loadRecordAccess: createDatabaseRecordAccessLoader(principal, { client, schoolId }),
+      });
+      return NextResponse.json(attachmentMetadataView(evaluation));
     });
-    return NextResponse.json(attachmentMetadataView(evaluation));
   } catch (error) {
     return mediaRouteError(error);
   }

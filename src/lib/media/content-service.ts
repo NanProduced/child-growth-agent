@@ -30,6 +30,7 @@ export interface MediaViewer {
 
 export type RecordAccessLoader = (
   record: YayaImageBusinessRef,
+  attachmentId?: string,
 ) => Promise<YayaImageViewerRecordAccess | null>;
 
 export interface AttachmentReadEvaluation {
@@ -108,7 +109,7 @@ export async function evaluateAttachmentRead(
   const { facts, attachedRecords } = await buildFacts(deps, record);
   const recordAccess: YayaImageViewerRecordAccess[] = [];
   for (const attached of attachedRecords) {
-    const access = await input.loadRecordAccess(attached);
+    const access = await input.loadRecordAccess(attached, record.attachment_id);
     if (access !== null) recordAccess.push(access);
   }
   const decision = decideImageReadAccess(facts, {

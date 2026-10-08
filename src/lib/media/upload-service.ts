@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AccountsError } from "../accounts/errors";
 
 import { buildObjectKey } from "./config";
 import { MediaError } from "./errors";
@@ -29,8 +30,8 @@ import type { MediaServiceDeps } from "./runtime";
  *   读回失败/未找到 → 保留对象与可恢复身份，报 `upload_unknown`，
  *   **绝不**在注册尝试后进行破坏性补偿；正常回应也走同一核对（身份/owner/
  *   内容/完整性/ready），非 ready 或错配回应不显示成功；
- * - **确定失败补偿**：只有随机兜底身份（内容身份已被回收后的重新上传）在对象写入
- *   阶段失败时才精确清理本轮创建的 key；delete 未知/抛错报 `compensation_unknown`；
+ * - **对象阶段失败**：所有上传身份（含回收后重传）都是确定性的，其他并发请求
+ *   可以复用其对象；保留对象供原身份恢复，不做破坏性补偿。
  * - 不按前缀扫描或清空；一张失败不清空其余图片与文字。
  */
 
@@ -239,25 +240,6 @@ async function readBackRegistered(
   }
 }
 
-/** 对象写入阶段失败（注册未发生）：只清理本轮确实创建的精确 key */
-async function compensateCreatedObjects(deps: MediaServiceDeps, createdKeys: readonly string[]): Promise<void> {
-  const unknowns: string[] = [];
-  for (const key of createdKeys) {
-    let outcome: "deleted" | "not_found" | "unknown";
-    try {
-      outcome = await deps.store.delete(key);
-    } catch {
-      outcome = "unknown";
-    }
-    if (outcome === "unknown") unknowns.push(key);
-  }
-  if (unknowns.length > 0) {
-    throw new MediaError("compensation_unknown", "上传失败且对象清理结果未知，请稍后核对后再试。", {
-      object_keys: unknowns,
-    });
-  }
-}
-
 async function uploadOne(
   deps: MediaServiceDeps,
   ownerAccountId: string,
@@ -325,14 +307,12 @@ async function uploadOne(
     model: keyFor("model"),
   };
 
-  const createdKeys: string[] = [];
   let registerAttempted = false;
   const put = async (key: string, content_type: string, body: Buffer): Promise<string> => {
     const result = await deps.store.putOnce({ key, content_type, body });
     if (result.outcome === "conflict") {
       throw new MediaError("object_conflict", "对象已存在且内容不一致，拒绝覆盖。");
     }
-    if (result.outcome === "created") createdKeys.push(key);
     return result.checksum_sha256;
   };
 
@@ -363,6 +343,7 @@ async function uploadOne(
     try {
       registered = await deps.metadata.registerAttachment(registerInput);
     } catch (error) {
+      if (error instanceof AccountsError) throw error;
       // 注册异常不等于未提交：按原身份读回；未知时保留对象与可恢复身份。
       const readBack = await readBackRegistered(deps, attachmentId);
       if (readBack.state === "found") {
@@ -378,14 +359,10 @@ async function uploadOne(
     // 核对失败不回读覆盖不一致的回应，也不做破坏性补偿（对象保留）。
     return restoreRegistered(registered, ownerAccountId, sourceChecksum, attachmentId);
   } catch (error) {
+    if (error instanceof AccountsError) throw error;
     if (!registerAttempted) {
-      // 对象写入阶段失败（注册尚未发生）。确定性身份（显式键或内容派生）下，
-      // 并发重复请求/同一输入重试可复用这些对象，因此保留；只有随机兜底身份
-      // （内容身份已被回收后重新上传）才做精确补偿。
-      const recoverableIdentity = attachmentId === contentId || attachmentId === keyedId;
-      if (!recoverableIdentity && createdKeys.length > 0) {
-        await compensateCreatedObjects(deps, createdKeys);
-      }
+      // 回收后的派生身份同样可被并发请求复用；失败请求不拥有对象的独占删除权。
+      // ponytail: unregistered partial objects remain retryable; reclaim only with proven exclusive ownership.
       if (error instanceof MediaError) throw error;
       throw new MediaError("object_store_unavailable", "对象存储暂时不可用，请稍后重试。");
     }
