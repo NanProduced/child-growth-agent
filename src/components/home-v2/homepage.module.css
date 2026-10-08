@@ -1214,6 +1214,105 @@
   }
 }
 
+/* The dock reduces available page width without changing the viewport. */
+@container yaya-main (width <= 1090px) {
+  .welcome-band {
+    grid-template-columns: minmax(0, 1fr) minmax(180px, 30%);
+  }
+  .teacher-artwork {
+    width: 100%;
+    margin-left: 0;
+  }
+  .teacher-artwork img {
+    max-width: 100%;
+  }
+  .action-strip {
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .action-copy {
+    flex-basis: 100%;
+  }
+  .action-extras {
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    margin-left: 0;
+    gap: 12px;
+  }
+  .other-pending {
+    border: 0;
+    padding-left: 0;
+  }
+  .class-row, .class-row:not(:has(.class-pending)) {
+    grid-template-columns: minmax(120px, 1fr) auto minmax(0, 1fr) auto;
+    padding-left: 18px;
+    gap: 12px;
+  }
+  .class-pending span {
+    min-width: 0;
+    padding-left: 10px;
+  }
+  .recent-row {
+    grid-template-columns: minmax(130px, 1fr) 1fr auto auto;
+    gap: 12px;
+  }
+  .recent-enter {
+    grid-column: 4;
+  }
+  .admin-actions {
+    flex-wrap: wrap;
+    padding-top: 0;
+  }
+  .admin-actions > a {
+    min-width: 0;
+  }
+}
+
+@container yaya-main (width <= 700px) {
+  .welcome-band {
+    display: block;
+    min-height: 0;
+  }
+  .welcome-copy h1 {
+    font-size: 28px;
+  }
+  .teacher-artwork {
+    display: none;
+  }
+  .action-strip {
+    margin-top: 20px;
+    padding: 20px;
+  }
+  .action-strip > :where(.primary-button) {
+    min-width: 0;
+    width: 100%;
+  }
+  .action-copy h2 {
+    font-size: 23px;
+  }
+  .action-extras {
+    flex-basis: 100%;
+  }
+  .section-heading {
+    flex-wrap: wrap;
+  }
+  .class-row, .class-row:not(:has(.class-pending)) {
+    grid-template-columns: minmax(120px, 1fr) auto;
+  }
+  .class-pending {
+    grid-column: 1;
+  }
+  .recent-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .recent-context {
+    grid-column: 1 / 3;
+  }
+  .recent-enter {
+    grid-column: 2;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .home *, .nav-header * {
     animation: none !important;

@@ -84,12 +84,13 @@ export async function rejectProposalItems(
   return result.proposal;
 }
 
-export async function cancelProposal(proposalId: string): Promise<void> {
-  await yayaWriteJson(
+/** Existing endpoint revokes a pending approval; it does not close the proposal. */
+export async function cancelProposal(proposalId: string): Promise<{ cancelled_approval_id: string | null }> {
+  return yayaWriteJson(
     `${YAYA_PROPOSALS_PATH}/${encodeURIComponent(proposalId)}/approval`,
     "POST",
     { action: "cancel" },
-    z.looseObject({})
+    z.strictObject({ cancelled_approval_id: z.string().min(1).nullable() })
   );
 }
 

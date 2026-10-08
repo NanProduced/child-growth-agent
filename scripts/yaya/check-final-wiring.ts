@@ -13,19 +13,29 @@ import { findListeningPids, trackChildProcess, stopTrackedChildTree, waitForVeri
 import { parseYayaRunWireLine, validateYayaRunEventStream } from '../../src/lib/yaya/api-contract';
 import { isoDateInShanghai } from '../../src/lib/format';
 import { saveMessageResponseSchema, conversationMessagesResponseSchema } from '../../src/components/yaya/client/schemas';
+import { pageReferenceResponseSchema, referenceFragmentText, type YayaPageQuote } from '../../src/lib/yaya/page-reference';
 const ROOT = process.cwd(), RUN = 'final-wire-' + randomUUID().slice(0, 8);
 const PRODUCTION = process.env.YAYA_TEST_PRODUCTION === '1';
 const REAL_TEXT = process.env.YAYA_REAL_TEXT_SMOKE === '1';
+const PREVIEW = process.env.YAYA_UI_PREVIEW === '1';
 let passed = 0;
 function check(label: string, condition: unknown): void { assert.ok(condition, label); passed++; console.log('ok - ' + label); }
 type Proposal = { proposal_id: string; batch_id: string; items: Array<{ operation_id: string; target_label?: string; payload: unknown }> };
 async function main(): Promise<void> {
+  assert.ok(!PREVIEW || (PRODUCTION && REAL_TEXT && process.env.YAYA_TEST_BROWSER !== '1'), 'Manual preview must use the production build and real text provider');
+  const previewCallLimit = Number(process.env.YAYA_UI_APPROVED_MODEL_CALLS ?? 0);
+  if (PREVIEW) assert.ok([20, 50].includes(previewCallLimit), 'Explicit new UI provider budget is required; legacy 20-call ledger is not reset');
+  const previewRuntime = path.join(ROOT, 'logs/yaya-ui-preview/runtime.json');
+  if (PREVIEW) assert.ok(!fs.existsSync(previewRuntime), 'An existing preview must be stopped by its owner, not overwritten');
+  let previewOwned = false;
   let seed: AcceptanceSeedHandle | null = null, db: Client | null = null, stub: Server | null = null, tracked: TrackedChild | null = null;
   const snapshot = snapshotGeneratedArtifacts(ROOT), issues: string[] = [];
-  const log = path.join(tmpdir(), RUN + '.log');
-  let mode: 'query' | 'create' | 'organize' | 'confirm' = 'query', turn = 0, modelCalls = 0, unexpected = 0, observationId = '';
+  const evidenceDir = path.join(ROOT, 'logs', RUN);
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  const log = path.join(evidenceDir, 'server.log');
+  let mode: 'query' | 'long' | 'create' | 'organize' | 'confirm' = 'query', turn = 0, modelCalls = 0, unexpected = 0, observationId = '';
   let providerLock: string | null = null;
-  const ledgerDir = path.join(ROOT, 'logs/yaya-provider-smoke-20');
+  const ledgerDir = path.join(ROOT, PREVIEW ? 'logs/yaya-ui-live-provider/review-20261008' : 'logs/yaya-provider-smoke-20');
   const ledger = path.join(ledgerDir, 'requests.jsonl');
   const stepfun: Record<string, string> = {};
   const raw = '[合成]王一诺把积木搭成一条路，倒塌后换了一个更宽的底座，并说我换一个更宽的底座。';
@@ -49,9 +59,12 @@ async function main(): Promise<void> {
       const lockPath = path.join(ledgerDir, 'active.lock');
       fs.closeSync(fs.openSync(lockPath, 'wx')); providerLock = lockPath;
       const meta = path.join(ledgerDir, 'approval.json');
-      if (!fs.existsSync(meta)) fs.writeFileSync(meta, JSON.stringify({ approval: 'user-new-20', limit: 20, text_ceiling: 12, old_40_ledger_untouched: true }, null, 2), { flag: 'wx' });
+      const expectedApproval = PREVIEW
+        ? { approval: 'user-local-ui-review-' + previewCallLimit, limit: previewCallLimit, old_40_and_20_ledgers_untouched: true }
+        : { approval: 'user-new-20', limit: 20, text_ceiling: 12, old_40_ledger_untouched: true };
+      if (!fs.existsSync(meta)) fs.writeFileSync(meta, JSON.stringify(expectedApproval, null, 2), { flag: 'wx' });
       const approval: unknown = JSON.parse(fs.readFileSync(meta, 'utf8'));
-      assert.deepEqual(approval, { approval: 'user-new-20', limit: 20, text_ceiling: 12, old_40_ledger_untouched: true });
+      assert.deepEqual(approval, expectedApproval);
     }
     seed = await createAcceptanceSeed(); const fixture = seed;
     db = new Client({ connectionString: fixture.database_url }); await db.connect();
@@ -61,7 +74,7 @@ async function main(): Promise<void> {
       request.on('end', () => { void (async () => {
         if (REAL_TEXT) {
           const entries = fs.existsSync(ledger) ? fs.readFileSync(ledger, 'utf8').trim().split('\n').filter(Boolean) : [];
-          if (entries.length >= 12) { response.writeHead(429, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: { message: 'Text smoke quota reached; no upstream request sent.' } })); return; }
+          if (entries.length >= (PREVIEW ? previewCallLimit : 12)) { response.writeHead(429, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: { message: 'Approved provider quota reached; no upstream request sent.' } })); return; }
           fs.appendFileSync(ledger, JSON.stringify({ number: entries.length + 1, provider: 'stepfun', run: RUN, reserved_at: new Date().toISOString() }) + '\n');
           modelCalls++;
           try {
@@ -88,6 +101,7 @@ async function main(): Promise<void> {
           if (schema === 'follow_up_decision') output = { decision: 'proceed', question: '', reason: '原文包含足够的具体行为与语言。' };
           else if (schema === 'observation_draft') output = draft;
           else if (schema === 'teacher_edit_review') output = { decision: 'accept', summary: '教师确认稿与原始事实一致。', change_summary: [], fact_check: 'supported', question: '' };
+          else if (mode === 'long') output = { action: 'answer', tool: '', params_json: '', content: '[合成回答] 可以先帮助幼儿表达，再共同寻找办法。\n\n' + Array.from({ length: 16 }, (_, index) => `### 支持建议 ${index + 1}\n倾听幼儿的真实想法，给予轮流和共同游戏的选择。教师可记录具体行为与语言，不据此作能力定性。`).join('\n\n') + '\n\n长答完整结束标记。', source_refs: [] };
           else if (mode === 'query') output = turn++ === 0 ? { action: 'read', tool: 'list_children', params_json: '{}', content: '', source_refs: [] } : { action: 'answer', tool: '', params_json: '', content: '已读取当前负责班级的合成名册。', source_refs: ['children:current_scope'] };
           else {
             const tool = mode === 'create' ? 'create_observation' : mode === 'organize' ? 'organize_observation' : 'confirm_observation';
@@ -100,11 +114,13 @@ async function main(): Promise<void> {
     });
     await new Promise<void>(resolve => stub!.listen(0, '127.0.0.1', resolve)); const address = stub.address(); assert.ok(address && typeof address === 'object');
     let port = 0;
-    for (let i = 0; i < 50; i++) { const candidate = 23000 + Math.floor(Math.random() * 5000); const found = findListeningPids(candidate); if (!found.ok) throw Error(found.detail); if (!found.pids.length) { port = candidate; break; } }
+    const preferredPort = Number(process.env.LOCAL_YAYA_PORT ?? 5020);
+    if (PREVIEW) assert.ok(Number.isInteger(preferredPort) && preferredPort > 1024 && preferredPort < 65531);
+    for (let i = 0; i < (PREVIEW ? 5 : 50); i++) { const candidate = PREVIEW ? preferredPort + i : 23000 + Math.floor(Math.random() * 5000); const found = findListeningPids(candidate); if (!found.ok) throw Error(found.detail); if (!found.pids.length) { port = candidate; break; } }
     assert.ok(port); const base = 'http://127.0.0.1:' + port;
-    const child = spawn(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['exec', 'next', PRODUCTION ? 'start' : 'dev', '--hostname', '127.0.0.1', '--port', String(port)], {
+    const child = spawn(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['exec', 'next', PRODUCTION ? 'start' : 'dev', ...(!PRODUCTION && process.env.YAYA_TEST_WEBPACK === '1' ? ['--webpack'] : []), '--hostname', '127.0.0.1', '--port', String(port)], {
       cwd: ROOT, windowsHide: true, shell: process.platform === 'win32', stdio: ['ignore', 'pipe', 'pipe'], env: {
-        ...process.env, DATABASE_URL: fixture.database_url, PGDATABASE_URL: '', AUTH_TRUSTED_ORIGINS: base, AUTH_SCHOOL_ID: fixture.manifest.school_id,
+        ...process.env, COZE_WORKSPACE_PATH: ROOT, DATABASE_URL: fixture.database_url, PGDATABASE_URL: '', AUTH_TRUSTED_ORIGINS: base, AUTH_SCHOOL_ID: fixture.manifest.school_id,
         AUTH_COOKIE_SECURE: 'false', LLM_PROVIDER: 'stepfun', STEPFUN_BASE_URL: 'http://127.0.0.1:' + address.port, STEPFUN_API_KEY: 'synthetic-local-only', STEPFUN_MODEL: REAL_TEXT ? stepfun.STEPFUN_MODEL ?? 'step-5-preview' : 'final-wire-double',
         MEDIA_ENVIRONMENT: 'development', MEDIA_STORAGE_MODE: 'local', MEDIA_LOCAL_ROOT: fixture.object_root, NEXT_TELEMETRY_DISABLED: '1',
       },
@@ -113,6 +129,25 @@ async function main(): Promise<void> {
     child.stdout?.on('data', (chunk: Buffer) => fs.appendFileSync(log, chunk)); child.stderr?.on('data', (chunk: Buffer) => fs.appendFileSync(log, chunk));
     await waitForVerifiedService({ base, port, child: tracked, timeoutMs: 180000, statusPath: '/api/auth/status' });
     const credentials = JSON.parse(fs.readFileSync(fixture.credentials_path, 'utf8')) as { accounts: Record<string, { username: string; password: string }> };
+    if (PREVIEW) {
+      const loginFile = path.join(path.dirname(fixture.credentials_path), 'preview-login.json');
+      fs.writeFileSync(loginFile, JSON.stringify({ recommended: 'teacher_a', note: '本轮隔离合成数据；请勿录入真实幼儿信息。admin用于管理/只读核验。', accounts: credentials.accounts }, null, 2), { flag: 'wx', mode: 0o600 });
+      fs.mkdirSync(path.dirname(previewRuntime), { recursive: true });
+      const expiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
+      fs.writeFileSync(previewRuntime, JSON.stringify({ run_id: RUN, seed_id: fixture.seed_id, container_id: fixture.container_id,
+        server_pid: tracked.pid, server_started_at: tracked.startedAt, supervisor_pid: process.pid,
+        url: base, expires_at: expiresAt, credentials_path: loginFile, model: stepfun.STEPFUN_MODEL,
+        provider: 'real stepfun text; no image-analysis provider', request_limit: previewCallLimit, provider_ledger: ledger,
+        evidence_dir: evidenceDir }, null, 2), { flag: 'wx' });
+      previewOwned = true;
+      console.log(JSON.stringify({ ready: true, url: base, expires_at: expiresAt, credentials_path: loginFile, real_model_requests: modelCalls, model: stepfun.STEPFUN_MODEL, request_limit: previewCallLimit }));
+      await new Promise<void>(resolve => {
+        const finish = () => { clearTimeout(timer); resolve(); };
+        const timer = setTimeout(finish, 4 * 60 * 60 * 1000);
+        process.once('SIGINT', finish); process.once('SIGTERM', finish); child.once('exit', finish);
+      });
+      return;
+    }
     const login = async (key: string) => {
       const response = await fetch(base + '/api/auth/login', { method: 'POST', headers: { origin: base, 'content-type': 'application/json', 'x-cga-auth-request': '1' }, body: JSON.stringify(credentials.accounts[key]) });
       check('真实账号登录 ' + key, response.status === 200);
@@ -142,6 +177,39 @@ async function main(): Promise<void> {
       const response = await fetch(base + endpoint, { method, headers: { cookie: auth.cookie, origin: base, 'content-type': 'application/json', ...(method === 'POST' ? { 'x-csrf-token': auth.csrf } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       const value: unknown = await response.json(); return { response, value };
     };
+    if (!REAL_TEXT) {
+      const referencePath = '/children/' + childId + '/evidence?scope=current_semester';
+      const focused = await json('/api/yaya/page-reference?path=' + encodeURIComponent(referencePath), 'GET');
+      const focus = pageReferenceResponseSchema.parse(focused.value).reference;
+      check('页面引用经真实AUTH/PG只读解析', focused.response.status === 200 && focus.sources[0]?.kind === 'child' && focus.path === referencePath);
+      check('页面引用不含密码会话CSRF签名URL', !Object.keys(focus).some(key => /password|token|csrf|url/i.test(key)));
+      const denied = await json('/api/yaya/page-reference?path=' + encodeURIComponent(referencePath), 'GET', undefined, await login('teacher_b'));
+      check('页面引用越班不可读', denied.response.status === 403);
+      const malformed = await json('/api/yaya/page-reference?path=' + encodeURIComponent('//evil.invalid/'), 'GET');
+      check('页面引用拒绝外部URL', malformed.response.status === 400);
+      const anonymous = await fetch(base + '/api/yaya/page-reference?path=' + encodeURIComponent(referencePath));
+      check('页面引用未登录401', anonymous.status === 401);
+      const created = await json('/api/yaya/conversations', 'POST', {});
+      const cid = (created.value as { conversation: { conversation_id: string; revision: number } }).conversation;
+      const quote: YayaPageQuote = { text: focus.title, messageId: 'page:' + focus.path, yayaPage: focus, selection: '合成选中内容：这是页面关注线索，不是新的观察原文。' };
+      const text = '[合成]请参考当前页，给两条一般支持建议。';
+      const source = focus.sources[0]!;
+      const saved = await json('/api/yaya/conversations/' + cid.conversation_id + '/messages', 'POST', {
+        client_message_id: randomUUID(), role: 'user', message_kind: 'text', execution_state: 'none',
+        fragments: [
+          { fragment_id: 'focus-user', text, sources: [], independently_readable: true, provenance: { kind: 'raw_input', ref_id: null, label: null, derived_from: null } },
+          { fragment_id: 'focus-user:page-focus', text: referenceFragmentText(quote), sources: [source], independently_readable: false, provenance: { kind: 'tool_result', ref_id: 'page:' + focus.path, label: focus.title, derived_from: null } },
+        ], attachment_ids: [], expected_conversation_revision: cid.revision,
+      });
+      check('引用与原输入分片同一消息保存', saved.response.status === 201);
+      const savedBody = saved.value as { message: { message_id: string; fragments: Array<{ text: string | null }> }; conversation: { revision: number } };
+      check('存储教师原输入逐字不变', savedBody.message.fragments[0]?.text === text);
+      const run = await fetch(base + '/api/yaya/conversations/' + cid.conversation_id + '/runs', { method: 'POST', headers: { cookie: teacher.cookie, origin: base, 'content-type': 'application/json', 'x-csrf-token': teacher.csrf }, body: JSON.stringify({ conversation_id: cid.conversation_id, client_request_id: savedBody.message.message_id, user_text: text, attachment_ids: [], expected_conversation_revision: savedBody.conversation.revision }) });
+      const stream = (await run.text()).trim().split('\n').map(line => { const result = parseYayaRunWireLine(line); assert.ok(result.ok); return result.value; });
+      const verdict = validateYayaRunEventStream(stream);
+      check('授权引用进入真实run并产生一致终态', run.status === 200 && verdict.ok && verdict.outcome.kind === 'answered');
+      turn = 0; mode = 'query';
+    }
     if (REAL_TEXT) {
       const created = await json('/api/yaya/conversations', 'POST', {});
       assert.equal(created.response.status, 201);
@@ -266,7 +334,8 @@ async function main(): Promise<void> {
       { label: 'database', run: async () => { await db?.end(); } },
       { label: 'stub', run: async () => { if (stub) await new Promise<void>((resolve, reject) => stub!.close(error => error ? reject(error) : resolve())); } },
       { label: 'seed', run: async () => { await seed?.teardown(); } },
-      { label: 'own-log', run: () => { if (fs.existsSync(log)) fs.unlinkSync(log); } },
+      { label: 'preview-manifest', run: () => { if (previewOwned) fs.unlinkSync(previewRuntime); } },
+      { label: 'own-log', run: () => { /* Synthetic server diagnostics retained in this run's gitignored evidence directory. */ } },
       { label: 'provider-lock', run: () => { if (providerLock) fs.unlinkSync(providerLock); } },
     ], (label, detail) => issues.push(label + ':' + detail));
     assertCleanupComplete(issues); console.log(JSON.stringify({ cleanup: 'verified', real_model_requests: REAL_TEXT ? modelCalls : 0 }));

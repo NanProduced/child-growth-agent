@@ -7,7 +7,7 @@
  * - 永不输出原始 HTML（`<script>` 等一律当普通文本）；
  * - 链接只允许 http/https，其余协议不渲染成可点击链接；
  * - 不用 dangerouslySetInnerHTML，不存在 HTML 注入面；
- * - 长答默认收起，可展开全文（不裁断内容）。
+ * - 长答默认完整显示，仅显式指定 collapsible 时允许收起。
  */
 import { useMemo, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
@@ -197,7 +197,7 @@ function InlineText({ text }: { text: string }) {
                 href={token.href}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-primary underline underline-offset-2"
+                className="rounded-sm text-primary underline decoration-primary/40 underline-offset-4 hover:decoration-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
               >
                 {token.text}
               </a>
@@ -212,7 +212,7 @@ function InlineText({ text }: { text: string }) {
 
 function MarkdownBody({ blocks }: { blocks: YayaMarkdownBlock[] }) {
   return (
-    <div className="space-y-2 text-sm leading-6 [word-break:break-word]">
+    <div className="max-w-[75ch] space-y-4 text-base leading-[1.65] text-foreground [overflow-wrap:anywhere] sm:text-[15px]">
       {blocks.map((block, index) => {
         switch (block.type) {
           case "heading":
@@ -220,8 +220,8 @@ function MarkdownBody({ blocks }: { blocks: YayaMarkdownBlock[] }) {
               <p
                 key={index}
                 className={cn(
-                  "font-semibold text-foreground",
-                  block.level <= 2 ? "text-base" : "text-sm"
+                  "pt-2 font-semibold leading-[1.65] text-foreground first:pt-0",
+                  block.level <= 2 ? "text-lg sm:text-base" : "text-base sm:text-[15px]"
                 )}
               >
                 <InlineText text={block.text} />
@@ -232,7 +232,7 @@ function MarkdownBody({ blocks }: { blocks: YayaMarkdownBlock[] }) {
             return (
               <ListTag
                 key={index}
-                className={cn("ml-4 space-y-1", block.ordered ? "list-decimal" : "list-disc")}
+                className={cn("ml-5 space-y-2 pl-1 marker:text-foreground", block.ordered ? "list-decimal" : "list-disc")}
               >
                 {block.items.map((item, itemIndex) => (
                   <li key={itemIndex}>
@@ -246,14 +246,14 @@ function MarkdownBody({ blocks }: { blocks: YayaMarkdownBlock[] }) {
             return (
               <pre
                 key={index}
-                className="overflow-x-auto rounded-md bg-muted p-2 font-mono text-xs leading-5"
+                className="max-w-full overflow-x-auto rounded-xl bg-muted p-3 font-mono text-sm leading-[1.65]"
               >
                 <code>{block.text}</code>
               </pre>
             );
           case "quote":
             return (
-              <blockquote key={index} className="border-l-2 border-border pl-3 text-muted-foreground">
+              <blockquote key={index} className="border-l border-border pl-4 text-foreground/80">
                 <InlineText text={block.text} />
               </blockquote>
             );
@@ -294,7 +294,7 @@ export function YayaMarkdown({
           <button
             type="button"
             onClick={() => setExpanded(true)}
-            className="pointer-events-auto mb-1 inline-flex h-11 items-center gap-1 rounded-full border bg-background px-3 text-xs font-medium text-foreground shadow-sm"
+            className="pointer-events-auto mb-1 inline-flex h-11 items-center gap-2 rounded-xl border bg-background px-4 text-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
           >
             展开全文 <ChevronDown className="size-3.5" />
           </button>
@@ -304,7 +304,7 @@ export function YayaMarkdown({
         <button
           type="button"
           onClick={() => setExpanded(false)}
-          className="mt-1 inline-flex h-11 items-center gap-1 text-xs font-medium text-muted-foreground"
+          className="mt-2 inline-flex h-11 items-center gap-2 rounded-lg px-2 text-sm font-medium text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
         >
           收起 <ChevronUp className="size-3.5" />
         </button>

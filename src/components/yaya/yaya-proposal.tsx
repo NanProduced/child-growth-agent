@@ -10,11 +10,12 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DataMessagePartProps } from "@assistant-ui/react";
-import { AlertTriangle, Check, Clock, Flag, RefreshCw } from "lucide-react";
+import { AlertTriangle, Check, Clock, MoreHorizontal, RefreshCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import {
   GUIDE_EVIDENCE_QUOTE_FIELDS,
@@ -59,14 +60,6 @@ const ACTION_LABEL: Record<string, string> = {
   "class.manage": "班级管理",
   "teacher.manage": "教师管理",
   "teacher.assign": "任教分配",
-};
-
-const RESOURCE_LABEL: Record<string, string> = {
-  school: "全园",
-  class: "班级",
-  child: "幼儿",
-  transfer: "转班",
-  observation: "观察",
 };
 
 const GUIDE_ACTION_LABEL: Record<string, string> = {
@@ -495,7 +488,7 @@ function ItemOutcomeLine({ outcome, onRecheck, checking }: {
                 : "失败，但可能已有提交效果"
               : "保存结果未知，按原操作核对";
   return (
-    <p className={cn("flex flex-wrap items-center gap-2 text-xs", tone)}>
+    <p role="status" className={cn("flex flex-wrap items-center gap-2 text-sm leading-[1.65]", tone)}>
       <span className="inline-flex items-center gap-1">
         {success ? <Check className="size-3.5" aria-hidden /> : <Clock className="size-3.5" aria-hidden />}
         {text}
@@ -505,7 +498,7 @@ function ItemOutcomeLine({ outcome, onRecheck, checking }: {
           type="button"
           onClick={onRecheck}
           disabled={checking}
-          className="inline-flex h-11 items-center gap-1 rounded-md border px-2 text-xs"
+          className="inline-flex min-h-11 items-center gap-2 rounded-xl border px-3 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50"
         >
           <RefreshCw className={cn("size-3", checking && "animate-spin motion-reduce:animate-none")} aria-hidden />
           重新读取核对
@@ -532,6 +525,7 @@ export function YayaProposalPanel({
   const [phase, setPhase] = useState<"idle" | "approving" | "executing" | "done">("idle");
   const [results, setResults] = useState<Record<string, YayaOperationQueryOutcome>>({});
   const [actionError, setActionError] = useState<string | null>(null);
+  const [approvalNotice, setApprovalNotice] = useState<string | null>(null);
   const [checkingId, setCheckingId] = useState<string | null>(null);
   const [viewer, setViewer] = useState<YayaGalleryImage | null>(null);
 
@@ -608,6 +602,7 @@ export function YayaProposalPanel({
     const submittedIds = [...selectedIds];
     let approvalRecorded = false;
     setActionError(null);
+    setApprovalNotice(null);
     setPhase("approving");
     try {
       const approval = await approveProposalItems(proposal.proposal_id, submittedIds);
@@ -645,6 +640,7 @@ export function YayaProposalPanel({
   const rejectSelected = async () => {
     if (proposal === null || selectedIds.length === 0) return;
     setActionError(null);
+    setApprovalNotice(null);
     try {
       await rejectProposalItems(proposal.proposal_id, selectedIds);
       setSelected(new Set());
@@ -657,12 +653,16 @@ export function YayaProposalPanel({
   const cancel = async () => {
     if (proposal === null) return;
     setActionError(null);
+    setApprovalNotice(null);
     try {
-      await cancelProposal(proposal.proposal_id);
+      const result = await cancelProposal(proposal.proposal_id);
+      setApprovalNotice(result.cancelled_approval_id === null
+        ? "没有待撤销的批准；提案仍可继续核对。"
+        : "未执行的批准已撤销；提案仍可核对，已提交业务不会回滚。");
       setPhase("idle");
       await load();
     } catch {
-      setActionError("取消提案请求未完成，请重试。");
+      setActionError("撤销批准请求未完成；请重新核对，不显示已撤销。");
     }
   };
 
@@ -686,52 +686,53 @@ export function YayaProposalPanel({
     }
   };
 
-  const savedCount = Object.values(results).filter((entry) => receiptShowsSuccess(entry)).length;
+  const savedCount = items.filter(item => {
+    const outcome = results[item.operation_id];
+    return outcome !== undefined && receiptShowsSuccess(outcome);
+  }).length;
+  const allSaved = savedCount === items.length && savedCount > 0;
   const pendingCount = eligible.length;
   const restrictedCount = items.filter(item => item.status === "pending" && results[item.operation_id] === undefined && (item.access !== "full" || proposalContentDetails(item).missing.length > 0)).length;
 
   return (
     <section
       className={cn(
-        "rounded-xl border border-border bg-card p-3 text-sm",
-        variant === "panel" && "p-4"
+        "rounded-xl border border-border bg-card p-4 text-base leading-[1.65] text-foreground sm:text-sm",
+        variant === "panel" && "rounded-none border-0 bg-transparent p-1"
       )}
       data-yaya-proposal
       data-proposal-id={proposal?.proposal_id ?? proposalId}
+      aria-busy={loading || busy}
     >
       <header className="flex flex-wrap items-center gap-2">
-        <Flag className="size-4 text-amber-700" aria-hidden />
-        <h3 className="font-medium text-foreground">待核对操作</h3>
+        <h3 className="text-base font-semibold text-foreground">核对操作</h3>
         {proposal !== null ? (
           <>
-            <Badge variant="secondary" className="bg-amber-100 text-amber-700">
-              {proposal.status === "open" ? savedCount === items.length && savedCount > 0 ? "回执已核对" : "待核对" : proposal.status === "cancelled" ? "已取消" : "已结束"}
+            <Badge variant="secondary" className={cn("text-xs", proposal.status === "open" ? allSaved ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-800" : "bg-muted text-muted-foreground")}>
+              {proposal.status === "open" ? allSaved ? "回执已核对" : "待核对" : proposal.status === "cancelled" ? "已取消" : "已结束"}
             </Badge>
-            <span className="text-xs text-muted-foreground">
-              本批 {proposal.items.length} 条 · 待核对 {pendingCount} · 已完成回执 {savedCount}
-            </span>
-            <span className="w-full text-xs text-muted-foreground">
-              可提交 {pendingCount} · 已选 {selectedIds.length} · 受限/待补 {restrictedCount}
+            <span className="w-full text-xs leading-5 text-muted-foreground">
+              本批 {proposal.items.length} 条 · 可提交 {pendingCount} · 已选 {selectedIds.length} · 已保存回执 {savedCount} · 受限/待补 {restrictedCount}
             </span>
           </>
         ) : (
           <span className="text-xs text-muted-foreground">{loading ? "正在读取提案…" : "提案不可读"}</span>
         )}
-        <span className="ml-auto text-xs text-muted-foreground">
+        <span className="text-xs text-muted-foreground">
           {origin === "model_suggestion" ? "芽芽建议" : "教师发起"}
         </span>
       </header>
 
       {loadError !== null ? (
         <div className="mt-3 space-y-2">
-          <p className="text-sm text-amber-800">{loadError}</p>
-          <Button type="button" variant="outline" size="sm" className="h-11" onClick={() => void load()}>
+          <p role="alert" className="text-sm leading-[1.65] text-amber-800">{loadError}</p>
+          <Button type="button" variant="outline" size="sm" className="h-11 rounded-xl shadow-none" onClick={() => void load()}>
             <RefreshCw className="size-3.5" aria-hidden /> 重新读取
           </Button>
         </div>
       ) : null}
 
-      <div className="mt-3 space-y-3">
+      <div className="mt-4 divide-y divide-border">
         {items.map((item) => {
           const outcome = results[item.operation_id];
           const details = detailsByOperation.get(item.operation_id) ?? {
@@ -748,47 +749,46 @@ export function YayaProposalPanel({
             outcome === undefined;
           const summary = payloadSummary(details.payload);
           const galleryImage = approvalsHref(item);
+          const auditLines = details.lines.filter((line) => /^[^：]*(?:技术标识|关联标识)：|^[^：]*条目：[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(line));
           return (
             <article
               key={item.operation_id}
-              className="rounded-lg border border-border/80 bg-background p-3"
+              className="min-w-0 py-4 first:pt-0 last:pb-0"
               data-yaya-proposal-item
             >
-              <div className="flex items-start gap-2">
+              <div className="flex items-start gap-2 sm:gap-3">
                 {eligibleItem ? (
-                  <label className="flex size-11 shrink-0 cursor-pointer items-center justify-center">
+                  <label className={cn("-ml-2 -mt-2 flex size-11 shrink-0 items-center justify-center rounded-lg", busy ? "cursor-not-allowed" : "cursor-pointer hover:bg-muted")}>
                     <Checkbox
                       checked={selected.has(item.operation_id)}
                       disabled={busy}
                       onCheckedChange={(checked) => toggle(item, checked === true)}
-                      aria-label={`选择第 ${item.item_key} 项`}
-                      className="size-5"
+                      aria-label={`选择${summary.title}：${details.targetLabel ?? "名称未提供"}`}
+                      className="size-5 focus-visible:ring-primary"
                     />
                   </label>
                 ) : (
-                  <span className="mt-0.5 inline-flex size-5 items-center justify-center text-muted-foreground" aria-hidden>
-                    {outcome !== undefined ? <Check className="size-4" /> : <AlertTriangle className="size-4" />}
+                  <span className="mt-1 inline-flex size-5 shrink-0 items-center justify-center text-muted-foreground" aria-hidden>
+                    {outcome !== undefined && receiptShowsSuccess(outcome) ? <Check className="size-4 text-emerald-700" /> : <AlertTriangle className="size-4" />}
                   </span>
                 )}
-                <div className="min-w-0 flex-1 space-y-1.5">
+                <div className="min-w-0 flex-1 space-y-3">
                   <div className="flex flex-wrap items-center gap-2">
-                    <p className="font-medium text-foreground">
+                    <p className="font-semibold text-foreground">
                       {ACTION_LABEL[item.action] ?? item.action}
                     </p>
-                    <Badge variant="outline" className="text-xs">
-                      {RESOURCE_LABEL[item.resource] ?? item.resource}
-                    </Badge>
+                    {item.access !== "full" || details.missing.length > 0 ? (
                     <Badge
                       variant="secondary"
                       className={cn(
                         "text-xs",
                         item.access === "full"
                           ? details.missing.length === 0
-                            ? "bg-emerald-100 text-emerald-700"
-                            : "bg-amber-100 text-amber-700"
+                            ? "bg-muted text-muted-foreground"
+                            : "bg-amber-50 text-amber-800"
                           : item.access === "historical_read_only"
-                            ? "bg-sky-100 text-sky-700"
-                            : "bg-rose-100 text-rose-700"
+                            ? "bg-muted text-muted-foreground"
+                            : "bg-rose-50 text-rose-800"
                       )}
                     >
                       {item.access === "full"
@@ -799,30 +799,45 @@ export function YayaProposalPanel({
                           ? "历史只读"
                           : "内容不可读"}
                     </Badge>
+                    ) : null}
                     {item.status === "superseded" ? (
                       <Badge variant="secondary" className="bg-slate-100 text-slate-600">
                         已被替代
                       </Badge>
                     ) : null}
                   </div>
-                  <p className="text-xs text-muted-foreground">{summary.title}</p>
-                  <p className="text-sm font-medium text-foreground">
+                  <p className="font-medium text-foreground [overflow-wrap:anywhere]">
                     核对对象：{details.targetLabel ?? "名称未提供"}
                   </p>
-                  {(details.lines.length > 0 ? details.lines : summary.lines).map((line, index) => (
-                    <p key={index} className="whitespace-pre-wrap text-sm text-foreground/90">
-                      {line}
-                    </p>
-                  ))}
-                  {item.target_id !== null ? (
-                    <details className="text-xs text-muted-foreground">
-                      <summary className="cursor-pointer py-1">查看技术标识（仅作审计）</summary>
-                      <p className="break-all pt-1">目标标识：{item.target_id}</p>
-                      <p className="break-all">操作标识：{item.operation_id}</p>
-                    </details>
+                  <dl className="space-y-3">
+                    {details.lines.filter((line) => !auditLines.includes(line)).map((line, index) => {
+                      const separator = line.indexOf("：");
+                      return (
+                        <div key={index} className={cn("min-w-0", line.startsWith("原始观察：") ? "space-y-2" : "grid grid-cols-[minmax(0,5rem)_minmax(0,1fr)] gap-x-3 gap-y-1")}>
+                          {separator >= 0 ? <dt className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{line.slice(0, separator)}</dt> : null}
+                          <dd className={cn("whitespace-pre-wrap [overflow-wrap:anywhere]", separator < 0 && "col-span-2", line.startsWith("原始观察：") && "rounded-lg bg-muted/60 px-3 py-2.5")}>
+                            {separator >= 0 ? line.slice(separator + 1) : line}
+                          </dd>
+                        </div>
+                      );
+                    })}
+                  </dl>
+                  {details.payload?.kind === "create_observation" ? (
+                    <p className="text-sm text-muted-foreground">本次只保存观察原文，不会确认归档。</p>
                   ) : null}
+                  <details className="text-xs leading-5 text-muted-foreground">
+                    <summary className="min-h-11 cursor-pointer content-center rounded-lg px-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">查看审计标识</summary>
+                    <div className="space-y-1 pb-2 [overflow-wrap:anywhere]">
+                      {item.target_id !== null ? <p>目标标识：{item.target_id}</p> : null}
+                      <p>操作标识：{item.operation_id}</p>
+                      <p>提案标识：{proposal?.proposal_id ?? proposalId}</p>
+                      <p>批次标识：{proposal?.batch_id}</p>
+                      {auditLines.map((line, index) => <p key={index}>{line}</p>)}
+                      {details.lines.length === 0 ? summary.lines.map((line, index) => <p key={index}>{line}</p>) : null}
+                    </div>
+                  </details>
                   {details.missing.length > 0 ? (
-                    <p className="text-xs text-amber-700">
+                    <p className="text-sm leading-[1.65] text-amber-800">
                       批准前还需核对：{details.missing.join("、")}。当前不会提交此项。
                     </p>
                   ) : null}
@@ -831,8 +846,8 @@ export function YayaProposalPanel({
                   ) : item.attachment_associations.length > 0 ? (
                     <p className="text-xs text-muted-foreground">关联图片当前不可读或仅保留元数据。</p>
                   ) : null}
-                  {!eligibleItem && outcome === undefined ? (
-                    <p className="text-xs text-amber-700">
+                  {!eligibleItem && outcome === undefined && details.missing.length === 0 ? (
+                    <p className="text-sm leading-[1.65] text-amber-800">
                       {item.status !== "pending"
                         ? "该项已处理，不能再次提交。"
                         : details.missing.length > 0
@@ -854,13 +869,18 @@ export function YayaProposalPanel({
         })}
       </div>
 
-      {actionError !== null ? <p className="mt-3 text-xs text-rose-700">{actionError}</p> : null}
+      {actionError !== null ? <p role="alert" className="mt-4 text-sm leading-[1.65] text-rose-700">{actionError}</p> : null}
+      {approvalNotice !== null ? <p role="status" className="mt-4 text-sm leading-[1.65] text-muted-foreground">{approvalNotice}</p> : null}
 
-      {proposal !== null && proposal.status === "open" ? (
-        <footer className="mt-3 flex flex-wrap items-center gap-2">
+      {proposal !== null && proposal.status === "open" && !allSaved ? (
+        <footer className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-4">
+          <p className="w-full text-sm leading-[1.65] text-muted-foreground">
+            批准只执行卡片中的操作；保存原文或整理草稿不等于确认归档。取消提案不会撤销已提交的业务。
+          </p>
+          <p className="mb-2 w-full text-xs leading-5 text-muted-foreground">需要调整时，请在对话中说明补充内容。</p>
           <Button
             type="button"
-            className="h-11 min-w-32 flex-1"
+            className="min-h-11 min-w-32 flex-1 rounded-xl shadow-none"
             disabled={busy || selectedIds.length === 0}
             onClick={() => void runSelected()}
           >
@@ -870,21 +890,15 @@ export function YayaProposalPanel({
                 ? "正在执行…"
                 : `确认已选 ${selectedIds.length} 条`}
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            className="h-11"
-            disabled={busy || selectedIds.length === 0}
-            onClick={() => void rejectSelected()}
-          >
-            拒绝选中项
-          </Button>
-          <Button type="button" variant="ghost" className="h-11" disabled={busy} onClick={() => void cancel()}>
-            取消提案
-          </Button>
-          <p className="w-full text-xs text-muted-foreground">
-            批准只执行卡片中的操作；保存原文或整理草稿不等于确认归档。取消提案不会撤销已提交的业务。
-          </p>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="ghost" size="icon" className="size-11 rounded-xl" aria-label="更多提案操作" disabled={busy}><MoreHorizontal className="size-5" aria-hidden /></Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem className="min-h-11" disabled={busy || selectedIds.length === 0} onSelect={() => void rejectSelected()}>拒绝选中项</DropdownMenuItem>
+              <DropdownMenuItem className="min-h-11" disabled={busy} onSelect={() => void cancel()}>撤销未执行批准</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </footer>
       ) : null}
 
@@ -902,5 +916,8 @@ export function YayaProposalPanel({
 
 /** data-part 包装：消息流内提案卡（宽屏工作区用 YayaProposalPanel 复用同一逻辑）。 */
 export function YayaProposalCard({ data }: DataMessagePartProps<YayaProposalPartData>) {
-  return <YayaProposalPanel proposalId={data.proposal_id} origin={data.proposal_origin} variant="chat" />;
+  return <>
+    <p className="hidden text-sm leading-6 text-foreground" data-yaya-proposal-summary>请在右侧核对本次操作，确认后才执行。</p>
+    <YayaProposalPanel proposalId={data.proposal_id} origin={data.proposal_origin} variant="chat" />
+  </>;
 }
