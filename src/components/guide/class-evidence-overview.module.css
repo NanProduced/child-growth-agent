@@ -26,7 +26,7 @@
   min-width: 0;
   color: var(--guide-ink);
   font-family: "Home Noto Sans SC", "Microsoft YaHei", sans-serif;
-  font-size: 15px;
+  font-size: 1rem;
   line-height: 1.65;
   background: transparent;
   border: 0;
@@ -55,7 +55,7 @@
 .stats-details {
   padding: 16px;
   border: 1px solid var(--guide-line);
-  font-size: 15px;
+  font-size: 1rem;
 }
 
 .stats-details h3 {
@@ -720,7 +720,7 @@ body:has(.route-shell) div:has(> [data-yaya-entry][aria-expanded="true"]) {
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
-  font-size: 15px;
+  font-size: 1rem;
   font-weight: 600;
   color: var(--guide-ink);
 }

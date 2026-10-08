@@ -212,7 +212,7 @@ function InlineText({ text }: { text: string }) {
 
 function MarkdownBody({ blocks }: { blocks: YayaMarkdownBlock[] }) {
   return (
-    <div className="max-w-[75ch] space-y-4 text-base leading-[1.65] text-foreground [overflow-wrap:anywhere] sm:text-[15px]">
+    <div className="max-w-[70ch] space-y-4 text-base leading-7 text-foreground [overflow-wrap:anywhere]">
       {blocks.map((block, index) => {
         switch (block.type) {
           case "heading":
@@ -220,8 +220,8 @@ function MarkdownBody({ blocks }: { blocks: YayaMarkdownBlock[] }) {
               <p
                 key={index}
                 className={cn(
-                  "pt-2 font-semibold leading-[1.65] text-foreground first:pt-0",
-                  block.level <= 2 ? "text-lg sm:text-base" : "text-base sm:text-[15px]"
+                  "pt-2 font-semibold leading-7 text-foreground first:pt-0",
+                  block.level <= 2 ? "text-lg" : "text-base"
                 )}
               >
                 <InlineText text={block.text} />

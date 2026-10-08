@@ -145,6 +145,86 @@ body {
   color: oklch(0.2 0.03 150);
 }
 
+/* Candidate reading roles for marked business surfaces, not the home-* world.
+ * Mapping and evidence: docs/platform-review/ui-typeset-plan.md. */
+[data-platform-surface] {
+  --muted-foreground: oklch(0.49 0 0);
+
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 1rem;
+  line-height: 1.75;
+}
+
+[data-platform-surface] :where(h1) {
+  max-width: 40ch;
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.4;
+  text-wrap: balance;
+}
+
+[data-platform-surface] :where(h2, [data-slot='card-title']) {
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+[data-platform-surface] :where(p, blockquote),
+[data-platform-surface] span.text-sm.leading-6 {
+  max-width: 70ch;
+  font-size: 1rem;
+  line-height: 1.75;
+}
+
+[data-platform-chat] :where(h2) {
+  font-size: 1.125rem;
+  line-height: 1.5;
+}
+
+[data-platform-chat] :where([data-yaya-card] p, [data-yaya-proposal] p) {
+  font-size: 1rem;
+  line-height: 1.75;
+}
+
+[data-platform-surface] :where(.text-xs),
+[data-platform-chat] :where(.text-xs) {
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+[data-platform-surface] p.text-lg {
+  font-size: 1.125rem;
+}
+
+[data-platform-chat] {
+  --muted-foreground: oklch(0.49 0 0);
+}
+
+[data-platform-surface] :where(.text-slate-400, .text-slate-500) {
+  color: var(--muted-foreground);
+}
+
+[data-platform-surface] :where(time, dd, strong),
+[data-platform-chat] :where(time, [data-yaya-card]) {
+  font-variant-numeric: tabular-nums;
+}
+
+[data-platform-surface] :where(input, textarea, select) {
+  caret-color: var(--primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-platform-surface] :where(.animate-spin, .animate-pulse) {
+    animation: none;
+  }
+
+  [data-platform-surface] :where(a, button, summary, svg) {
+    transition: none;
+    scroll-behavior: auto;
+  }
+}
+
 /* 芽芽工作区：宽屏下核对台已展示提案卡，消息流内隐藏重复卡片（<1280px 时保留卡内视图） */
 @media (width >= 1280px) {
   .yaya-workspace-thread [data-yaya-proposal] {

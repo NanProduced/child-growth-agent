@@ -1,6 +1,6 @@
 .book {
   --guide-ink: var(--foreground);
-  --guide-muted: var(--muted-foreground);
+  --guide-muted: oklch(0.47 0.012 88);
   --guide-line: var(--border);
   --guide-sunken: var(--muted);
   --guide-green-strong: oklch(0.46 0.14 150);
@@ -341,7 +341,7 @@
   gap: 4px;
   padding: 2px 8px;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .status-observed,

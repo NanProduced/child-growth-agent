@@ -265,15 +265,14 @@ async function main() {
       await outage.request.post(base + "/api/auth/login", { headers: { origin: base, "x-cga-auth-request": "1" }, data: credentials.teacher_a });
       const identity = safety.inspectOwnedContainer(seed.container_id, "yaya.qa-seed1");
       if (identity.state !== "verified" || identity.id !== seed.container_id || identity.label !== seed.seed_id) throw new Error("Own outage target identity mismatch");
-      await db.end(); db = null;
-      const stopped = safety.nativeCommand("docker", ["stop", seed.container_id]);
-      if (stopped.status !== 0) throw new Error("Own isolated PG stop failed");
-      check("owned DB outage yields real auth 503", (await outage.request.get(base + "/api/auth/status")).status() === 503, "real_auth_http_owned_db_outage");
+      // Controlled fault in our disposable seed only; keep the PG process healthy.
+      await db.query("ALTER TABLE app_sessions RENAME TO platform_ui_fault_sessions");
+      check("owned DB identity-table fault yields real auth 503", (await outage.request.get(base + "/api/auth/status")).status() === 503, "real_auth_http_controlled_owned_db_fault");
       const page = await outage.newPage();
       for (const width of [1440, 390]) {
         await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
         await page.goto(base + "/", { waitUntil: "networkidle" });
-        await capture(page, `identity-unavailable-${width}`, "real_auth_http_owned_db_outage");
+        await capture(page, `identity-unavailable-${width}`, "real_auth_http_controlled_owned_db_fault");
       }
       await outage.close();
     }

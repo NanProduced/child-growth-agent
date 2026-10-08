@@ -88,7 +88,7 @@ function UserContent() {
         <YayaAttachmentGallery className="justify-end" images={images} onOpen={(image) => setViewer(image)} />
       ) : null}
       {text.trim() !== "" ? (
-        <div className="max-w-[90%] whitespace-pre-wrap rounded-2xl bg-emerald-50 px-4 py-3 text-base leading-[1.65] text-emerald-950 [overflow-wrap:anywhere] sm:max-w-[85%] sm:text-[15px]">
+        <div className="max-w-[90%] whitespace-pre-wrap rounded-2xl bg-emerald-50 px-4 py-3 text-base leading-7 text-emerald-950 [overflow-wrap:anywhere] sm:max-w-[85%]">
           {text}
         </div>
       ) : null}
