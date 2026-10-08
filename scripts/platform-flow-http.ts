@@ -185,7 +185,7 @@ async function main(): Promise<void> {
     await api(`/api/yaya/uploads/${imageId}/content`, 403, empty);
     await api(`/api/classes/${seed.manifest.classes.class_b.id}/children`, 400, admin, { child_id: childId, start_date: '2026-02-30' });
     check(calls.every((name) => ['follow_up_decision', 'observation_draft', 'teacher_edit_review', 'growth_profile', 'activity_support'].includes(name)), 'only registered local protocol requests');
-    console.log(JSON.stringify({ ok: true, passed: checks.length, checks, seed_id: seed.seed_id, model_protocol_calls: calls, real_model_requests: 0, layers: 'real Next HTTP + real AUTH/session/CSRF + disposable PG + protocol model double + local objects', NOT_RUN: ['browser/UI', 'real model quality', 'search/S3/hosted DB/deployment', 'chatbox-v2 pending new baseline'] }));
+    console.log(JSON.stringify({ ok: true, passed: checks.length, checks, seed_id: seed.seed_id, model_protocol_calls: calls, real_model_requests: 0, layers: 'real Next HTTP + real AUTH/session/CSRF + disposable PG + protocol model double + local objects', NOT_RUN: ['browser/UI', 'real model quality', 'search/S3/hosted DB/deployment'] }));
   } finally {
     await runCleanupSteps([
       { label: 'next', run: () => next ? stopTrackedChildTree(next) : { ok: true, detail: 'not started' } },
