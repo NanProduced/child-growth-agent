@@ -86,7 +86,7 @@ $typeRoots = @(
 $typeSnapshot = @{}
 foreach ($typeRoot in $typeRoots) {
   if (-not (Test-Path -LiteralPath $typeRoot)) { continue }
-  Get-ChildItem -LiteralPath $typeRoot -File -ErrorAction SilentlyContinue |
+  Get-ChildItem -LiteralPath $typeRoot -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like "*.ts" } |
     ForEach-Object { $typeSnapshot[$_.FullName] = Get-Content -LiteralPath $_.FullName -Raw }
 }
@@ -105,7 +105,7 @@ try {
   $serverOut = Join-Path $OutDir "dev-out.log"
   $serverErr = Join-Path $OutDir "dev-err.log"
   $server = Start-Process -FilePath $pnpm `
-    -ArgumentList @("exec", "next", "dev", "--hostname", "127.0.0.1", "--port", "$Port") `
+    -ArgumentList @("exec", "next", "dev", "--webpack", "--hostname", "127.0.0.1", "--port", "$Port") `
     -WorkingDirectory $repoRoot `
     -RedirectStandardOutput $serverOut `
     -RedirectStandardError $serverErr `
@@ -136,6 +136,7 @@ try {
   if ($PlaywrightCoreDir) { $env:PLAYWRIGHT_CORE_DIR = [System.IO.Path]::GetFullPath($PlaywrightCoreDir) }
   if ($ChromePath) { $env:CHROME_PATH = [System.IO.Path]::GetFullPath($ChromePath) }
 
+  Start-Sleep -Seconds 3
   Write-Output "runner_pid=$runnerPid server_pid=$serverPid base_url=$baseUrl out=$OutDir"
   & $node $checkScript --base-url $baseUrl --out $OutDir
   $checkExit = $LASTEXITCODE
@@ -167,7 +168,7 @@ try {
   if ($routeCreated) {
     foreach ($typeRoot in $typeRoots) {
       if (-not (Test-Path -LiteralPath $typeRoot)) { continue }
-      Get-ChildItem -LiteralPath $typeRoot -File -ErrorAction SilentlyContinue |
+      Get-ChildItem -LiteralPath $typeRoot -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like "*.ts" } |
         ForEach-Object {
           $content = Get-Content -LiteralPath $_.FullName -Raw -ErrorAction SilentlyContinue
@@ -179,6 +180,8 @@ try {
             }
           }
         }
+      $previewTypeDir = Join-Path $typeRoot "app\guide-preview-class"
+      if (Test-Path -LiteralPath $previewTypeDir) { Remove-Item -LiteralPath $previewTypeDir -Recurse -Force -ErrorAction SilentlyContinue }
     }
     if ($null -ne $nextEnvSnapshot -and (Test-Path -LiteralPath $nextEnvPath -PathType Leaf)) {
       $currentNextEnv = Get-Content -LiteralPath $nextEnvPath -Raw

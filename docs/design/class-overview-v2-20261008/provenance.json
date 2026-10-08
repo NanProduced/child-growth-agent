@@ -1,0 +1,54 @@
+{
+  "design_date": "2026-10-08",
+  "status": "pending_user_review",
+  "generation_method": "built_in_image_gen",
+  "product_code_changed": false,
+  "live_preview_changed": false,
+  "real_business_provider_requests": 0,
+  "requested_logical_viewport": {
+    "width": 1440,
+    "height": 1024
+  },
+  "actual_file_dimensions": {
+    "width": 1487,
+    "height": 1058
+  },
+  "postprocessing": "none; exact copies",
+  "references": [
+    "C:\\Users\\nanpr\\AppData\\Local\\Temp\\yui-v2\\output\\playwright\\class-overview-audit-20261008\\00-user-supplied.png",
+    "C:\\Users\\nanpr\\AppData\\Local\\Temp\\yui-v2\\output\\playwright\\class-overview-audit-20261008\\01-healthy-viewport.png"
+  ],
+  "prompts": "PROMPTS.md",
+  "options": [
+    {
+      "display_order": 1,
+      "file": "01-chart-overview.png",
+      "direction": "图表总览",
+      "source": "C:\\Users\\nanpr\\.codex\\generated_images\\01a0ebae-c34b-7341-b7cc-aee62ce28509\\exec-906376ff-85ec-44bd-a100-53b9529af459.png",
+      "approved": false
+    },
+    {
+      "display_order": 2,
+      "file": "02-evidence-register.png",
+      "direction": "紧凑证据表",
+      "source": "C:\\Users\\nanpr\\.codex\\generated_images\\01a0ebae-c34b-7341-b7cc-aee62ce28509\\exec-70443a80-7ffc-4aaf-9b87-7a5fb104eb2e.png",
+      "approved": false
+    },
+    {
+      "display_order": 3,
+      "file": "03-evidence-workspace.png",
+      "direction": "证据下钻工作台",
+      "source": "C:\\Users\\nanpr\\.codex\\generated_images\\01a0ebae-c34b-7341-b7cc-aee62ce28509\\exec-9cf2e7b2-45cf-46fd-b3d8-be41cfdf30e3.png",
+      "approved": false
+    }
+  ],
+  "not_run": [
+    "implementation",
+    "mobile_design",
+    "browser",
+    "HTTP_DB",
+    "real_business_models",
+    "storage",
+    "deployment"
+  ]
+}

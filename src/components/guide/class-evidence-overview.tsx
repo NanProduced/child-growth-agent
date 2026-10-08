@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useState } from "react";
-import { ArrowUpRight, ChevronDown, Leaf, PenLine } from "lucide-react";
+import { ArrowUpRight, BookOpen, ChevronDown, HelpCircle, Leaf, PenLine } from "lucide-react";
 
 import { classLabel, formatDateCn, parseIsoDateStrict } from "@/lib/format";
 import {
@@ -22,15 +22,25 @@ import {
   type EvidenceViewFilters,
   type GuideItemEvidenceStatus,
 } from "@/lib/guide/view-types";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import styles from "./class-evidence-overview.module.css";
 
 /**
- * G4-R1 班级指南证据概览：按当前在班名单回看五大领域的观察证据分布。
- * - 只读展示服务端 DTO（ClassEvidenceOverview）；人数、分母与占比全部读取 DTO，不从名单重算；
+ * G4-R1 / CLASS-EVIDENCE-UI2 班级指南证据概览：证据下钻工作台。
+ * - 桌面双栏：左侧指南条目分布（0-20 人数坐标），右侧选中条目的原文、条件、三态名单与真实证据；
+ * - 纯读服务端 DTO（ClassEvidenceOverview）；人数、分母与占比读取 DTO，不从名单重算；
  * - 可靠性优先于普通状态展示：不可读取的幼儿不归入普通三类名单，完全不可用时不画三类分布；
- * - 保健参考条目不渲染行为表现统计，只作参考说明与查阅入口；
- * - 期间选择器始终反映已应用的数据期间，日期草稿单独存在且明确“尚未应用”；
- * - 期间与筛选只通过 typed callback 发出意图，正式取数与路由由 G6 接入。
+ * - partial 只展示可核验人数下限与“数据待核验”，不把余数推断为暂无记录；
+ * - 保健参考条目单列查阅，不参与行为统计（不计占比），不做正常／异常判断；
+ * - 统计说明集中在模态对话框，不在每行重复长警告段落；
+ * - 依据片段异步复用 GET /api/children/[id]/evidence-book，真实数据展示，绝不捏造示例正文。
  */
 
 export type ClassEvidenceScopeIntent =
@@ -58,7 +68,7 @@ export interface ClassEvidenceOverviewProps {
   onOpenChildItem?: (target: ClassEvidenceDrilldown) => void;
   /** 复用现有记录流程；不预填内容 */
   onRecordObservation?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
-  /** 按幼儿当前可操作性决定“记录观察”入口；缺省时回调存在即可用（G6-WRITE1 传入服务端解析结果） */
+  /** 按幼儿当前可操作性决定“记录观察”入口；缺省时回调存在即可用 */
   canRecordChild?: (child: EvidenceChildRef) => boolean;
   /** 现有活动支持入口（成长档案内） */
   onOpenActivitySupport?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
@@ -207,7 +217,9 @@ function ItemDistribution({ item }: { item: ClassGuideItemView }) {
               className={cx("seg", STATUS_CLASS[status])}
               style={{ flexGrow: count / (total || 1) }}
               data-testid="distribution-segment"
-            />
+            >
+              {count}
+            </span>
           );
         })}
       </div>
@@ -263,7 +275,10 @@ function ItemStats({ item, scope }: { item: ClassGuideItemView; scope: EvidenceS
     const caveat = referenceReliabilityNote(item.reliability);
     return (
       <div className={cx("dist-reference")} data-testid="reference-note" data-reliability={item.reliability}>
-        <strong>{EVIDENCE_TYPE_LABELS[item.item.product_rules.evidence_type]}</strong>
+        <div className={cx("dist-reference-head")}>
+          <BookOpen className={cx("dist-reference-icon")} aria-hidden="true" />
+          <strong>{EVIDENCE_TYPE_LABELS[item.item.product_rules.evidence_type]}</strong>
+        </div>
         <span>{referenceNote(item.item)}</span>
         {caveat ? (
           <span className={cx("reference-caveat")} data-testid="reference-caveat">
@@ -292,6 +307,8 @@ function ChildRow({
   item,
   variant,
   drilldown,
+  isActive,
+  onSelect,
   onOpenChildItem,
   onRecordObservation,
   canRecordChild,
@@ -302,6 +319,8 @@ function ChildRow({
   item: GuidePerformanceItem;
   variant: ChildRowVariant;
   drilldown: ClassEvidenceDrilldown;
+  isActive?: boolean;
+  onSelect?: () => void;
   onOpenChildItem?: (target: ClassEvidenceDrilldown) => void;
   onRecordObservation?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
   canRecordChild?: (child: EvidenceChildRef) => boolean;
@@ -309,17 +328,24 @@ function ChildRow({
 }) {
   const caveat = childCaveat(entry);
   const showStatusBadge = variant === "status";
+  const childName = child ? child.name : `名单幼儿（${entry.child_id}）`;
+  const monogram = childName.slice(0, 1);
+
   return (
     <li
-      className={cx("child-row")}
+      className={cx("child-row", isActive && "child-row-active")}
       data-testid="child-row"
       data-child-id={entry.child_id}
       data-status={entry.status}
       data-reliability={entry.reliability}
       data-variant={variant}
+      onClick={onSelect}
     >
       <div className={cx("child-line")}>
-        <span className={cx("child-name")}>{child ? child.name : `名单幼儿（${entry.child_id}）`}</span>
+        <span className={cx("child-avatar")} aria-hidden="true">
+          {monogram}
+        </span>
+        <span className={cx("child-name")}>{childName}</span>
         {showStatusBadge ? (
           <span className={cx("child-status", STATUS_CLASS[entry.status])} data-testid="child-status-badge">
             {GUIDE_ITEM_EVIDENCE_STATUS_LABELS[entry.status]}
@@ -396,7 +422,10 @@ function ChildRow({
           type="button"
           className={cx("child-action", "child-action-primary")}
           disabled={!onOpenChildItem}
-          onClick={() => onOpenChildItem?.(drilldown)}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenChildItem?.(drilldown);
+          }}
           data-testid="open-child-item"
         >
           <ArrowUpRight className={cx("action-icon")} aria-hidden="true" />
@@ -406,7 +435,8 @@ function ChildRow({
           type="button"
           className={cx("child-action")}
           disabled={!child || !onRecordObservation || (child && canRecordChild ? !canRecordChild(child) : false)}
-          onClick={() => {
+          onClick={(event) => {
+            event.stopPropagation();
             if (child && onRecordObservation) onRecordObservation(child, item);
           }}
           data-testid="record-observation"
@@ -418,7 +448,8 @@ function ChildRow({
           type="button"
           className={cx("child-action")}
           disabled={!child || !onOpenActivitySupport}
-          onClick={() => {
+          onClick={(event) => {
+            event.stopPropagation();
             if (child && onOpenActivitySupport) onOpenActivitySupport(child, item);
           }}
           data-testid="open-activity-support"
@@ -431,8 +462,17 @@ function ChildRow({
   );
 }
 
+interface EvidenceQuoteInfo {
+  quote: string;
+  quoteSource: string;
+  observedAt: string;
+  confirmedAt: string | null;
+  valid: boolean;
+}
+
 function ItemRow({
   item,
+  index,
   scope,
   filters,
   rosterById,
@@ -444,6 +484,7 @@ function ItemRow({
   onOpenActivitySupport,
 }: {
   item: ClassGuideItemView;
+  index: number;
   scope: EvidenceScope;
   filters: EvidenceViewFilters;
   rosterById: ReadonlyMap<string, EvidenceChildRef>;
@@ -469,6 +510,72 @@ function ItemRow({
   })).filter((group) => group.entries.length > 0);
   const restrictedEntries = item.children.filter(isRestrictedChild);
 
+  const [activeChildId, setActiveChildId] = useState<string | null>(() => {
+    return item.children[0]?.child_id ?? null;
+  });
+
+  const [quoteInfo, setQuoteInfo] = useState<EvidenceQuoteInfo | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+
+  // 异步获取选中幼儿的证据片段（零硬编码，从 GET /api/children/[id]/evidence-book 加载）
+  useEffect(() => {
+    if (!expanded || !activeChildId) {
+      setQuoteInfo(null);
+      return;
+    }
+    const controller = new AbortController();
+    setQuoteLoading(true);
+
+    const query = new URLSearchParams();
+    if (scope.kind === "semester" && scope.semester_id) query.set("semester_id", scope.semester_id);
+    if (scope.kind === "custom_range" && scope.start_date && scope.end_date) {
+      query.set("scope", "custom_range");
+      query.set("from", scope.start_date);
+      query.set("to", scope.end_date);
+    }
+    if (scope.kind === "all_history") query.set("scope", "all_history");
+    if (filters.domain_code) query.set("domain", filters.domain_code);
+    if (filters.age_band) query.set("age_band", filters.age_band);
+    if (filters.goal_id) query.set("goal_id", filters.goal_id);
+
+    fetch(`/api/children/${encodeURIComponent(activeChildId)}/evidence-book?${query.toString()}`, {
+      signal: controller.signal,
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!data || !Array.isArray(data.goals)) {
+          setQuoteInfo(null);
+          return;
+        }
+        type RemoteItem = { item: { id: string }; bases: Array<{ quote: string; quote_source: string; observed_at: string; source_confirmed_at: string | null; valid: boolean }> };
+        const found = (data.goals as Array<{ items: RemoteItem[] }>)
+          .flatMap((g) => g.items)
+          .find((it) => it.item.id === item.item.id);
+        if (found && found.bases && found.bases.length > 0) {
+          const validBasis = found.bases.find((b) => b.valid) ?? found.bases[0];
+          setQuoteInfo({
+            quote: validBasis.quote,
+            quoteSource: validBasis.quote_source === "raw_text" ? "原始观察引用" : "教师确认稿引用",
+            observedAt: validBasis.observed_at,
+            confirmedAt: validBasis.source_confirmed_at,
+            valid: validBasis.valid,
+          });
+        } else {
+          setQuoteInfo(null);
+        }
+      })
+      .catch(() => {
+        setQuoteInfo(null);
+      })
+      .finally(() => {
+        setQuoteLoading(false);
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [expanded, activeChildId, item.item.id, scope, filters]);
+
   function renderChild(entry: ClassChildItemStatus, variant: ChildRowVariant) {
     return (
       <ChildRow
@@ -477,6 +584,8 @@ function ItemRow({
         child={rosterById.get(entry.child_id)}
         item={item.item}
         variant={variant}
+        isActive={activeChildId === entry.child_id}
+        onSelect={() => setActiveChildId(entry.child_id)}
         drilldown={{
           child_id: entry.child_id,
           item_id: item.item.id,
@@ -492,49 +601,75 @@ function ItemRow({
     );
   }
 
+  const activeChildRef = activeChildId ? rosterById.get(activeChildId) : undefined;
+  const activeChildStatus = item.children.find((c) => c.child_id === activeChildId);
+
   return (
     <li
-      className={cx("item")}
+      className={cx("item", expanded && "item-expanded")}
       data-testid="class-evidence-item"
       data-item-id={item.item.id}
       data-reliability={item.reliability}
       data-ratio={item.confirmed_ratio === null ? "null" : String(item.confirmed_ratio)}
     >
-      <div className={cx("item-top")}>
-        <span className={cx("item-chip")}>指南参考 · {GUIDE_AGE_BAND_LABELS[item.item.age_band]}</span>
-        {item.item.product_rules.evidence_type !== "behavior" ? (
-          <span className={cx("item-chip", "item-chip-muted")}>
-            {EVIDENCE_TYPE_LABELS[item.item.product_rules.evidence_type]}
-            {!item.item.product_rules.counts_in_behavior_stats ? " · 不参与行为统计" : ""}
-          </span>
-        ) : null}
-        {pendingCount > 0 ? (
-          <span className={cx("item-pending")}>AI 关联待核对 {pendingCount} 条（不计入人数）</span>
-        ) : null}
-        <button
-          type="button"
-          className={cx("disclosure")}
-          aria-expanded={expanded}
-          aria-controls={expanded ? panelId : undefined}
-          onClick={onToggle}
-          data-testid="item-disclosure"
-        >
-          {expanded ? (reference ? "收起相关记录" : "收起名单") : reference ? "查阅相关记录" : "查看名单"}
-          <ChevronDown className={cx("disclosure-icon", expanded && "disclosure-icon-open")} aria-hidden="true" />
-        </button>
-      </div>
-
-      <div className={cx("item-body")}>
-        <div className={cx("item-text-block")}>
-          <p className={cx("item-text")}>{item.item.text}</p>
+      <div className={cx("item-row-main")}>
+        <div className={cx("item-index")} aria-hidden="true">
+          {index}
         </div>
-        <div className={cx("item-stats")}>
-          <ItemStats item={item} scope={scope} />
+
+        <div className={cx("item-content")}>
+          <div className={cx("item-top")}>
+            <span className={cx("item-chip")}>指南参考 · {GUIDE_AGE_BAND_LABELS[item.item.age_band]}</span>
+            {item.item.product_rules.evidence_type !== "behavior" ? (
+              <span className={cx("item-chip", "item-chip-muted")}>
+                {EVIDENCE_TYPE_LABELS[item.item.product_rules.evidence_type]}
+                {!item.item.product_rules.counts_in_behavior_stats ? " · 不参与行为统计" : ""}
+              </span>
+            ) : null}
+            {pendingCount > 0 ? (
+              <span className={cx("item-pending")}>AI 关联待核对 {pendingCount} 条（不计入人数）</span>
+            ) : null}
+            <button
+              type="button"
+              className={cx("disclosure")}
+              aria-expanded={expanded}
+              aria-controls={expanded ? panelId : undefined}
+              onClick={onToggle}
+              data-testid="item-disclosure"
+            >
+              {expanded ? (reference ? "收起相关记录" : "收起名单") : reference ? "查阅相关记录" : "查看名单"}
+              <ChevronDown className={cx("disclosure-icon", expanded && "disclosure-icon-open")} aria-hidden="true" />
+            </button>
+          </div>
+
+          <div className={cx("item-body")}>
+            <div className={cx("item-text-block")}>
+              <p className={cx("item-text")}>{item.item.text}</p>
+            </div>
+            <div className={cx("item-stats")}>
+              <ItemStats item={item} scope={scope} />
+            </div>
+          </div>
         </div>
       </div>
 
       {expanded ? (
         <div className={cx("panel")} id={panelId}>
+          <div className={cx("inspector-header")}>
+            <h4 className={cx("inspector-title")}>指南条目详情</h4>
+            <p className={cx("inspector-item-text")}>{item.item.text}</p>
+            <div className={cx("inspector-tags")}>
+              <span className={cx("inspector-tag")}>
+                指南参考 · {GUIDE_AGE_BAND_LABELS[item.item.age_band]}
+              </span>
+              {!reference ? (
+                <span className={cx("inspector-tag", "inspector-tag-rule")}>
+                  关键要求 · {item.item.product_rules.adult_help === "allowed" ? "允许成人帮助" : "要求独立完成"}
+                </span>
+              ) : null}
+            </div>
+          </div>
+
           {reference ? (
             item.reliability === "unavailable" ? (
               <>
@@ -699,6 +834,60 @@ function ItemRow({
               ) : null}
             </>
           )}
+
+          {/* 选中幼儿观察证据卡片 */}
+          {activeChildRef && activeChildStatus ? (
+            <div className={cx("inspector-quote-card")}>
+              <div className={cx("quote-card-head")}>
+                <span className={cx("quote-card-title")}>
+                  {activeChildRef.name}的观察证据
+                </span>
+                {quoteInfo?.observedAt ? (
+                  <span className={cx("quote-card-date")}>
+                    {formatDateCn(quoteInfo.observedAt)}
+                  </span>
+                ) : null}
+                {quoteInfo ? (
+                  <span className={cx("quote-card-badge")}>
+                    {quoteInfo.quoteSource}
+                  </span>
+                ) : null}
+              </div>
+
+              {quoteLoading ? (
+                <p className={cx("quote-card-loading")}>正在读取证据片段…</p>
+              ) : quoteInfo?.quote ? (
+                <blockquote className={cx("quote-card-text")}>
+                  “{quoteInfo.quote}”
+                </blockquote>
+              ) : (
+                <p className={cx("quote-card-empty")}>
+                  {activeChildStatus.confirmed_link_count > 0
+                    ? `该幼儿在本条目有 ${activeChildStatus.confirmed_link_count} 条已确认证据记录，可进入个人证据册核对具体观察记录与背景。`
+                    : "当前在已核验范围内暂无具体观察正文片段，可进入个人证据册查阅。"}
+                </p>
+              )}
+
+              <div className={cx("quote-card-actions")}>
+                <button
+                  type="button"
+                  className={cx("quote-card-btn")}
+                  onClick={() =>
+                    onOpenChildItem?.({
+                      child_id: activeChildRef.id,
+                      item_id: item.item.id,
+                      child_status: activeChildStatus.status,
+                      scope,
+                      filters,
+                    })
+                  }
+                >
+                  <ArrowUpRight className={cx("action-icon")} aria-hidden="true" />
+                  查看{activeChildRef.name}证据册
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </li>
@@ -724,6 +913,7 @@ export function ClassEvidenceOverview({
   const [draft, setDraft] = useState<{ from: string; to: string } | null>(null);
   const [rangeError, setRangeError] = useState<string | null>(null);
   const [infoExpanded, setInfoExpanded] = useState(false);
+  const [statsDialogOpen, setStatsDialogOpen] = useState(false);
 
   useEffect(() => {
     setDraft(null);
@@ -836,6 +1026,18 @@ export function ClassEvidenceOverview({
     ? `指南参考 ${GUIDE_AGE_BAND_LABELS[overview.filters.age_band]}（不是达标期限）`
     : "全部年龄段（按条目各自的参考年龄阅读）";
 
+  const itemIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    let seq = 0;
+    for (const group of overview.goals) {
+      for (const item of group.items) {
+        seq += 1;
+        map.set(item.item.id, seq);
+      }
+    }
+    return map;
+  }, [overview.goals]);
+
   return (
     <section
       className={[styles.overview, className].filter(Boolean).join(" ")}
@@ -843,11 +1045,18 @@ export function ClassEvidenceOverview({
       data-testid="class-evidence-overview"
     >
       <header className={cx("head")}>
-        <h2 className={cx("title")}>班级指南证据概览</h2>
-        <p className={cx("identity")}>
-          {classLabel(overview.class.stage, overview.class.name)} · {overview.class.school_year}学年
-          {overview.class.is_active ? null : <span className={cx("identity-flag")}>已停用</span>}
-        </p>
+        <div className={cx("title-row")}>
+          <div>
+            <h2 className={cx("title")}>班级指南证据概览</h2>
+            <p className={cx("identity")}>
+              {classLabel(overview.class.stage, overview.class.name)} · {overview.class.school_year}学年
+              {overview.class.is_active ? null : <span className={cx("identity-flag")}>已停用</span>}
+            </p>
+          </div>
+          <div className={cx("synthetic-badge")} aria-label="数据性质标记">
+            设计示例 · 合成数据
+          </div>
+        </div>
         <p className={cx("caption")}>
           对照《3—6岁儿童学习与发展指南》查看当前在班幼儿的观察证据；指南是参考，观察才是表现证据。
         </p>
@@ -1068,6 +1277,61 @@ export function ClassEvidenceOverview({
             参考年龄只用于阅读条目，不代表达标期限，也不回填证据发生时的班级或学段。
           </p>
         </div>
+
+        <div className={cx("control-block", "control-block-help")}>
+          <Dialog open={statsDialogOpen} onOpenChange={setStatsDialogOpen}>
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className={cx("help-button")}
+                data-testid="stats-help-button"
+                aria-label="查看统计说明与方法"
+              >
+                <HelpCircle className={cx("help-icon")} aria-hidden="true" />
+                统计说明
+              </button>
+            </DialogTrigger>
+            <DialogContent className={cx("dialog-modal")}>
+              <DialogHeader>
+                <DialogTitle>班级指南证据概览 · 统计说明</DialogTitle>
+                <DialogDescription>
+                  基于《3—6岁儿童学习与发展指南》的发展性观察统计口径与规则
+                </DialogDescription>
+              </DialogHeader>
+              <div className={cx("dialog-body")}>
+                <section className={cx("dialog-section")}>
+                  <h4>1. 统计口径与在班名单</h4>
+                  <p>
+                    所有期间均按当前在班幼儿名单（{overview.roster.child_count} 人）为分母去重统计；
+                    切换历史期间只回看在班幼儿当时的证据，不能还原历史名册，亦不代表班级教学成效评价。
+                  </p>
+                </section>
+                <section className={cx("dialog-section")}>
+                  <h4>2. 三类正式状态定义</h4>
+                  <ul>
+                    <li><strong>已确认观察到</strong>：已有经过教师确认的观察记录支持指南条目表现要求。</li>
+                    <li><strong>已有相关线索</strong>：已有相关行为记录或在成人支持协助下的表现。</li>
+                    <li><strong>暂无相关记录</strong>：当前统计范围内尚无关联观察，<strong>不代表幼儿“不会”或未掌握</strong>。</li>
+                  </ul>
+                </section>
+                <section className={cx("dialog-section")}>
+                  <h4>3. 数据可靠性规则</h4>
+                  <ul>
+                    <li><strong>reliable</strong>：记录完整可靠，展示完整三态人数与占比分布。</li>
+                    <li><strong>partial</strong>：部分记录未通过核对或无法读取，仅展示可确认下限人数与“数据待核验”，不推断未知。</li>
+                    <li><strong>unavailable</strong>：记录暂时无法读取，保留在班分母与个人证据册入口，不展示三态人数。</li>
+                  </ul>
+                </section>
+                <section className={cx("dialog-section")}>
+                  <h4>4. 保健参考条目</h4>
+                  <p>
+                    身高、体重等体态参考条目仅供日常保育查阅对照，不参与行为表现统计，不做正常/异常评价。
+                  </p>
+                </section>
+              </div>
+            </DialogContent>
+          </Dialog>
+        </div>
       </div>
 
       {overview.filters.goal_id ? (
@@ -1093,50 +1357,95 @@ export function ClassEvidenceOverview({
       {overview.goals.length === 0 ? (
         <p className={cx("overview-empty")}>当前筛选下没有可展示的表现条目。</p>
       ) : (
-        <div className={cx("goals")}>
-          {overview.goals.map(({ goal, items }) => {
-            const domainName = catalogIndex.domains.get(goal.domain_id);
-            const subDomainName = catalogIndex.subDomains.get(goal.sub_domain_id);
-            const pathText =
-              [overview.filters.domain_code === null ? domainName : null, subDomainName]
-                .filter(Boolean)
-                .join(" · ") || "指南目标";
-            return (
-              <section
-                key={goal.id}
-                className={cx("goal-group")}
-                aria-labelledby={`class-goal-${goal.id}`}
-                data-testid="goal-group"
-              >
-                <h3 className={cx("goal-title")} id={`class-goal-${goal.id}`}>
-                  <span className={cx("goal-path")} data-testid="goal-path">
-                    {pathText}
-                  </span>
-                  <span className={cx("goal-heading")}>
-                    <span className={cx("goal-index")}>{goal.index}</span>
-                    {goal.title}
-                  </span>
-                </h3>
-                <ul className={cx("item-list")}>
-                  {items.map((item) => (
-                    <ItemRow
-                      key={item.item.id}
-                      item={item}
-                      scope={overview.scope}
-                      filters={overview.filters}
-                      rosterById={rosterById}
-                      expanded={expandedIds.has(item.item.id)}
-                      onToggle={() => toggleItem(item.item.id)}
-                      onOpenChildItem={onOpenChildItem}
-                      onRecordObservation={onRecordObservation}
-                      canRecordChild={canRecordChild}
-                      onOpenActivitySupport={onOpenActivitySupport}
-                    />
-                  ))}
-                </ul>
-              </section>
-            );
-          })}
+        <div className={cx("workspace")}>
+          <div className={cx("workspace-master")}>
+            <div className={cx("workspace-head")}>
+              <div className={cx("workspace-head-title")}>
+                <h3 className={cx("workspace-heading")}>指南条目分布</h3>
+                <span className={cx("workspace-roster-tag")}>
+                  当前在班 {overview.roster.child_count} 人
+                </span>
+              </div>
+              <div className={cx("workspace-legend-row")}>
+                <span className={cx("shared-legend-item")}>
+                  <span className={cx("legend-dot", STATUS_CLASS.confirmed_observed)} aria-hidden="true" />
+                  已确认观察到
+                </span>
+                <span className={cx("shared-legend-item")}>
+                  <span className={cx("legend-dot", STATUS_CLASS.has_clues)} aria-hidden="true" />
+                  已有相关线索
+                </span>
+                <span className={cx("shared-legend-item")}>
+                  <span className={cx("legend-dot", STATUS_CLASS.no_records)} aria-hidden="true" />
+                  暂无相关记录
+                </span>
+                <span className={cx("shared-legend-caption")}>
+                  按当前在班幼儿去重，不代表发展评分。
+                </span>
+              </div>
+            </div>
+
+            <div className={cx("workspace-ruler")} aria-hidden="true">
+              <span className={cx("ruler-label-left")}># 指南条目（点击查看幼儿名单）</span>
+              <div className={cx("ruler-axis")}>
+                <span className={cx("ruler-axis-title")}>人数分布（人）</span>
+                <div className={cx("ruler-ticks")}>
+                  <span>0</span>
+                  <span>5</span>
+                  <span>10</span>
+                  <span>15</span>
+                  <span>20</span>
+                </div>
+              </div>
+            </div>
+
+            <div className={cx("goals")}>
+              {overview.goals.map(({ goal, items }) => {
+                const domainName = catalogIndex.domains.get(goal.domain_id);
+                const subDomainName = catalogIndex.subDomains.get(goal.sub_domain_id);
+                const pathText =
+                  [overview.filters.domain_code === null ? domainName : null, subDomainName]
+                    .filter(Boolean)
+                    .join(" · ") || "指南目标";
+                return (
+                  <section
+                    key={goal.id}
+                    className={cx("goal-group")}
+                    aria-labelledby={`class-goal-${goal.id}`}
+                    data-testid="goal-group"
+                  >
+                    <h3 className={cx("goal-title")} id={`class-goal-${goal.id}`}>
+                      <span className={cx("goal-path")} data-testid="goal-path">
+                        {pathText}
+                      </span>
+                      <span className={cx("goal-heading")}>
+                        <span className={cx("goal-index")}>{goal.index}</span>
+                        {goal.title}
+                      </span>
+                    </h3>
+                    <ul className={cx("item-list")}>
+                      {items.map((item) => (
+                        <ItemRow
+                          key={item.item.id}
+                          item={item}
+                          index={itemIndexMap.get(item.item.id) ?? 1}
+                          scope={overview.scope}
+                          filters={overview.filters}
+                          rosterById={rosterById}
+                          expanded={expandedIds.has(item.item.id)}
+                          onToggle={() => toggleItem(item.item.id)}
+                          onOpenChildItem={onOpenChildItem}
+                          onRecordObservation={onRecordObservation}
+                          canRecordChild={canRecordChild}
+                          onOpenActivitySupport={onOpenActivitySupport}
+                        />
+                      ))}
+                    </ul>
+                  </section>
+                );
+              })}
+            </div>
+          </div>
         </div>
       )}
     </section>

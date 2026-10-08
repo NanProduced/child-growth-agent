@@ -78,16 +78,28 @@ async function openPage(browser, viewport, options = {}) {
   const context = await browser.newContext({ viewport, reducedMotion: options.reducedMotion });
   const page = await context.newPage();
   page.setDefaultTimeout(60000);
+  page.on("console", (msg) => {
+    console.log(`[BROWSER ${msg.type().toUpperCase()}]`, msg.text(), JSON.stringify(msg.location()));
+  });
+  page.on("response", (res) => {
+    if (res.status() >= 400) {
+      console.log("[FAILED RES]", res.status(), res.url());
+    }
+  });
+  page.on("pageerror", (err) => console.error("[BROWSER PAGE_ERROR]", err.message, err.stack));
   await page.goto(BASE_URL, { waitUntil: "domcontentloaded", timeout: 180000 });
   await page.waitForSelector(OVERVIEW, { timeout: 180000 });
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(1500);
   return { context, page };
 }
 
 async function openScenario(browser, name) {
   const { context, page } = await openPage(browser, { width: 1440, height: 900 });
-  await page.getByRole("button", { name }).click();
-  await page.waitForTimeout(200);
+  const btn = page.getByRole("button", { name });
+  await btn.click();
+  await page.waitForTimeout(600);
+  const ev = await lastEvent(page, "scenario");
+  console.log("SCENARIO EVENT AFTER CLICK", name, ":", JSON.stringify(ev));
   return { context, page };
 }
 
@@ -121,8 +133,10 @@ async function waitPanelSettled(page) {
 }
 
 async function togglePanel(page, locator) {
+  await locator.scrollIntoViewIfNeeded().catch(() => {});
   await locator.click();
   await waitPanelSettled(page);
+  await page.waitForTimeout(200);
 }
 
 async function capture(page, fileName) {
@@ -279,11 +293,19 @@ async function auditViewport(browser, width, height, label) {
     await capture(page, "unavailable-expanded-1440.png");
     await togglePanel(page, unavailable.locator("[data-testid=item-disclosure]"));
 
-    /* ---- partial 展开：普通名单 + 核验受限名单 ---- */
+    const disc = partial.locator("[data-testid=item-disclosure]");
+    await disc.scrollIntoViewIfNeeded().catch(() => {});
+    const box = await disc.boundingBox();
+    const hit = await page.evaluate((b) => {
+      if (!b) return null;
+      const el = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+      return el ? { tag: el.tagName, className: el.className, testid: el.dataset.testid, text: el.innerText?.slice(0, 50) } : null;
+    }, box);
     await togglePanel(page, partial.locator("[data-testid=item-disclosure]"));
     const mixedGroups = await partial.locator("[data-testid=status-group]").evaluateAll((els) =>
       els.map((el) => `${el.dataset.status}:${el.querySelectorAll("[data-testid=child-row]").length}`),
     );
+    console.log("MIXED GROUPS:", mixedGroups);
     check("partial 普通三组名单", mixedGroups.join(",") === "confirmed_observed:3,has_clues:2,no_records:13", mixedGroups.join(","));
     check("partial 明示普通名单只覆盖已读取记录", (await partial.locator("[data-testid=partial-list-limit]").count()) === 1 && snap(await partial.innerText()).includes("只覆盖已读取记录"), "");
     const noRecordsHeading = snap(await partial.locator('[data-testid=status-group][data-status=no_records] h4').innerText());
@@ -441,7 +463,9 @@ async function auditViewport(browser, width, height, label) {
     /* ---- 空名单 ---- */
     const emptyRoster = await openPage(browser, { width: 1440, height: 900 });
     await emptyRoster.page.getByRole("button", { name: "空名单" }).click();
-    await emptyRoster.page.waitForTimeout(150);
+    await emptyRoster.page.waitForTimeout(600);
+    const ev = await lastEvent(emptyRoster.page, "scenario");
+    console.log("EMPTY ROSTER EVENT:", JSON.stringify(ev));
     const emptyText = await emptyRoster.page.locator(OVERVIEW).innerText();
     check("空名单：0 人与原因说明", emptyText.includes("当前在班名单") && emptyText.includes("0 人") && !emptyText.includes("%"), "");
     check("空名单：empty_roster 通知", (await emptyRoster.page.locator('[data-testid=class-notice][data-code=empty_roster]').count()) === 1, "");
