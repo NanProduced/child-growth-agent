@@ -46,4 +46,3 @@ Impeccable的Operate、distill、clarify原则用于信息减量；本轮是设�
 
 原图交付阶段仅新增设计文件。当前实施范围为两个证据页面与专属检查，结果以 `docs/guide-evidence-v1/evidence-ui-polish-delivery.md` 和项目根 `design-qa.md` 为准；保留原图、提示词和来源哈希。
 未合并/push/部署；真实业务模型请求 0，不消费手动联调额度。图稿不证明真实交互、权限或数据正确性。
-
