@@ -10,7 +10,6 @@ import { ArrowLeft } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useTeacher } from "@/components/teacher-provider";
-import { cn } from "@/lib/utils";
 
 import { useYayaRuntimeReady, useYayaThreadAvailability } from "./yaya-provider";
 import { YayaComposer } from "./yaya-composer";
@@ -27,10 +26,10 @@ function WorkspaceGate() {
         ? "登录状态已失效"
         : "身份服务暂时不可用";
   return (
-    <div className="flex h-[60dvh] flex-col items-center justify-center gap-3 text-center">
-      <p className="text-sm font-medium text-foreground">{title}</p>
-      <p className="text-xs text-muted-foreground">登录后才能使用芽芽；未登录不开放模型。</p>
-      <Button asChild size="sm" className="h-11">
+    <div className="flex h-[60dvh] flex-col items-center justify-center gap-3 px-4 text-center">
+      <p className="text-base font-medium text-foreground">{title}</p>
+      <p className="text-sm leading-[1.65] text-muted-foreground">登录后才能使用芽芽；未登录不开放模型。</p>
+      <Button asChild size="sm" className="mt-2 h-11 rounded-xl">
         <Link href="/login">去登录</Link>
       </Button>
     </div>
@@ -47,26 +46,26 @@ function YayaWorkspaceBody() {
   const threadAvailability = useYayaThreadAvailability();
   const [view, setView] = useState<"thread" | "list">("thread");
   return (
-    <div className="mx-auto flex h-[calc(100dvh-11rem)] min-h-0 w-full max-w-[1536px] overflow-hidden rounded-xl border bg-background xl:h-[calc(100dvh-8.5rem)]">
-      <aside className="hidden w-64 shrink-0 flex-col border-r lg:flex">
+    <div className="mx-auto flex h-[calc(100dvh-11rem)] min-h-0 w-full max-w-[1536px] overflow-hidden rounded-2xl border border-border bg-background font-sans text-foreground xl:h-[calc(100dvh-8.5rem)]">
+      <aside className="hidden w-64 shrink-0 flex-col border-r bg-muted/30 lg:flex">
         <YayaThreadList className="flex min-h-0 flex-1 flex-col" />
       </aside>
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-2 border-b px-3 py-2">
-          <Button asChild variant="ghost" size="icon" className="size-11 lg:hidden">
+        <header className="flex items-center gap-3 border-b bg-card px-4 py-3">
+          <Button asChild variant="ghost" size="icon" className="size-11 rounded-xl lg:hidden">
             <Link href="/" aria-label="返回应用">
               <ArrowLeft className="size-5" aria-hidden />
             </Link>
           </Button>
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-sm font-semibold text-foreground">芽芽工作区</h1>
-            <p className="truncate text-[11px] text-muted-foreground">同一会话、同一账号私有历史</p>
+            <h1 className="truncate text-base font-semibold text-foreground">芽芽工作区</h1>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">同一会话、同一账号私有历史</p>
           </div>
           <Button
             type="button"
             variant="outline"
             size="sm"
-            className="h-11 lg:hidden"
+            className="h-11 rounded-xl shadow-none lg:hidden"
             onClick={() => setView(view === "list" ? "thread" : "list")}
             aria-pressed={view === "list"}
           >
