@@ -8,6 +8,7 @@
  * - 身份服务不可用一律 fail closed（503），不降级匿名。
  */
 import { withTransaction, type TransactionClient } from "@/storage/database/pg-client";
+import { demandSessionValid } from "../../accounts/access";
 import { loadAccountsConfig } from "../../accounts/config";
 import { AccountsError } from "../../accounts/errors";
 import {
@@ -47,8 +48,8 @@ async function freshPrivateIdentity(
   ]);
   const row = account.rows[0];
   if (!row) throw new AccountsError("unauthenticated", "登录状态已失效，请重新登录。");
-  const session = await client.query<{ id: string; account_id: string; valid: boolean }>(
-    `SELECT id, account_id, revoked_at IS NULL AND expires_at > clock_timestamp() AS valid
+  const session = await client.query<{ id: string; account_id: string }>(
+    `SELECT id, account_id
        FROM app_sessions WHERE token_hash = $1 FOR SHARE`,
     [hashSessionToken(token)],
   );
@@ -60,7 +61,7 @@ async function freshPrivateIdentity(
     throw new AccountsError("state_conflict", "原请求不能由新会话接续。");
   }
   // 在取得会话行锁之后再判定期限（锁等待可能跨过到期时刻）。
-  if (!current.valid) throw new AccountsError("unauthenticated", "登录状态已失效，请重新登录。");
+  await demandSessionValid(client, current.id);
   if (row.status !== "active") throw new AccountsError("account_disabled", "账号已停用。");
   const assignments = await client.query<{ class_id: string }>(
     "SELECT class_id FROM teacher_class_assignments WHERE account_id = $1 AND removed_at IS NULL ORDER BY class_id",
@@ -107,12 +108,16 @@ export async function withPrivateAuth<T>(
         sessionId,
         config.schoolId,
       );
-      return work({
+      const result = await work({
         client,
         principal,
         sessionId,
         schoolId: config.schoolId,
       });
+      // Downstream resource locks may wait past the absolute session deadline.
+      // Reject before COMMIT so private/business writes and receipts roll back together.
+      await demandSessionValid(client, sessionId);
+      return result;
     },
     undefined,
     () => new AccountsError("identity_unavailable", "无法连接当前身份数据库，已拒绝访问。"),

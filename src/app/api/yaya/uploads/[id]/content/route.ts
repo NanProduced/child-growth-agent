@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { loadAttachmentContent } from "@/lib/media/content-service";
+import { evaluateAttachmentRead, loadAttachmentContent } from "@/lib/media/content-service";
+import { bindDataAttachmentMetadataPort } from "@/lib/media/data-adapter";
+import { withPrivateRead } from "@/lib/yaya/data/private-auth";
 import { MediaError } from "@/lib/media/errors";
 import { MEDIA_VARIANTS, type MediaVariant } from "@/lib/media/limits";
 import { requireMediaReadPrincipal } from "@/lib/media/request-guard";
@@ -21,7 +23,8 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const principal = await requireMediaReadPrincipal(request);
+    const carrier = { headers: new Headers(request.headers) };
+    const principal = await requireMediaReadPrincipal(carrier);
     const { id } = await params;
     const variantRaw = request.nextUrl.searchParams.get("variant") ?? "original";
     if (!(MEDIA_VARIANTS as readonly string[]).includes(variantRaw)) {
@@ -33,6 +36,18 @@ export async function GET(
       viewer: { account_id: principal.account_id, role: principal.role },
       loadRecordAccess: createDatabaseRecordAccessLoader(principal),
       variant: variantRaw as MediaVariant,
+    });
+    // Recheck after object I/O, in a short transaction coordinating current
+    // account/session/assignment and child attribution. No I/O under its locks.
+    await withPrivateRead(carrier, async ({ client, principal: current, schoolId }) => {
+      const evaluation = await evaluateAttachmentRead({ ...runtime, metadata: bindDataAttachmentMetadataPort(client) }, {
+        attachment_id: id,
+        viewer: { account_id: current.account_id, role: current.role },
+        loadRecordAccess: createDatabaseRecordAccessLoader(current, { client, schoolId }),
+      });
+      if (!evaluation.decision.readable) {
+        throw new MediaError(evaluation.decision.metadata_only ? "metadata_only" : "forbidden", "当前账号不能读取图片内容。");
+      }
     });
     return new NextResponse(new Uint8Array(content.body), {
       status: 200,

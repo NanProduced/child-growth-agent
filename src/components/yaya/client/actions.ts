@@ -21,9 +21,9 @@ import {
 } from "@/lib/yaya/api-contract";
 import type {
   YayaOperationQueryOutcome,
-  YayaOperationReceipt,
   YayaPlannedOperation,
 } from "@/lib/yaya/types";
+import { queryOperationOutcome } from "@/lib/yaya/types";
 import { yayaOperationQueryOutcomeSchema } from "@/lib/yaya/api-contract";
 
 import {
@@ -117,27 +117,13 @@ function identityMismatchOutcome(): YayaOperationQueryOutcome {
   return { kind: "unknown", reason: "identity_mismatch" };
 }
 
-function receiptMatchesPlan(
-  receipt: YayaOperationReceipt,
-  plan: YayaPlannedOperation,
-): boolean {
-  return (
-    receipt.operation_id === plan.operation_id &&
-    receipt.batch_id === plan.batch_id &&
-    receipt.proposal_id === plan.proposal_id &&
-    receipt.item_key === plan.item_key &&
-    receipt.target_id === plan.target_id &&
-    receipt.actor_account_id === plan.actor_account_id
-  );
-}
-
 /** 原操作响应必须仍指向请求的 operation；有计划时再核对完整回执身份。 */
 export function reconcileOriginalOperationQuery(
   operationId: string,
   response: { operation_id: string; outcome: YayaOperationQueryOutcome },
   expected: YayaPlannedOperation | null,
 ): { operation_id: string; outcome: YayaOperationQueryOutcome } {
-  if (response.operation_id !== operationId) {
+  if (response.operation_id !== operationId || (expected !== null && expected.operation_id !== operationId)) {
     return { operation_id: operationId, outcome: identityMismatchOutcome() };
   }
   if (expected === null) {
@@ -148,9 +134,13 @@ export function reconcileOriginalOperationQuery(
   }
   const outcome = response.outcome;
   if (outcome.kind === "saved" || outcome.kind === "saved_detail_unavailable") {
-    if (!receiptMatchesPlan(outcome.receipt, expected)) {
-      return { operation_id: operationId, outcome: identityMismatchOutcome() };
+    const checked = queryOperationOutcome([outcome.receipt], expected);
+    if (checked.kind === "unknown") return { operation_id: operationId, outcome: checked };
+    if (checked.kind !== "saved" && checked.kind !== "saved_detail_unavailable") {
+      return { operation_id: operationId, outcome: { kind: "unknown", reason: "invalid_success_proof" } };
     }
+    // Details may become unreadable after the original valid commit; keep that
+    // projection while verifying the original receipt rather than reconstructing a plan.
   }
   return { operation_id: operationId, outcome };
 }
