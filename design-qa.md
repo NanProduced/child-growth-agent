@@ -1,5 +1,7 @@
 # Homepage design QA — local candidate
 
+> 本文件原有Homepage记录保持原历史范围；新增Chatbox v2 QA独立列于文末，不能互相替代或据此宣布整站/生产PASS。
+
 final result: passed
 
 ## Visual truth and captures
@@ -75,3 +77,45 @@ adjudication show the slogan/art and recording action present; see `docs/design/
 This manual comparison gate has no remaining actionable P0/P1/P2 fix on the inspected scope, but the automated comp-led pipeline remains incomplete.
 Minor raster/icon/glyph and real-data-order differences are recorded adaptations/P3, not silently hidden. Arbitrary-name fallback metrics,
 real LLM quality, reverse proxy behavior, hosted database, public deployment and whole-app safety certification remain outside this local acceptance.
+
+---
+
+# 芽芽 Chatbox v2 — scoped local QA (2026-10-08)
+
+final result: passed (local inspected scope; not production or pixel-identical acceptance)
+
+Visual authority: the three native images in `docs/design/yaya-chatbox-v2/`, with direction-only user approval recorded in `approval.json`. The parent homepage history and FAIL85.16% hero gate above remain unchanged. Source `desktop-review.png`/`mobile-conversation.png` and actual1440/1024/390 screenshots were inspected together; all live background data is synthetic authenticated seed, not generated mock data.
+
+## Five surfaces
+
+- Typography: complete14–16px chat reading with1.65 rhythm, mobile composer16px; no automatic long-answer cutoff. Existing system sans/fallback remains, not pixel-identical glyph metrics to generated images.
+- Layout/spacing: desktop reserved360–480px nonmodal column, mobile fullscreen, fixed visible composer; floating entry hidden while open. Main page links work; homepage container queries prevent narrow-main vertical text and rigid track overflow. Open/close preserves draft; no second visible runtime/provider.
+- Colors/tokens: existing warm white/leaf green with mint user bubble and fine separators. No global token/DESIGN replacement. Error/unknown/saved remain distinct and are not inferred from green styling.
+- Imagery: existing native avatar at small authored sizes; ordinary Lucide icons. No generated UI crops or fake child photographs/assets. Approved PNGs remain design references, not rendered backgrounds.
+- Content: no compulsory child/module/source form. Optional current-page reference has preview/remove and pinned snapshot. Exact teacher raw text survives. Review preserves object/date/原文/后果; detailed IDs collapse but verification status is visible. List selection is explicitly withheld without per-resource dependencies rather than labeled public.
+
+## Real implementation evidence
+
+`output/playwright/final-wiring/browser-results.json`:18 grouped records (including3 geometry records), errors0, actual Chrome at1440×900/1024×900/390×844; all3 report overflow=false and composer_visible=true. Actual session originates inHTTP login, PG is isolated, only model is an owned protocol double. Checks include navigation/clicks, quote/remove/Escape, draft retention, request-delayed keyboard guard, approval→realDB, reload→original receiptGET and no repeated execute/messagePOST. Mobile focus/Tab and reduced-motion were exercised, not real mobile keyboard.
+
+Latest combined route checks70/70, APP182/182, client56/56, new reference42/42; final type/lint/style and NextWebpack+tsup successful. Dedicated checks do not count image-generation pixels or fixture data as real-provider acceptance.
+
+## Bounded review, limits and failures
+
+One source/capture inspection identified narrow-main homepage layout; one batched visual correction and confirmation completed. Independent read-only reviewer identified list-selection source loss, keyboard wait bypass and missing list filters; shared boundary fixes and counterexamples are recorded in delivery. Impeccable targeted detector:0 primary /5 font-size advisory; no whole-site policy rewrite.
+
+DevWebpack refresh `Invalid or unexpected token` remains unclassified. Production-local build refresh/receipt recovery passes with0 page errors. Early selectors matched hidden Activity nodes and were scoped to visible cards withoutforceclick or dropping DB assertions.
+
+NOT_RUN: realprovider/S3/hostedDB/deployment, true mobile keyboard/Safari/iOS, manual screen reader and full desktopTab-order audit. No preview resources retained. Source truth, browser functional proof and production readiness stay separate; see `docs/yaya-v1/chatbox-v2-delivery.md`.
+
+## 2026-10-08 消息UI复用/精简追加轮
+
+Local inspected result: passed. Prior homepage gate and earlier chatbox record remain historical, not rewritten as production certification.
+
+Assistant-ui0.15.23 actual exports/source verified: native Quote/QuoteText/QuoteDismiss, Message.Quote, ActionBar.Root/Copy, AuiIf, Attachment primitives and ScrollToBottom/ViewportFooter. Business approval/receipt cards keep application protocols rather than fake generic tool-call parts.
+
+One batched desktop/mobile inspection simplified query/source noise, duplicate badges, primary/secondary actions and ready/retry image states. It exposed an empty-avatar workspace proposal cue and led to one batch of visible corrections. Functional confirmation separately corrected a test's multipart-field assumption and the pre-existing cancel-caption/API mismatch; no aesthetic redesign loop followed. Latest source captures were inspected: pending/saved1440, full long390 and retry390.
+
+Chrome24 grouped records (including3 geometry), errors0; original scope preserved, native copy/quote/remove/scroll and keyboard menus work. Full fields remain before approval. Real local HTTP/PG70/70, client56/56, quote42/42, new actual-render15/15 and NextWebpack build pass. Impeccable targeted detector0 primary/5 advisory, not a visual-quality or production certificate.
+
+`取消提案` is corrected to `撤销未执行批准` because the existing repository does not close proposals. Honest null feedback leaves a proposal reviewable and does not undo any saved observation. Unknown results still query original identity. Exact artifacts, component inventory and NOT_RUN are in `docs/yaya-v1/chatbox-v2-components.md`. True mobile keyboard, screen reader, real provider/bucket and deployment remain NOT_RUN; local model is a protocol double.
