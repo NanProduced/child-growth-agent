@@ -88,7 +88,10 @@ async function openPage(browser, viewport, options = {}) {
   });
   page.on("pageerror", (err) => console.error("[BROWSER PAGE_ERROR]", err.message, err.stack));
   await page.goto(BASE_URL, { waitUntil: "domcontentloaded", timeout: 180000 });
-  await page.waitForSelector(OVERVIEW, { timeout: 180000 });
+  await page.waitForSelector(OVERVIEW + "[data-client-ready=true]", { timeout: 180000 });
+  const references = page.locator("[data-testid=reference-library]");
+  if (await references.count() && await references.getAttribute("open") === null) await references.locator(":scope > summary").click();
+  await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(1500);
   return { context, page };
 }
@@ -204,15 +207,19 @@ async function auditViewport(browser, width, height, label) {
     const { context, page } = await openPage(browser, { width: 1440, height: 900 });
 
     /* ---- 头部、口径与通知 ---- */
-    const summary = await page.locator("[data-testid=class-summary]").innerText();
+    await page.locator("[data-testid=stats-help-button]").click();
+    const methods = await page.locator("[data-testid=stats-help-content]").innerText();
+    const summary = (await page.locator("[data-testid=class-summary]").innerText()) + " " + methods;
     check("摘要含当前在班名单 20 人", summary.includes("当前在班名单") && summary.includes("20 人"), snap(summary));
     check("摘要含统计期间", summary.includes("2026-2027学年第一学期") && summary.includes("含首尾"), "");
-    check("摘要含指南参考年龄", summary.includes("指南参考年龄") && summary.includes("全部年龄段"), "");
+    check("摘要含指南参考年龄", summary.includes("全部年龄段"), "");
     const overviewText = await page.locator(OVERVIEW).innerText();
     check("班级名与学年展示", overviewText.includes("太阳花融合教育实验中二班") && overviewText.includes("2026-2027学年"), "");
-    check("历史期间口径提示", overviewText.includes("不能还原当时的班级名册"), "");
-    check("期间外证据为正常口径", overviewText.includes("期间外的证据不参与本期统计（正常口径）"), "");
-    const notices = await page.locator("[data-testid=class-notice]").allInnerTexts();
+    check("历史期间口径提示", methods.includes("不能还原历史名册"), "");
+    check("期间外证据为正常口径", methods.includes("所选期间之外的证据不计入本次统计") && methods.includes("不属于数据问题"), "");
+    await page.locator("[data-testid=stats-help-button]").click();
+    await page.locator("details").filter({ has: page.getByText("有些记录暂时无法核对 · 查看说明", { exact: true }) }).locator("summary").click();
+    const notices = await page.locator("[data-testid=class-notice]").allTextContents();
     const noticeCodes = await page.$$eval("[data-testid=class-notice]", (els) => els.map((el) => el.dataset.code));
     check("通知数量与环境", notices.length === 5, noticeCodes.join(","));
     check("转班前来源与排除理由按通知展示", notices.some((t) => t.includes("转入前的小班班级") && t.includes("按发生班级保留并计入")), "");
@@ -227,6 +234,7 @@ async function auditViewport(browser, width, height, label) {
 
     /* ---- 保健参考 reliable：收起/展开 ---- */
     const healthRef = page.locator(`[data-item-id="${HEALTH_REF_ITEM}"]`);
+    const healthRefPanel = page.locator(`[id="class-evidence-panel-${HEALTH_REF_ITEM}"]`);
     const healthRefCollapsed = snap(await healthRef.innerText());
     check("保健参考为体态/身高体重示意", healthRefCollapsed.includes("身高") && healthRefCollapsed.includes("体重"), healthRefCollapsed);
     check("保健参考不渲染行为分布", (await healthRef.locator("[data-testid=item-distribution]").count()) === 0, "");
@@ -236,20 +244,21 @@ async function auditViewport(browser, width, height, label) {
     check("reliable 参考无可靠性警告", (await healthRef.locator("[data-testid=reference-caveat]").count()) === 0, "");
     check("保健参考收起态无达成式状态徽章", !/(已确认观察到|已有相关线索|暂无相关记录)/.test(healthRefCollapsed), healthRefCollapsed);
     await togglePanel(page, healthRef.locator("[data-testid=item-disclosure]"));
-    const healthRefExpanded = snap(await healthRef.innerText());
-    check("保健参考展开无三类行为分组", (await healthRef.locator("[data-testid=status-group]").count()) === 0, "");
+    const healthRefExpanded = snap(await healthRefPanel.innerText());
+    check("保健参考展开无三类行为分组", (await healthRefPanel.locator("[data-testid=status-group]").count()) === 0, "");
     check("保健参考展开无成人帮助确认规则", !healthRefExpanded.includes("成人帮助") && !healthRefExpanded.includes("帮助后可确认表现"), "");
     check("保健参考展开无达成式状态徽章", !/(已确认观察到|已有相关线索|暂无相关记录)/.test(healthRefExpanded), healthRefExpanded);
-    check("保健参考提供已核验查阅列表", (await healthRef.locator("[data-testid=reference-records]").count()) === 1, "");
-    check("保健参考查阅行可用", (await healthRef.locator("[data-testid=reference-records] [data-testid=child-row]").count()) > 0, "");
-    check("保健参考待核对建议单独列出", (await healthRef.locator("[data-testid=reference-pending]").count()) === 1, "");
+    check("保健参考提供已核验查阅列表", (await healthRefPanel.locator("[data-testid=reference-records]").count()) === 1, "");
+    check("保健参考查阅行可用", (await healthRefPanel.locator("[data-testid=reference-records] [data-testid=child-row]").count()) > 0, "");
+    check("保健参考待核对建议单独列出", (await healthRefPanel.locator("[data-testid=reference-pending]").count()) === 1, "");
     check("待核对建议明示未成为资料", healthRefExpanded.includes("尚未成为已核验资料") && healthRefExpanded.includes("不计入已核验资料"), "");
-    check("待核对行使用工作流标签而非状态徽章", (await healthRef.locator("[data-testid=reference-pending] [data-testid=child-pending-chip]").count()) === 1 && (await healthRef.locator("[data-testid=reference-pending] [data-testid=child-status-badge]").count()) === 0, "");
+    check("待核对行使用工作流标签而非状态徽章", (await healthRefPanel.locator("[data-testid=reference-pending] [data-testid=child-pending-chip]").count()) === 1 && (await healthRefPanel.locator("[data-testid=reference-pending] [data-testid=child-status-badge]").count()) === 0, "");
     await capture(page, "health-reference-expanded-1440.png");
     await togglePanel(page, healthRef.locator("[data-testid=item-disclosure]"));
 
     /* ---- reliable 20 人 6/4/10 主条目 ---- */
     const main = page.locator(`[data-item-id="${MAIN_ITEM}"]`);
+    const mainPanel = page.locator(`[id="class-evidence-panel-${MAIN_ITEM}"]`);
     check("主条目 reliability=reliable", (await main.getAttribute("data-reliability")) === "reliable", "");
     check("主条目 ratio=0.3（DTO 原样）", (await main.getAttribute("data-ratio")) === "0.3", "");
     const mainLegend = snap(await main.locator("[data-testid=item-distribution]").innerText());
@@ -263,6 +272,7 @@ async function auditViewport(browser, width, height, label) {
 
     /* ---- partial：不画完整三类分布，只给可核验依据摘要 ---- */
     const partial = page.locator(`[data-item-id="${PARTIAL_ITEM}"]`);
+    const partialPanel = page.locator(`[id="class-evidence-panel-${PARTIAL_ITEM}"]`);
     check("partial 条目 reliability=partial", (await partial.getAttribute("data-reliability")) === "partial", "");
     check("partial 不渲染完整三类分布", (await partial.locator("[data-testid=item-distribution]").count()) === 0, "");
     check("partial 显示可核验依据摘要", (await partial.locator("[data-testid=partial-verified-summary]").count()) === 1, "");
@@ -280,16 +290,17 @@ async function auditViewport(browser, width, height, label) {
 
     /* ---- unavailable 收起态 ---- */
     const unavailable = page.locator(`[data-item-id="${UNAVAILABLE_ITEM}"]`);
+    const unavailablePanel = page.locator(`[id="class-evidence-panel-${UNAVAILABLE_ITEM}"]`);
     check("unavailable 条目不渲染分布条", (await unavailable.locator("[data-testid=item-distribution]").count()) === 0, "");
     const unavailableText = snap(await unavailable.innerText());
     check("unavailable 显示核验提示", unavailableText.includes("相关记录暂时无法读取") && unavailableText.includes("不能按「暂无相关记录」理解"), "");
     check("unavailable 保留名单分母", unavailableText.includes("20 人仍作为分母保留"), "");
     await togglePanel(page, unavailable.locator("[data-testid=item-disclosure]"));
-    const unavailablePanel = snap(await unavailable.innerText());
-    check("unavailable 展开无普通状态分组", (await unavailable.locator("[data-testid=status-group]").count()) === 0, "");
-    check("unavailable 展开无普通暂无分组", !unavailablePanel.includes("暂无相关记录 20 人"), unavailablePanel.slice(0, 220));
-    check("unavailable 展开有受限名单", (await unavailable.locator("[data-testid=restricted-group]").count()) === 1, "");
-    check("unavailable 保留当前名单与入口", (await unavailable.locator("[data-testid=restricted-group] [data-testid=child-row]").count()) === 20 && (await unavailable.locator("[data-testid=open-child-item]").count()) === 20, "");
+    const unavailablePanelText = snap(await unavailablePanel.innerText());
+    check("unavailable 展开无普通状态分组", (await unavailablePanel.locator("[data-testid=status-group]").count()) === 0, "");
+    check("unavailable 展开无普通暂无分组", !unavailablePanelText.includes("暂无相关记录 20 人"), unavailablePanelText.slice(0, 220));
+    check("unavailable 展开有受限名单", (await unavailablePanel.locator("[data-testid=restricted-group]").count()) === 1, "");
+    check("unavailable 保留当前名单与入口", (await unavailablePanel.locator("[data-testid=restricted-group] [data-testid=child-row]").count()) === 20 && (await unavailablePanel.locator("[data-testid=open-child-item]").count()) === 20, "");
     await capture(page, "unavailable-expanded-1440.png");
     await togglePanel(page, unavailable.locator("[data-testid=item-disclosure]"));
 
@@ -302,20 +313,20 @@ async function auditViewport(browser, width, height, label) {
       return el ? { tag: el.tagName, className: el.className, testid: el.dataset.testid, text: el.innerText?.slice(0, 50) } : null;
     }, box);
     await togglePanel(page, partial.locator("[data-testid=item-disclosure]"));
-    const mixedGroups = await partial.locator("[data-testid=status-group]").evaluateAll((els) =>
+    const mixedGroups = await partialPanel.locator("[data-testid=status-group]").evaluateAll((els) =>
       els.map((el) => `${el.dataset.status}:${el.querySelectorAll("[data-testid=child-row]").length}`),
     );
     console.log("MIXED GROUPS:", mixedGroups);
     check("partial 普通三组名单", mixedGroups.join(",") === "confirmed_observed:3,has_clues:2,no_records:13", mixedGroups.join(","));
-    check("partial 明示普通名单只覆盖已读取记录", (await partial.locator("[data-testid=partial-list-limit]").count()) === 1 && snap(await partial.innerText()).includes("只覆盖已读取记录"), "");
-    const noRecordsHeading = snap(await partial.locator('[data-testid=status-group][data-status=no_records] h4').innerText());
+    check("partial 明示普通名单只覆盖已读取记录", (await partialPanel.locator("[data-testid=partial-list-limit]").count()) === 1 && snap(await partialPanel.innerText()).includes("只覆盖已读取记录"), "");
+    const noRecordsHeading = snap(await partialPanel.locator('[data-testid=status-group][data-status=no_records] h4').innerText());
     check("partial 无记录组标注已读取范围", noRecordsHeading.includes("暂无相关记录（已读取范围）"), noRecordsHeading);
-    const ordinaryNoRecords = await partial.locator('[data-testid=status-group][data-status=no_records] [data-testid=child-row]').evaluateAll((els) => els.map((el) => el.dataset.reliability));
+    const ordinaryNoRecords = await partialPanel.locator('[data-testid=status-group][data-status=no_records] [data-testid=child-row]').evaluateAll((els) => els.map((el) => el.dataset.reliability));
     check("普通无记录组不含不可读取/受限幼儿", ordinaryNoRecords.length === 13 && ordinaryNoRecords.every((r) => r === "reliable"), ordinaryNoRecords.join(","));
-    const observedPartial = partial.locator('[data-testid=status-group][data-status=confirmed_observed] [data-testid=child-row][data-reliability=partial]');
+    const observedPartial = partialPanel.locator('[data-testid=status-group][data-status=confirmed_observed] [data-testid=child-row][data-reliability=partial]');
     check("partial 可核验表现仍展示并带限制", (await observedPartial.count()) === 1 && snap(await observedPartial.innerText()).includes("可确认下限"), "");
-    check("partial 混合条目有受限分组", (await partial.locator("[data-testid=restricted-group]").count()) === 1, "");
-    const restrictedRows = await partial.locator("[data-testid=restricted-group] [data-testid=child-row]").evaluateAll((els) =>
+    check("partial 混合条目有受限分组", (await partialPanel.locator("[data-testid=restricted-group]").count()) === 1, "");
+    const restrictedRows = await partialPanel.locator("[data-testid=restricted-group] [data-testid=child-row]").evaluateAll((els) =>
       els.map((el) => ({ status: el.dataset.status, reliability: el.dataset.reliability })),
     );
     check(
@@ -325,30 +336,31 @@ async function auditViewport(browser, width, height, label) {
         restrictedRows.some((r) => r.reliability === "partial" && r.status === "no_records"),
       JSON.stringify(restrictedRows),
     );
-    check("受限行无普通状态徽章", (await partial.locator("[data-testid=restricted-group] [data-testid=child-status-badge]").count()) === 0, "");
-    check("受限分组不把未知画成普通暂无", (await partial.locator("[data-testid=restricted-group] [data-testid=child-restricted-chip]").count()) === 2 && !/暂无相关记录（已读取范围）/.test(snap(await partial.locator("[data-testid=restricted-group]").innerText())), "");
+    check("受限行无普通状态徽章", (await partialPanel.locator("[data-testid=restricted-group] [data-testid=child-status-badge]").count()) === 0, "");
+    check("受限分组不把未知画成普通暂无", (await partialPanel.locator("[data-testid=restricted-group] [data-testid=child-restricted-chip]").count()) === 2 && !/暂无相关记录（已读取范围）/.test(snap(await partialPanel.locator("[data-testid=restricted-group]").innerText())), "");
     await capture(page, "mixed-partial-expanded-1440.png");
     await togglePanel(page, partial.locator("[data-testid=item-disclosure]"));
 
     /* ---- reliable 展开三类名单 + 键盘 + 回调 ---- */
     await togglePanel(page, main.locator("[data-testid=item-disclosure]"));
-    const groupCounts = await main.locator("[data-testid=status-group]").evaluateAll((els) =>
+    const groupCounts = await mainPanel.locator("[data-testid=status-group]").evaluateAll((els) =>
       els.map((el) => `${el.dataset.status}:${el.querySelectorAll("[data-testid=child-row]").length}`),
     );
     check("reliable 各组人数 6/4/10", groupCounts.join(",") === "confirmed_observed:6,has_clues:4,no_records:10", groupCounts.join(","));
-    check("名单覆盖全部 20 人", (await main.locator("[data-testid=child-row]").count()) === 20, "");
-    check("多记录按幼儿去重（1 人计 2 条）", (await main.locator('[data-child-id$="-01"]').innerText()).includes("计入证据 2 条"), "");
-    const pendingRow = main.locator('[data-child-id$="-20"]');
+    check("名单覆盖全部 20 人", (await mainPanel.locator("[data-testid=child-row]").count()) === 20, "");
+    check("多记录按幼儿去重（1 人计 2 条）", (await mainPanel.locator('[data-child-id$="-01"]').innerText()).includes("计入证据 2 条"), "");
+    const pendingRow = mainPanel.locator('[data-child-id$="-20"]');
     check("待核对不计入正式状态", (await pendingRow.getAttribute("data-status")) === "no_records" && (await pendingRow.innerText()).includes("AI 关联待核对 1 条（不计入人数）"), "");
-    check("展开面板不捏造来源细节", (await main.locator("blockquote").count()) === 0 && (await main.innerText()).includes("班级页只按幼儿汇总人数，不展开来源"), "");
+    check("展开面板不捏造来源细节", (await mainPanel.locator("blockquote").count()) === 0 && snap(await mainPanel.innerText()).includes("可进入个人证据册核对相关记录"), "");
     await main.locator("[data-testid=item-disclosure]").focus();
     await page.keyboard.press("Enter");
     check("键盘 Enter 收起", (await main.locator("[data-testid=item-disclosure]").getAttribute("aria-expanded")) === "false", "");
     await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.activeElement?.getAttribute("data-testid") === "select-child-record");
     await page.keyboard.press("Tab");
     const focusedTestId = await page.evaluate(() => document.activeElement?.getAttribute("data-testid") || document.activeElement?.tagName);
     check("展开后 Tab 焦点进入名单操作", focusedTestId === "open-child-item", String(focusedTestId));
-    const firstChildRow = main.locator("[data-testid=status-group][data-status=confirmed_observed] [data-testid=child-row]").first();
+    const firstChildRow = mainPanel.locator("[data-testid=status-group][data-status=confirmed_observed] [data-testid=child-row]").first();
     await firstChildRow.locator("[data-testid=open-child-item]").click();
     const drilldown = await lastEvent(page, "drilldown");
     check("钻取回调：儿童 + 条目 + 同一筛选范围", drilldown && drilldown.payload.child_id === "fixture-class-mid2-child-01" && drilldown.payload.item_id === MAIN_ITEM && drilldown.payload.scope.label === "2026-2027学年第一学期", JSON.stringify(drilldown));
@@ -376,14 +388,14 @@ async function auditViewport(browser, width, height, label) {
     await page.waitForTimeout(200);
     const customEvent = await lastEvent(page, "scope");
     check("自定义日期回调", customEvent && customEvent.payload.kind === "custom_range" && customEvent.payload.from === "2026-05-01", JSON.stringify(customEvent));
-    check("应用后摘要期间一致", snap(await page.locator("[data-testid=class-summary]").innerText()).includes("自定义期间（2026-05-01 至 2026-06-01）"), "");
-    await main.locator('[data-testid=status-group][data-status=confirmed_observed] [data-testid=open-child-item]').first().click();
+    check("应用后摘要期间一致", (await page.locator("[data-testid=scope-select]").inputValue()) === "custom_range", "");
+    await mainPanel.locator('[data-testid=status-group][data-status=confirmed_observed] [data-testid=open-child-item]').first().click();
     const customDrilldown = await lastEvent(page, "drilldown");
     check("钻取携带已应用自定义期间", customDrilldown && customDrilldown.payload.scope.start_date === "2026-05-01" && customDrilldown.payload.scope.end_date === "2026-06-01", JSON.stringify(customDrilldown && customDrilldown.payload.scope));
     await page.locator("[data-testid=scope-select]").selectOption("custom_range");
     await page.getByRole("button", { name: "历史期间" }).click();
     await page.waitForTimeout(150);
-    check("custom_range → semester：选择器/摘要一致", (await page.locator("[data-testid=scope-select]").inputValue()) === "semester:2025-2026-1" && snap(await page.locator("[data-testid=class-summary]").innerText()).includes("2025-2026学年第一学期"), "");
+    check("custom_range → semester：选择器/摘要一致", (await page.locator("[data-testid=scope-select]").inputValue()) === "semester:2025-2026-1" && (await page.locator("[data-testid=scope-select] option:checked").innerText()).includes("2025-2026学年第一学期"), "");
     await page.locator("[data-testid=scope-select]").selectOption("all_history");
     await page.waitForTimeout(150);
     await page.getByRole("button", { name: "历史期间" }).click();
@@ -422,41 +434,44 @@ async function auditViewport(browser, width, height, label) {
     /* ---- 保健参考 × unavailable ---- */
     const refUnavailable = await openScenario(browser, "参考不可读");
     const ruItem = refUnavailable.page.locator(`[data-item-id="${HEALTH_REF_ITEM}"]`);
+    const ruInspector = refUnavailable.page.locator(`[id="class-evidence-panel-${HEALTH_REF_ITEM}"]`);
     const ruCollapsed = snap(await ruItem.innerText());
     check("参考不可读：收起态保留说明与核验警告", ruCollapsed.includes("不参与行为表现统计") && ruCollapsed.includes("相关资料暂时无法读取") && ruCollapsed.includes("不能按「暂无相关资料」理解"), ruCollapsed);
     check("参考不可读：不渲染行为分布与占比", (await ruItem.locator("[data-testid=item-distribution]").count()) === 0 && (await ruItem.locator("[data-testid=item-ratio]").count()) === 0, "");
     await togglePanel(refUnavailable.page, ruItem.locator("[data-testid=item-disclosure]"));
-    const ruPanel = snap(await ruItem.innerText());
-    check("参考不可读：展开不断言没有记录", !ruPanel.includes("还没有可供查阅") && (await ruItem.locator("[data-testid=reference-empty]").count()) === 0, "");
-    check("参考不可读：展开显示不可读提示与受限名单", (await ruItem.locator("[data-testid=reference-unavailable]").count()) === 1 && (await ruItem.locator("[data-testid=restricted-group] [data-testid=child-row]").count()) === 20, "");
-    check("参考不可读：保留个人证据入口", (await ruItem.locator("[data-testid=open-child-item]").count()) === 20, "");
-    check("参考不可读：无行为三类分组或状态徽章", (await ruItem.locator("[data-testid=status-group]").count()) === 0 && (await ruItem.locator("[data-testid=child-status-badge]").count()) === 0, "");
+    const ruPanel = snap(await ruInspector.innerText());
+    check("参考不可读：展开不断言没有记录", !ruPanel.includes("还没有可供查阅") && (await ruInspector.locator("[data-testid=reference-empty]").count()) === 0, "");
+    check("参考不可读：展开显示不可读提示与受限名单", (await ruInspector.locator("[data-testid=reference-unavailable]").count()) === 1 && (await ruInspector.locator("[data-testid=restricted-group] [data-testid=child-row]").count()) === 20, "");
+    check("参考不可读：保留个人证据入口", (await ruInspector.locator("[data-testid=open-child-item]").count()) === 20, "");
+    check("参考不可读：无行为三类分组或状态徽章", (await ruInspector.locator("[data-testid=status-group]").count()) === 0 && (await ruInspector.locator("[data-testid=child-status-badge]").count()) === 0, "");
     await capture(refUnavailable.page, "health-reference-unavailable-expanded-1440.png");
     await refUnavailable.context.close();
 
     /* ---- 保健参考 × partial ---- */
     const refPartial = await openScenario(browser, "参考核验受限");
     const rpItem = refPartial.page.locator(`[data-item-id="${HEALTH_REF_ITEM}"]`);
+    const rpInspector = refPartial.page.locator(`[id="class-evidence-panel-${HEALTH_REF_ITEM}"]`);
     const rpCollapsed = snap(await rpItem.innerText());
     check("参考 partial：收起态提示只反映已核对范围", rpCollapsed.includes("部分资料未通过核对或无法读取") && rpCollapsed.includes("只反映已读取并核对的资料范围"), rpCollapsed);
     await togglePanel(refPartial.page, rpItem.locator("[data-testid=item-disclosure]"));
-    const rpPanel = snap(await rpItem.innerText());
-    check("参考 partial：已核验资料与受限名单并存", (await rpItem.locator("[data-testid=reference-records] [data-testid=child-row]").count()) === 3 && (await rpItem.locator("[data-testid=restricted-group] [data-testid=child-row]").count()) === 1, "");
+    const rpPanel = snap(await rpInspector.innerText());
+    check("参考 partial：已核验资料与受限名单并存", (await rpInspector.locator("[data-testid=reference-records] [data-testid=child-row]").count()) === 3 && (await rpInspector.locator("[data-testid=restricted-group] [data-testid=child-row]").count()) === 1, "");
     check("参考 partial：不断言不存在其他资料", rpPanel.includes("不代表不存在其他资料") && !rpPanel.includes("还没有可供查阅"), "");
-    check("参考 partial：无行为分布与状态徽章", (await rpItem.locator("[data-testid=item-distribution]").count()) === 0 && (await rpItem.locator("[data-testid=child-status-badge]").count()) === 0, "");
+    check("参考 partial：无行为分布与状态徽章", (await rpItem.locator("[data-testid=item-distribution]").count()) === 0 && (await rpInspector.locator("[data-testid=child-status-badge]").count()) === 0, "");
     await capture(refPartial.page, "health-reference-partial-expanded-1440.png");
     await refPartial.context.close();
 
     /* ---- 保健参考 × 仅待核对建议 ---- */
     const refPending = await openScenario(browser, "参考待核对");
     const rqItem = refPending.page.locator(`[data-item-id="${HEALTH_REF_ITEM}"]`);
+    const rqInspector = refPending.page.locator(`[id="class-evidence-panel-${HEALTH_REF_ITEM}"]`);
     check("参考待核对：条目顶部工作流提示不计入人数", snap(await rqItem.innerText()).includes("AI 关联待核对 1 条（不计入人数）"), "");
     await togglePanel(refPending.page, rqItem.locator("[data-testid=item-disclosure]"));
-    const rqPanel = snap(await rqItem.innerText());
-    check("参考待核对：待核对建议单独列出", (await rqItem.locator("[data-testid=reference-pending] [data-testid=child-row]").count()) === 1, "");
-    check("参考待核对：确定性空态不掩盖待核对", (await rqItem.locator("[data-testid=reference-empty]").count()) === 0 && !rqPanel.includes("还没有可供查阅"), "");
+    const rqPanel = snap(await rqInspector.innerText());
+    check("参考待核对：待核对建议单独列出", (await rqInspector.locator("[data-testid=reference-pending] [data-testid=child-row]").count()) === 1, "");
+    check("参考待核对：确定性空态不掩盖待核对", (await rqInspector.locator("[data-testid=reference-empty]").count()) === 0 && !rqPanel.includes("还没有可供查阅"), "");
     check("参考待核对：建议不冒充已核验资料", rqPanel.includes("尚未成为已核验资料") && (await rqItem.locator("[data-testid=child-reference-chip]").count()) === 0, "");
-    check("参考待核对：无行为分布与状态徽章", (await rqItem.locator("[data-testid=item-distribution]").count()) === 0 && (await rqItem.locator("[data-testid=child-status-badge]").count()) === 0, "");
+    check("参考待核对：无行为分布与状态徽章", (await rqItem.locator("[data-testid=item-distribution]").count()) === 0 && (await rqInspector.locator("[data-testid=child-status-badge]").count()) === 0, "");
     await capture(refPending.page, "health-reference-pending-expanded-1440.png");
     await refPending.context.close();
 
@@ -489,7 +504,8 @@ async function auditViewport(browser, width, height, label) {
     const narrow = await openPage(browser, { width: 390, height: 844 });
     const toggle = narrow.page.locator("[data-testid=info-notice-toggle]");
     check("390：提示汇总入口可见且含数量", (await toggle.isVisible()) && snap(await textOr(toggle, "")).includes("其他提示 3 条"), "");
-    check("390：warning/error 直接可见", (await narrow.page.locator("[data-testid=class-notice][data-code=basis_invalid]").isVisible()) && (await narrow.page.locator("[data-testid=class-notice][data-code=guide_evidence_unreadable]").isVisible()), "");
+    await narrow.page.locator("details").filter({ has: narrow.page.getByText("有些记录暂时无法核对 · 查看说明", { exact: true }) }).locator("summary").click();
+    check("390：warning/error 可按汇总入口查看", (await narrow.page.locator("[data-testid=class-notice][data-code=basis_invalid]").isVisible()) && (await narrow.page.locator("[data-testid=class-notice][data-code=guide_evidence_unreadable]").isVisible()), "");
     check("390：info 通知默认收起", !(await narrow.page.locator('[data-testid=class-notice][data-code=out_of_stage_evidence]').isVisible()), "");
     if (await toggle.count()) {
       await toggle.click();

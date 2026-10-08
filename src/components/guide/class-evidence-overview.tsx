@@ -1,9 +1,13 @@
 "use client";
 
 import { useEffect, useId, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { ArrowUpRight, BookOpen, ChevronDown, HelpCircle, Leaf, PenLine } from "lucide-react";
 
 import { classLabel, formatDateCn, parseIsoDateStrict } from "@/lib/format";
+import type { ClassStage } from "@/lib/types";
+import { evidenceQueryString } from "@/lib/guide/navigation";
+import { evidenceSourceLabel, peopleTicks, readClassEvidenceQuotes, type EvidenceQuoteRead } from "@/lib/guide/evidence-read";
 import {
   GUIDE_AGE_BAND_LABELS,
   type GuideAgeBand,
@@ -22,19 +26,11 @@ import {
   type EvidenceViewFilters,
   type GuideItemEvidenceStatus,
 } from "@/lib/guide/view-types";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import styles from "./class-evidence-overview.module.css";
 
 /**
  * G4-R1 / CLASS-EVIDENCE-UI2 班级指南证据概览：证据下钻工作台。
- * - 桌面双栏：左侧指南条目分布（0-20 人数坐标），右侧选中条目的原文、条件、三态名单与真实证据；
+ * - 桌面双栏：左侧指南条目分布（实际班级人数坐标），右侧选中条目的原文、条件、三态名单与真实证据；
  * - 纯读服务端 DTO（ClassEvidenceOverview）；人数、分母与占比读取 DTO，不从名单重算；
  * - 可靠性优先于普通状态展示：不可读取的幼儿不归入普通三类名单，完全不可用时不画三类分布；
  * - partial 只展示可核验人数下限与“数据待核验”，不把余数推断为暂无记录；
@@ -72,6 +68,10 @@ export interface ClassEvidenceOverviewProps {
   canRecordChild?: (child: EvidenceChildRef) => boolean;
   /** 现有活动支持入口（成长档案内） */
   onOpenActivitySupport?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
+  /** Projection invalidation only; the GET route remains the authorization boundary. */
+  readerIdentityKey?: string | null;
+  onRevalidateIdentity?: () => void;
+  onRefreshOverview?: () => void;
   className?: string;
 }
 
@@ -157,16 +157,6 @@ function childCaveat(entry: ClassChildItemStatus): string | null {
   return null;
 }
 
-function itemRuleLine(item: GuidePerformanceItem): string {
-  const age = GUIDE_AGE_BAND_LABELS[item.age_band];
-  const type = EVIDENCE_TYPE_LABELS[item.product_rules.evidence_type];
-  const help =
-    item.product_rules.adult_help === "allowed"
-      ? "允许成人帮助（说明帮助方式后可确认表现）"
-      : "要求独立完成（有成人帮助只确认线索）";
-  return `条目规则：指南参考 ${age} · ${type} · ${help}`;
-}
-
 interface RatioState {
   available: boolean;
   text: string;
@@ -204,7 +194,6 @@ function ItemDistribution({ item }: { item: ClassGuideItemView }) {
       </div>
     );
   }
-  const total = item.counts.confirmed_observed + item.counts.has_clues + item.counts.no_records;
   return (
     <div className={cx("dist")} data-testid="item-distribution">
       <div className={cx("bar")} aria-hidden="true">
@@ -215,7 +204,8 @@ function ItemDistribution({ item }: { item: ClassGuideItemView }) {
             <span
               key={status}
               className={cx("seg", STATUS_CLASS[status])}
-              style={{ flexGrow: count / (total || 1) }}
+              style={{ flexGrow: count, flexBasis: 0 }}
+              title={`${GUIDE_ITEM_EVIDENCE_STATUS_LABELS[status]} ${count} 人`}
               data-testid="distribution-segment"
             >
               {count}
@@ -293,7 +283,10 @@ function ItemStats({ item, scope }: { item: ClassGuideItemView; scope: EvidenceS
     <>
       {item.reliability === "partial" ? <PartialVerifiedSummary item={item} /> : <ItemDistribution item={item} />}
       <p className={cx("ratio")} data-testid="item-ratio" data-available={ratio.available}>
-        {ratio.text}
+        {ratio.available ? <>
+          <span aria-hidden="true">{item.counts.confirmed_observed}/{item.total} 人 · {Math.round((item.confirmed_ratio ?? 0) * 100)}% 已确认</span>
+          <span className={cx("visually-hidden")}>{ratio.text}</span>
+        </> : ratio.text}
       </p>
     </>
   );
@@ -329,7 +322,7 @@ function ChildRow({
   const caveat = childCaveat(entry);
   const showStatusBadge = variant === "status";
   const childName = child ? child.name : `名单幼儿（${entry.child_id}）`;
-  const monogram = childName.slice(0, 1);
+  const monogram = [...childName][0] ?? "";
 
   return (
     <li
@@ -339,13 +332,14 @@ function ChildRow({
       data-status={entry.status}
       data-reliability={entry.reliability}
       data-variant={variant}
-      onClick={onSelect}
     >
       <div className={cx("child-line")}>
-        <span className={cx("child-avatar")} aria-hidden="true">
-          {monogram}
-        </span>
-        <span className={cx("child-name")}>{childName}</span>
+        <button type="button" className={cx("child-select")} onClick={onSelect}
+          disabled={!onSelect} aria-pressed={Boolean(isActive)} data-testid="select-child-record"
+          aria-label={`查看${childName}的相关记录`}>
+          <span className={cx("child-avatar")} aria-hidden="true">{monogram}</span>
+          <span className={cx("child-name")}>{childName}</span>
+        </button>
         {showStatusBadge ? (
           <span className={cx("child-status", STATUS_CLASS[entry.status])} data-testid="child-status-badge">
             {GUIDE_ITEM_EVIDENCE_STATUS_LABELS[entry.status]}
@@ -431,7 +425,7 @@ function ChildRow({
           <ArrowUpRight className={cx("action-icon")} aria-hidden="true" />
           查看个人证据
         </button>
-        <button
+        {child && onRecordObservation && (!canRecordChild || canRecordChild(child)) ? <button
           type="button"
           className={cx("child-action")}
           disabled={!child || !onRecordObservation || (child && canRecordChild ? !canRecordChild(child) : false)}
@@ -443,8 +437,8 @@ function ChildRow({
         >
           <PenLine className={cx("action-icon")} aria-hidden="true" />
           记录观察
-        </button>
-        <button
+        </button> : null}
+        {child && onOpenActivitySupport ? <button
           type="button"
           className={cx("child-action")}
           disabled={!child || !onOpenActivitySupport}
@@ -456,18 +450,10 @@ function ChildRow({
         >
           <Leaf className={cx("action-icon")} aria-hidden="true" />
           活动支持
-        </button>
+        </button> : null}
       </div>
     </li>
   );
-}
-
-interface EvidenceQuoteInfo {
-  quote: string;
-  quoteSource: string;
-  observedAt: string;
-  confirmedAt: string | null;
-  valid: boolean;
 }
 
 function ItemRow({
@@ -482,6 +468,13 @@ function ItemRow({
   onRecordObservation,
   canRecordChild,
   onOpenActivitySupport,
+  classStage,
+  classId,
+  catalogVersion,
+  readerIdentityKey,
+  onRevalidateIdentity,
+  onRefreshOverview,
+  panelOutlet,
 }: {
   item: ClassGuideItemView;
   index: number;
@@ -494,6 +487,13 @@ function ItemRow({
   onRecordObservation?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
   canRecordChild?: (child: EvidenceChildRef) => boolean;
   onOpenActivitySupport?: (child: EvidenceChildRef, item: GuidePerformanceItem) => void;
+  classStage: ClassStage;
+  classId: string;
+  catalogVersion: string;
+  readerIdentityKey?: string | null;
+  onRevalidateIdentity?: () => void;
+  onRefreshOverview?: () => void;
+  panelOutlet?: HTMLElement | null;
 }) {
   const panelId = `class-evidence-panel-${item.item.id}`;
   const pendingCount = item.children.reduce((sum, entry) => sum + entry.pending_suggestion_count, 0);
@@ -510,71 +510,43 @@ function ItemRow({
   })).filter((group) => group.entries.length > 0);
   const restrictedEntries = item.children.filter(isRestrictedChild);
 
-  const [activeChildId, setActiveChildId] = useState<string | null>(() => {
+  const [selectedChildId, setActiveChildId] = useState<string | null>(() => {
     return item.children[0]?.child_id ?? null;
   });
+  const activeChildId = item.children.some((child) => child.child_id === selectedChildId)
+    ? selectedChildId : item.children[0]?.child_id ?? null;
+  const queryString = evidenceQueryString(scope, filters);
+  const readKey = JSON.stringify([readerIdentityKey ?? null, activeChildId, item.item.id, classId, classStage, catalogVersion, queryString]);
+  const [quoteRead, setQuoteRead] = useState<{ key: string; projection: ClassGuideItemView; value: EvidenceQuoteRead | { kind: "loading" } } | null>(null);
+  const [readAttempt, setReadAttempt] = useState(0);
+  // A new target cannot render the previous target's quote, even before effects run.
+  const currentRead = quoteRead?.key === readKey && quoteRead.projection === item ? quoteRead.value : null;
+  const quoteInfo = currentRead?.kind === "ready" ? currentRead.sources[0] : null;
+  const quoteLoading = Boolean(readerIdentityKey) && (!currentRead || currentRead.kind === "loading");
 
-  const [quoteInfo, setQuoteInfo] = useState<EvidenceQuoteInfo | null>(null);
-  const [quoteLoading, setQuoteLoading] = useState(false);
-
-  // 异步获取选中幼儿的证据片段（零硬编码，从 GET /api/children/[id]/evidence-book 加载）
   useEffect(() => {
-    if (!expanded || !activeChildId) {
-      setQuoteInfo(null);
-      return;
-    }
+    if (!expanded || !activeChildId || !readerIdentityKey) { setQuoteRead(null); return; }
     const controller = new AbortController();
-    setQuoteLoading(true);
-
-    const query = new URLSearchParams();
-    if (scope.kind === "semester" && scope.semester_id) query.set("semester_id", scope.semester_id);
-    if (scope.kind === "custom_range" && scope.start_date && scope.end_date) {
-      query.set("scope", "custom_range");
-      query.set("from", scope.start_date);
-      query.set("to", scope.end_date);
-    }
-    if (scope.kind === "all_history") query.set("scope", "all_history");
-    if (filters.domain_code) query.set("domain", filters.domain_code);
-    if (filters.age_band) query.set("age_band", filters.age_band);
-    if (filters.goal_id) query.set("goal_id", filters.goal_id);
-
-    fetch(`/api/children/${encodeURIComponent(activeChildId)}/evidence-book?${query.toString()}`, {
-      signal: controller.signal,
-    })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!data || !Array.isArray(data.goals)) {
-          setQuoteInfo(null);
-          return;
-        }
-        type RemoteItem = { item: { id: string }; bases: Array<{ quote: string; quote_source: string; observed_at: string; source_confirmed_at: string | null; valid: boolean }> };
-        const found = (data.goals as Array<{ items: RemoteItem[] }>)
-          .flatMap((g) => g.items)
-          .find((it) => it.item.id === item.item.id);
-        if (found && found.bases && found.bases.length > 0) {
-          const validBasis = found.bases.find((b) => b.valid) ?? found.bases[0];
-          setQuoteInfo({
-            quote: validBasis.quote,
-            quoteSource: validBasis.quote_source === "raw_text" ? "原始观察引用" : "教师确认稿引用",
-            observedAt: validBasis.observed_at,
-            confirmedAt: validBasis.source_confirmed_at,
-            valid: validBasis.valid,
-          });
-        } else {
-          setQuoteInfo(null);
-        }
-      })
-      .catch(() => {
-        setQuoteInfo(null);
-      })
-      .finally(() => {
-        setQuoteLoading(false);
-      });
-
-    return () => {
-      controller.abort();
-    };
-  }, [expanded, activeChildId, item.item.id, scope, filters]);
+    setQuoteRead({ key: readKey, projection: item, value: { kind: "loading" } });
+    void (async () => {
+      try {
+        const response = await fetch(`/api/children/${encodeURIComponent(activeChildId)}/evidence-book?${queryString}`, {
+          signal: controller.signal, cache: "no-store", credentials: "same-origin",
+        });
+        const value = await readClassEvidenceQuotes(response, {
+          childId: activeChildId, itemId: item.item.id, classStage, classId, catalogVersion, scope, filters,
+        });
+        if (controller.signal.aborted) return;
+        setQuoteRead({ key: readKey, projection: item, value });
+        if (value.kind === "unauthenticated") onRevalidateIdentity?.();
+      } catch {
+        if (!controller.signal.aborted) setQuoteRead({ key: readKey, projection: item, value: { kind: "unavailable" } });
+      }
+    })();
+    return () => controller.abort();
+    // Resource values are bound in readKey; objects themselves do not trigger duplicate reads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, readKey, readAttempt, item]);
 
   function renderChild(entry: ClassChildItemStatus, variant: ChildRowVariant) {
     return (
@@ -604,6 +576,53 @@ function ItemRow({
   const activeChildRef = activeChildId ? rosterById.get(activeChildId) : undefined;
   const activeChildStatus = item.children.find((c) => c.child_id === activeChildId);
 
+  useEffect(() => {
+    if (!expanded || !panelOutlet) return;
+    const panel = document.getElementById(panelId);
+    panel?.querySelector<HTMLElement>("[data-testid=select-child-record]")?.focus({ preventScroll: true });
+  }, [expanded, panelOutlet, panelId]);
+
+  function closePanel() {
+    onToggle();
+    requestAnimationFrame(() => document.getElementById(`class-trigger-${item.item.id}`)?.focus());
+  }
+
+  const inspector = expanded ? (
+        <div className={cx("panel")} id={panelId} data-current-item-id={item.item.id}>
+          <button type="button" className={cx("detail-back")} onClick={closePanel}>返回指南条目</button>
+          <div className={cx("inspector-header")}>
+            <h4 className={cx("inspector-title")}>指南条目详情</h4>
+            <p className={cx("inspector-item-text")}>{item.item.text}</p>
+            <div className={cx("inspector-tags")}>
+              <span className={cx("inspector-tag")}>指南参考 · {GUIDE_AGE_BAND_LABELS[item.item.age_band]}</span>
+              {!reference ? <span className={cx("inspector-tag", "inspector-tag-rule")}>{item.item.product_rules.adult_help === "allowed" ? "允许成人帮助" : "要求独立完成"}</span> : null}
+            </div>
+          </div>
+          {activeChildRef && activeChildStatus ? <div className={cx("inspector-quote-card")}>
+            <div className={cx("quote-card-head")}><span className={cx("quote-card-title")}>{activeChildRef.name}的观察证据</span>{quoteInfo ? <><span className={cx("quote-card-date")}>{formatDateCn(quoteInfo.observed_at)}</span><span className={cx("quote-card-badge")}>{evidenceSourceLabel(quoteInfo)}</span></> : null}</div>
+            {quoteLoading ? <p role="status" className={cx("quote-card-loading")}>正在读取相关记录…</p> : quoteInfo ? <><p className={cx("panel-hint")}>当时班级：{quoteInfo.class_context?.class_name ?? "未记录"}</p><blockquote className={cx("quote-card-text")}>{quoteInfo.quote}</blockquote>{currentRead?.kind === "ready" && currentRead.partial ? <p className={cx("panel-hint")}>还有部分记录暂时不能核对。</p> : null}</> : currentRead && currentRead.kind !== "empty" ? <div role="status" className={cx("quote-card-empty")}><p>{currentRead.kind === "unauthenticated" ? "登录状态已变化，请重新核验账号。" : currentRead.kind === "forbidden" ? "当前账号不能读取这些记录。" : currentRead.kind === "invalid" ? "数据或所属范围已变化，请重新读取页面。" : "暂时读不到引用，请重新读取。"}</p><button type="button" className={cx("quote-card-btn")} onClick={() => { if (currentRead.kind === "invalid" && onRefreshOverview) onRefreshOverview(); else setReadAttempt((value) => value + 1); }}>重新读取</button></div> : <p className={cx("quote-card-empty")}>{readerIdentityKey ? "本次班级统计范围内没有可展示的引用。" : "可进入个人证据册核对相关记录。"}</p>}
+            <div className={cx("quote-card-actions")}><button type="button" className={cx("quote-card-btn")} disabled={!onOpenChildItem} onClick={() => onOpenChildItem?.({ child_id: activeChildRef.id, item_id: item.item.id, child_status: activeChildStatus.status, scope, filters })}>查看{activeChildRef.name}证据册<ArrowUpRight className={cx("action-icon")} aria-hidden="true" /></button></div>
+          </div> : null}
+          <div className={cx("inspector-content")}>
+            {reference ? (
+              <>
+                {item.reliability === "unavailable" ? <p className={cx("panel-warning")} data-testid="reference-unavailable">相关资料暂时读不到，以下保留名单与个人证据入口。</p> : <p className={cx("panel-hint")}>{item.reliability === "partial" ? "只显示能核对的资料，不代表不存在其他资料。" : "资料仅供查阅，不参与行为统计。"}</p>}
+                {referenceRelated.length > 0 && item.reliability !== "unavailable" ? <section data-testid="reference-records" aria-label="已核验的相关观察记录"><h4 className={cx("status-group-title")}>已核验的相关观察记录 <span>{referenceRelated.length} 人</span></h4><ul className={cx("child-list")}>{referenceRelated.map((entry) => renderChild(entry, "reference"))}</ul></section> : null}
+                {referencePending.length > 0 && item.reliability !== "unavailable" ? <section data-testid="reference-pending" aria-label="AI 关联待核对建议"><h4 className={cx("status-group-title")}>AI 关联待核对 <span>{referencePending.reduce((sum, entry) => sum + entry.pending_suggestion_count, 0)} 条（不计入已核验资料）</span></h4><ul className={cx("child-list")}>{referencePending.map((entry) => renderChild(entry, "pending"))}</ul></section> : null}
+                {referenceRelated.length === 0 && referencePending.length === 0 && restrictedEntries.length === 0 && item.reliability !== "unavailable" ? <p className={cx("panel-empty")} data-testid="reference-empty">已读取范围内还没有可供查阅的相关观察记录。</p> : null}
+              </>
+            ) : item.reliability !== "unavailable" ? (
+              <>
+                {item.reliability === "partial" ? <p className={cx("panel-hint")} data-testid="partial-list-limit">名单只覆盖已读取记录；其余幼儿见核验受限名单。</p> : null}
+                {normalGroups.map((group) => <section key={group.status} className={cx("status-group")} data-testid="status-group" data-status={group.status} aria-label={`${GUIDE_ITEM_EVIDENCE_STATUS_LABELS[group.status]}的幼儿名单`}><h4 className={cx("status-group-title")}><span className={cx("legend-dot", STATUS_CLASS[group.status])} aria-hidden="true" />{GUIDE_ITEM_EVIDENCE_STATUS_LABELS[group.status]}{item.reliability === "partial" && group.status === "no_records" ? "（已读取范围）" : ""}<span>{group.entries.length} 人</span></h4><ul className={cx("child-list")}>{group.entries.map((entry) => renderChild(entry, "status"))}</ul></section>)}
+              </>
+            ) : <p className={cx("panel-warning")}>相关记录暂时读不到，以下保留名单与个人证据入口。</p>}
+            {(restrictedEntries.length > 0 || item.reliability === "unavailable") ? <section className={cx("restricted-group")} data-testid="restricted-group" data-group="restricted" aria-label="核验受限的幼儿"><h4 className={cx("status-group-title")}>核验受限，未计入{reference ? "已核验资料" : "普通名单"}<span>{item.reliability === "unavailable" ? item.children.length : restrictedEntries.length} 人</span></h4><ul className={cx("child-list")}>{(item.reliability === "unavailable" ? item.children : restrictedEntries).map((entry) => renderChild(entry, "restricted"))}</ul></section> : null}
+          </div>
+
+        </div>
+      ) : null;
+
   return (
     <li
       className={cx("item", expanded && "item-expanded")}
@@ -619,7 +638,7 @@ function ItemRow({
 
         <div className={cx("item-content")}>
           <div className={cx("item-top")}>
-            <span className={cx("item-chip")}>指南参考 · {GUIDE_AGE_BAND_LABELS[item.item.age_band]}</span>
+            {!filters.age_band || reference ? <span className={cx("item-chip")}>指南参考 · {GUIDE_AGE_BAND_LABELS[item.item.age_band]}</span> : null}
             {item.item.product_rules.evidence_type !== "behavior" ? (
               <span className={cx("item-chip", "item-chip-muted")}>
                 {EVIDENCE_TYPE_LABELS[item.item.product_rules.evidence_type]}
@@ -629,7 +648,18 @@ function ItemRow({
             {pendingCount > 0 ? (
               <span className={cx("item-pending")}>AI 关联待核对 {pendingCount} 条（不计入人数）</span>
             ) : null}
+
+          </div>
+
+          <div className={cx("item-body")}>
+            <div className={cx("item-text-block")}>
+              <p className={cx("item-text")}>{item.item.text}</p>
+            </div>
+            <div className={cx("item-stats")}>
+              <ItemStats item={item} scope={scope} />
+            </div>
             <button
+              id={`class-trigger-${item.item.id}`}
               type="button"
               className={cx("disclosure")}
               aria-expanded={expanded}
@@ -641,255 +671,10 @@ function ItemRow({
               <ChevronDown className={cx("disclosure-icon", expanded && "disclosure-icon-open")} aria-hidden="true" />
             </button>
           </div>
-
-          <div className={cx("item-body")}>
-            <div className={cx("item-text-block")}>
-              <p className={cx("item-text")}>{item.item.text}</p>
-            </div>
-            <div className={cx("item-stats")}>
-              <ItemStats item={item} scope={scope} />
-            </div>
-          </div>
         </div>
       </div>
 
-      {expanded ? (
-        <div className={cx("panel")} id={panelId}>
-          <div className={cx("inspector-header")}>
-            <h4 className={cx("inspector-title")}>指南条目详情</h4>
-            <p className={cx("inspector-item-text")}>{item.item.text}</p>
-            <div className={cx("inspector-tags")}>
-              <span className={cx("inspector-tag")}>
-                指南参考 · {GUIDE_AGE_BAND_LABELS[item.item.age_band]}
-              </span>
-              {!reference ? (
-                <span className={cx("inspector-tag", "inspector-tag-rule")}>
-                  关键要求 · {item.item.product_rules.adult_help === "allowed" ? "允许成人帮助" : "要求独立完成"}
-                </span>
-              ) : null}
-            </div>
-          </div>
-
-          {reference ? (
-            item.reliability === "unavailable" ? (
-              <>
-                <p className={cx("panel-warning")} data-testid="reference-unavailable">
-                  该条目的相关资料整体暂时无法读取，不能按「暂无相关资料」理解。以下保留当前名单与个人证据入口。
-                </p>
-                <section
-                  className={cx("restricted-group")}
-                  data-testid="restricted-group"
-                  data-group="restricted"
-                  aria-label="相关资料暂不可读取的幼儿"
-                >
-                  <h4 className={cx("status-group-title")}>
-                    <span className={cx("restricted-dot")} aria-hidden="true" />
-                    相关资料暂不可读取
-                    <span className={cx("status-group-count")}>{item.children.length} 人</span>
-                  </h4>
-                  <p className={cx("panel-hint")}>
-                    以下幼儿的资料整体不可读取，不能按「暂无相关资料」理解；可进入个人证据查看可读取范围。
-                  </p>
-                  <ul className={cx("child-list")}>{item.children.map((entry) => renderChild(entry, "restricted"))}</ul>
-                </section>
-              </>
-            ) : (
-              <>
-                <p className={cx("panel-hint")}>
-                  以下只描述已读取并核对过的资料范围，不代表不存在其他资料；本条目不参与行为统计，也不判定发展状态。
-                </p>
-                {referenceRelated.length > 0 ? (
-                  <section
-                    className={cx("reference-records")}
-                    data-testid="reference-records"
-                    aria-label="已核验的相关观察记录"
-                  >
-                    <h4 className={cx("status-group-title")}>
-                      已核验的相关观察记录
-                      <span className={cx("status-group-count")}>{referenceRelated.length} 人</span>
-                    </h4>
-                    <p className={cx("panel-hint")}>
-                      进入个人证据册可核对来源、观察日期与发生班级；此处不代表能力评价。
-                    </p>
-                    <ul className={cx("child-list")}>
-                      {referenceRelated.map((entry) => renderChild(entry, "reference"))}
-                    </ul>
-                  </section>
-                ) : null}
-                {restrictedEntries.length > 0 ? (
-                  <section
-                    className={cx("restricted-group")}
-                    data-testid="restricted-group"
-                    data-group="restricted"
-                    aria-label="核验受限的幼儿"
-                  >
-                    <h4 className={cx("status-group-title")}>
-                      <span className={cx("restricted-dot")} aria-hidden="true" />
-                      核验受限，未计入已核验资料
-                      <span className={cx("status-group-count")}>{restrictedEntries.length} 人</span>
-                    </h4>
-                    <p className={cx("panel-hint")}>
-                      以下幼儿的记录不可读取或核验受限，可能有未纳入的资料；不按「暂无相关资料」理解。
-                    </p>
-                    <ul className={cx("child-list")}>
-                      {restrictedEntries.map((entry) => renderChild(entry, "restricted"))}
-                    </ul>
-                  </section>
-                ) : null}
-                {referencePending.length > 0 ? (
-                  <section
-                    className={cx("pending-group")}
-                    data-testid="reference-pending"
-                    aria-label="AI 关联待核对建议"
-                  >
-                    <h4 className={cx("status-group-title")}>
-                      <span className={cx("pending-dot")} aria-hidden="true" />
-                      AI 关联待核对
-                      <span className={cx("status-group-count")}>
-                        {referencePending.reduce((sum, entry) => sum + entry.pending_suggestion_count, 0)} 条（不计入已核验资料）
-                      </span>
-                    </h4>
-                    <p className={cx("panel-hint")}>
-                      待核对建议只是工作流状态，尚未成为已核验资料，也不计入任何人数。
-                    </p>
-                    <ul className={cx("child-list")}>
-                      {referencePending.map((entry) => renderChild(entry, "pending"))}
-                    </ul>
-                  </section>
-                ) : null}
-                {referenceRelated.length === 0 && restrictedEntries.length === 0 && referencePending.length === 0 ? (
-                  <p className={cx("panel-empty")} data-testid="reference-empty">
-                    已读取范围内还没有可供查阅的相关观察记录。
-                  </p>
-                ) : null}
-              </>
-            )
-          ) : item.reliability === "unavailable" ? (
-            <>
-              <p className={cx("panel-warning")}>
-                该条目的相关记录整体暂时无法读取，不能按「暂无相关记录」理解。以下只保留当前名单与个人证据入口，不展示三类人数。
-              </p>
-              <section
-                className={cx("restricted-group")}
-                data-testid="restricted-group"
-                data-group="restricted"
-                aria-label="相关记录暂不可读取的幼儿"
-              >
-                <h4 className={cx("status-group-title")}>
-                  <span className={cx("restricted-dot")} aria-hidden="true" />
-                  相关记录暂不可读取
-                  <span className={cx("status-group-count")}>{item.children.length} 人</span>
-                </h4>
-                <p className={cx("panel-hint")}>
-                  以下幼儿的记录整体不可读取，不能按「暂无相关记录」理解；可进入个人证据查看可读取范围。
-                </p>
-                <ul className={cx("child-list")}>{item.children.map((entry) => renderChild(entry, "restricted"))}</ul>
-              </section>
-            </>
-          ) : (
-            <>
-              <p className={cx("panel-rule")}>{itemRuleLine(item.item)}</p>
-              <p className={cx("panel-hint")}>
-                班级页只按幼儿汇总人数，不展开来源；进入个人证据册可核对每条来源、观察日期与发生班级。
-              </p>
-              {item.reliability === "partial" ? (
-                <p className={cx("panel-hint")} data-testid="partial-list-limit">
-                  部分记录未通过核对或无法读取：普通名单只覆盖已读取记录，其余幼儿见下方“核验受限”名单。
-                </p>
-              ) : null}
-              {normalGroups.map((group) => (
-                <section
-                  key={group.status}
-                  className={cx("status-group")}
-                  aria-label={`${GUIDE_ITEM_EVIDENCE_STATUS_LABELS[group.status]}的幼儿名单`}
-                  data-testid="status-group"
-                  data-status={group.status}
-                >
-                  <h4 className={cx("status-group-title")}>
-                    <span className={cx("legend-dot", STATUS_CLASS[group.status])} aria-hidden="true" />
-                    {GUIDE_ITEM_EVIDENCE_STATUS_LABELS[group.status]}
-                    {item.reliability === "partial" && group.status === "no_records" ? "（已读取范围）" : ""}
-                    <span className={cx("status-group-count")}>{group.entries.length} 人</span>
-                  </h4>
-                  <ul className={cx("child-list")}>{group.entries.map((entry) => renderChild(entry, "status"))}</ul>
-                </section>
-              ))}
-              {restrictedEntries.length > 0 ? (
-                <section
-                  className={cx("restricted-group")}
-                  data-testid="restricted-group"
-                  data-group="restricted"
-                  aria-label="核验受限的幼儿"
-                >
-                  <h4 className={cx("status-group-title")}>
-                    <span className={cx("restricted-dot")} aria-hidden="true" />
-                    核验受限，未计入普通名单
-                    <span className={cx("status-group-count")}>{restrictedEntries.length} 人</span>
-                  </h4>
-                  <p className={cx("panel-hint")}>
-                    以下幼儿的记录不可读取或核验受限，可能有未纳入的正式证据；不按「暂无相关记录」理解。
-                  </p>
-                  <ul className={cx("child-list")}>{restrictedEntries.map((entry) => renderChild(entry, "restricted"))}</ul>
-                </section>
-              ) : null}
-            </>
-          )}
-
-          {/* 选中幼儿观察证据卡片 */}
-          {activeChildRef && activeChildStatus ? (
-            <div className={cx("inspector-quote-card")}>
-              <div className={cx("quote-card-head")}>
-                <span className={cx("quote-card-title")}>
-                  {activeChildRef.name}的观察证据
-                </span>
-                {quoteInfo?.observedAt ? (
-                  <span className={cx("quote-card-date")}>
-                    {formatDateCn(quoteInfo.observedAt)}
-                  </span>
-                ) : null}
-                {quoteInfo ? (
-                  <span className={cx("quote-card-badge")}>
-                    {quoteInfo.quoteSource}
-                  </span>
-                ) : null}
-              </div>
-
-              {quoteLoading ? (
-                <p className={cx("quote-card-loading")}>正在读取证据片段…</p>
-              ) : quoteInfo?.quote ? (
-                <blockquote className={cx("quote-card-text")}>
-                  “{quoteInfo.quote}”
-                </blockquote>
-              ) : (
-                <p className={cx("quote-card-empty")}>
-                  {activeChildStatus.confirmed_link_count > 0
-                    ? `该幼儿在本条目有 ${activeChildStatus.confirmed_link_count} 条已确认证据记录，可进入个人证据册核对具体观察记录与背景。`
-                    : "当前在已核验范围内暂无具体观察正文片段，可进入个人证据册查阅。"}
-                </p>
-              )}
-
-              <div className={cx("quote-card-actions")}>
-                <button
-                  type="button"
-                  className={cx("quote-card-btn")}
-                  onClick={() =>
-                    onOpenChildItem?.({
-                      child_id: activeChildRef.id,
-                      item_id: item.item.id,
-                      child_status: activeChildStatus.status,
-                      scope,
-                      filters,
-                    })
-                  }
-                >
-                  <ArrowUpRight className={cx("action-icon")} aria-hidden="true" />
-                  查看{activeChildRef.name}证据册
-                </button>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      {inspector ? (panelOutlet ? createPortal(inspector, panelOutlet) : inspector) : null}
     </li>
   );
 }
@@ -903,6 +688,9 @@ export function ClassEvidenceOverview({
   onRecordObservation,
   canRecordChild,
   onOpenActivitySupport,
+  readerIdentityKey,
+  onRevalidateIdentity,
+  onRefreshOverview,
   className,
 }: ClassEvidenceOverviewProps) {
   const scopeSelectId = useId();
@@ -913,7 +701,11 @@ export function ClassEvidenceOverview({
   const [draft, setDraft] = useState<{ from: string; to: string } | null>(null);
   const [rangeError, setRangeError] = useState<string | null>(null);
   const [infoExpanded, setInfoExpanded] = useState(false);
-  const [statsDialogOpen, setStatsDialogOpen] = useState(false);
+  const [statsHelpOpen, setStatsHelpOpen] = useState(false);
+  const statsHelpId = useId();
+  const [panelOutlet, setPanelOutlet] = useState<HTMLDivElement | null>(null);
+  const [clientReady, setClientReady] = useState(false);
+  useEffect(() => { setClientReady(true); }, []);
 
   useEffect(() => {
     setDraft(null);
@@ -969,10 +761,7 @@ export function ClassEvidenceOverview({
 
   function toggleItem(itemId: string) {
     setExpandedIds((previous) => {
-      const next = new Set(previous);
-      if (next.has(itemId)) next.delete(itemId);
-      else next.add(itemId);
-      return next;
+      return previous.has(itemId) ? new Set() : new Set([itemId]);
     });
   }
 
@@ -1038,55 +827,42 @@ export function ClassEvidenceOverview({
     return map;
   }, [overview.goals]);
 
+  const referenceItems = overview.goals.flatMap((group) => group.items).filter(isReferenceItem);
+  function renderItem(item: ClassGuideItemView) {
+    return <ItemRow key={item.item.id} item={item} index={itemIndexMap.get(item.item.id) ?? 1}
+      scope={overview.scope} filters={overview.filters} rosterById={rosterById}
+      expanded={expandedIds.has(item.item.id)} onToggle={() => toggleItem(item.item.id)}
+      onOpenChildItem={onOpenChildItem} onRecordObservation={onRecordObservation}
+      canRecordChild={canRecordChild} onOpenActivitySupport={onOpenActivitySupport}
+      classStage={overview.class.stage} classId={overview.class.id} catalogVersion={overview.catalog_version}
+      readerIdentityKey={readerIdentityKey} onRevalidateIdentity={onRevalidateIdentity}
+      onRefreshOverview={onRefreshOverview} panelOutlet={panelOutlet} />;
+  }
+
   return (
     <section
       className={[styles.overview, className].filter(Boolean).join(" ")}
       aria-label={`${overview.class.name}的班级指南证据概览`}
       data-testid="class-evidence-overview"
+      data-client-ready={clientReady}
     >
       <header className={cx("head")}>
         <div className={cx("title-row")}>
           <div>
             <h2 className={cx("title")}>班级指南证据概览</h2>
-            <p className={cx("identity")}>
+            <p className={cx("identity")} data-testid="class-summary">
               {classLabel(overview.class.stage, overview.class.name)} · {overview.class.school_year}学年
+              <span> · 当前在班名单 {overview.roster.child_count} 人</span>
               {overview.class.is_active ? null : <span className={cx("identity-flag")}>已停用</span>}
             </p>
           </div>
-          <div className={cx("synthetic-badge")} aria-label="数据性质标记">
-            设计示例 · 合成数据
-          </div>
         </div>
-        <p className={cx("caption")}>
-          对照《3—6岁儿童学习与发展指南》查看当前在班幼儿的观察证据；指南是参考，观察才是表现证据。
-        </p>
       </header>
 
-      <dl className={cx("summary")} data-testid="class-summary">
-        <div className={cx("summary-item")}>
-          <dt>当前在班名单</dt>
-          <dd>{overview.roster.child_count} 人</dd>
-        </div>
-        <div className={cx("summary-item")}>
-          <dt>统计期间</dt>
-          <dd>{scopePeriodText(overview.scope)}</dd>
-        </div>
-        <div className={cx("summary-item")}>
-          <dt>指南参考年龄</dt>
-          <dd>{referenceAgeText}</dd>
-        </div>
-        <div className={cx("summary-item")}>
-          <dt>统计方式</dt>
-          <dd>按观察发生日期筛选，按幼儿去重</dd>
-        </div>
-      </dl>
-
-      <p className={cx("scope-note")}>
-        期间与名单口径：所有期间都按当前在班名单（{overview.roster.child_count} 人）统计；期间外的证据不参与本期统计（正常口径），
-        切换历史期间只回看这些幼儿当时的证据，不能还原当时的班级名册，也不代表本班教学成效。
-      </p>
 
       {severeNotices.length > 0 ? (
+        <details className={cx("reading-notices")}>
+          <summary>有些记录暂时无法核对 · 查看说明</summary>
         <ul className={cx("notice-list")}>
           {severeNotices.map((notice, index) => (
             <li
@@ -1100,6 +876,7 @@ export function ClassEvidenceOverview({
             </li>
           ))}
         </ul>
+        </details>
       ) : null}
 
       {infoNotices.length > 0 ? (
@@ -1250,7 +1027,6 @@ export function ClassEvidenceOverview({
               </button>
             ))}
           </div>
-          <p className={cx("control-hint")}>切换领域只改变阅读范围，不改变人数统计口径。</p>
         </div>
 
         <div className={cx("control-block")}>
@@ -1273,66 +1049,37 @@ export function ClassEvidenceOverview({
               </button>
             ))}
           </div>
-          <p className={cx("control-hint")}>
-            参考年龄只用于阅读条目，不代表达标期限，也不回填证据发生时的班级或学段。
-          </p>
         </div>
 
         <div className={cx("control-block", "control-block-help")}>
-          <Dialog open={statsDialogOpen} onOpenChange={setStatsDialogOpen}>
-            <DialogTrigger asChild>
               <button
                 type="button"
                 className={cx("help-button")}
                 data-testid="stats-help-button"
+                aria-expanded={statsHelpOpen}
+                aria-controls={statsHelpId}
+                onClick={() => setStatsHelpOpen((value) => !value)}
                 aria-label="查看统计说明与方法"
               >
                 <HelpCircle className={cx("help-icon")} aria-hidden="true" />
                 统计说明
               </button>
-            </DialogTrigger>
-            <DialogContent className={cx("dialog-modal")}>
-              <DialogHeader>
-                <DialogTitle>班级指南证据概览 · 统计说明</DialogTitle>
-                <DialogDescription>
-                  基于《3—6岁儿童学习与发展指南》的发展性观察统计口径与规则
-                </DialogDescription>
-              </DialogHeader>
-              <div className={cx("dialog-body")}>
-                <section className={cx("dialog-section")}>
-                  <h4>1. 统计口径与在班名单</h4>
-                  <p>
-                    所有期间均按当前在班幼儿名单（{overview.roster.child_count} 人）为分母去重统计；
-                    切换历史期间只回看在班幼儿当时的证据，不能还原历史名册，亦不代表班级教学成效评价。
-                  </p>
-                </section>
-                <section className={cx("dialog-section")}>
-                  <h4>2. 三类正式状态定义</h4>
-                  <ul>
-                    <li><strong>已确认观察到</strong>：已有经过教师确认的观察记录支持指南条目表现要求。</li>
-                    <li><strong>已有相关线索</strong>：已有相关行为记录或在成人支持协助下的表现。</li>
-                    <li><strong>暂无相关记录</strong>：当前统计范围内尚无关联观察，<strong>不代表幼儿“不会”或未掌握</strong>。</li>
-                  </ul>
-                </section>
-                <section className={cx("dialog-section")}>
-                  <h4>3. 数据可靠性规则</h4>
-                  <ul>
-                    <li><strong>reliable</strong>：记录完整可靠，展示完整三态人数与占比分布。</li>
-                    <li><strong>partial</strong>：部分记录未通过核对或无法读取，仅展示可确认下限人数与“数据待核验”，不推断未知。</li>
-                    <li><strong>unavailable</strong>：记录暂时无法读取，保留在班分母与个人证据册入口，不展示三态人数。</li>
-                  </ul>
-                </section>
-                <section className={cx("dialog-section")}>
-                  <h4>4. 保健参考条目</h4>
-                  <p>
-                    身高、体重等体态参考条目仅供日常保育查阅对照，不参与行为表现统计，不做正常/异常评价。
-                  </p>
-                </section>
-              </div>
-            </DialogContent>
-          </Dialog>
         </div>
       </div>
+
+      {statsHelpOpen ? <section id={statsHelpId} className={cx("stats-details")} aria-label="统计说明" data-testid="stats-help-content">
+        <h3>统计说明</h3>
+        <p>本次查看：{scopePeriodText(overview.scope)} · {referenceAgeText}</p>
+        <p>以当前在班名单（{overview.roster.child_count} 人）为分母，同一个幼儿在同一条目只计一次。切换历史期间只回看这些幼儿当时的记录，不能还原历史名册，也不代表班级教学成效。</p>
+        <p>所选期间之外的证据不计入本次统计，可切换时间查阅，不属于数据问题。</p>
+        <ul>
+          <li><strong>已确认观察到</strong>：有老师确认的观察记录支持这项表现。</li>
+          <li><strong>已有相关线索</strong>：有相关记录，还不足以确认这项表现；指南允许的成人帮助不自动降为线索。</li>
+          <li><strong>暂无相关记录</strong>：所选范围还没有关联记录，不代表幼儿“不会”或未掌握。</li>
+        </ul>
+        <p>资料完整时显示三类人数。还有资料待核对时，只显示已能确认的人数；暂时读不到时不画分布，仍可进入个人证据册查阅。读不到不等于没有记录。</p>
+        <p>身高、体重等保健参考仅供日常保育查阅，不参与行为统计，也不作正常或异常判断。</p>
+      </section> : null}
 
       {overview.filters.goal_id ? (
         <div className={cx("goal-filter")} data-testid="goal-filter" data-goal-id={overview.filters.goal_id}>
@@ -1386,21 +1133,19 @@ export function ClassEvidenceOverview({
             </div>
 
             <div className={cx("workspace-ruler")} aria-hidden="true">
-              <span className={cx("ruler-label-left")}># 指南条目（点击查看幼儿名单）</span>
+              <span className={cx("ruler-label-left")}>指南条目</span>
               <div className={cx("ruler-axis")}>
                 <span className={cx("ruler-axis-title")}>人数分布（人）</span>
                 <div className={cx("ruler-ticks")}>
-                  <span>0</span>
-                  <span>5</span>
-                  <span>10</span>
-                  <span>15</span>
-                  <span>20</span>
+                  {peopleTicks(overview.roster.child_count).map((value) => <span key={value} style={{ insetInlineStart: `${value / overview.roster.child_count * 100}%` }}>{value}</span>)}
                 </div>
               </div>
             </div>
 
             <div className={cx("goals")}>
               {overview.goals.map(({ goal, items }) => {
+                const behaviorItems = items.filter((item) => !isReferenceItem(item));
+                if (behaviorItems.length === 0) return null;
                 const domainName = catalogIndex.domains.get(goal.domain_id);
                 const subDomainName = catalogIndex.subDomains.get(goal.sub_domain_id);
                 const pathText =
@@ -1424,28 +1169,21 @@ export function ClassEvidenceOverview({
                       </span>
                     </h3>
                     <ul className={cx("item-list")}>
-                      {items.map((item) => (
-                        <ItemRow
-                          key={item.item.id}
-                          item={item}
-                          index={itemIndexMap.get(item.item.id) ?? 1}
-                          scope={overview.scope}
-                          filters={overview.filters}
-                          rosterById={rosterById}
-                          expanded={expandedIds.has(item.item.id)}
-                          onToggle={() => toggleItem(item.item.id)}
-                          onOpenChildItem={onOpenChildItem}
-                          onRecordObservation={onRecordObservation}
-                          canRecordChild={canRecordChild}
-                          onOpenActivitySupport={onOpenActivitySupport}
-                        />
-                      ))}
+                      {behaviorItems.map(renderItem)}
                     </ul>
                   </section>
                 );
               })}
             </div>
+            {referenceItems.length > 0 ? <details className={cx("reference-library")} data-testid="reference-library" onToggle={(event) => {
+              if (!event.currentTarget.open && referenceItems.some((item) => expandedIds.has(item.item.id))) setExpandedIds(new Set());
+            }}>
+              <summary><BookOpen aria-hidden="true" />保健参考资料 · {referenceItems.length} 项</summary>
+              <p>仅供日常保育查阅，不参与行为统计，也不作正常或异常判断。</p>
+              <ul className={cx("item-list")}>{referenceItems.map(renderItem)}</ul>
+            </details> : null}
           </div>
+          <div className={cx("workspace-detail")} ref={setPanelOutlet} aria-label="选中条目详情" />
         </div>
       )}
     </section>

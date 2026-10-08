@@ -75,3 +75,41 @@ adjudication show the slogan/art and recording action present; see `docs/design/
 This manual comparison gate has no remaining actionable P0/P1/P2 fix on the inspected scope, but the automated comp-led pipeline remains incomplete.
 Minor raster/icon/glyph and real-data-order differences are recorded adaptations/P3, not silently hidden. Arbitrary-name fallback metrics,
 real LLM quality, reverse proxy behavior, hosted database, public deployment and whole-app safety certification remain outside this local acceptance.
+
+## Evidence UI polish — ordinary extension, 2026-10-08
+
+Scope: only the class evidence workbench and child evidence list; bounded documentation of the shipped local candidate.
+This section appends to the homepage QA history; its earlier result and automated hero FAIL remain separate.
+
+Selected layout directions (synthetic figures are reference content, never product constants):
+
+- Class option 3: `docs/design/class-overview-v2-20261008/03-evidence-workspace.png`.
+- Child latest V4 option 1: `docs/design/child-evidence-v4-simple-20261008/01-single-column-list.png`; rejected V2/V3 are not authority.
+
+Human layout comparison: opened both sources against saved formal desktop and narrow captures, plus both note fixtures.
+Class desktop keeps aligned actual-N distribution and one inspector; narrow detail is a scrolled reading state with a return control.
+Child keeps a normal single-column list and inline sources; at 390×844 progressive optional filters leave the first full item/status visible.
+The app's warmer ground is intentional inherited adaptation; actual DTO wording, names, counts and dates replace synthetic comp content.
+Local type: child title24/body16/meta14; class title24/detail18/guide-and-quote16; native targets44. No global token promotion.
+No new shipped UI raster assets; adjacent PROMPTS.md/provenance.json retain reference origins and historical metadata.
+Existing non-home DESIGN placeholders/implementation wording remain drift; no global system, sidecar or config repair.
+
+Reviewer: `.impeccable/review/evidence-ui-polish/VERDICT-1.md` disposition **ship**, ORIGINAL SEVEN FIXES ONLY:
+
+- F1 resolved: child narrow progressive age/goal/help filters; first complete item visible; tablet help can reflow.
+- F2 resolved: compact class behavior rows; health references independently collapsed with complete source access.
+- F3 resolved: class24/18/16 reading hierarchy and long-token wrapping.
+- F4 resolved: notes/continuous summaries stay with matching observation; cross-record notes stay in association details.
+- F5 resolved: existing launcher docked in these pages' document return toolbar, using the existing ≤1090px nav breakpoint.
+- F6 resolved: no-record class badges keep dark text; saved computed-contrast checks pass ≥4.5.
+- F7 resolved: inline statistics help in ordinary Chinese, preserving denominator/period, three states and UNKNOWN ≠ 0.
+Initial `REVIEW.md` FIX history remains intact; this verdict does not certify the whole site, all two-page behavior or production.
+Source read/selection cancellation, one inspector and same-period drilldown preserve verbatim quotes, dates, class snapshots and teacher control.
+
+Saved formal evidence: `output/playwright/evidence-pages-206ffba5/results.json` **103/103**, errors=[], models0, cleanup_issues=[].
+Real Next production HTTP + isolated PG + AUTH + Chrome use synthetic acceptance data; five viewports1440/1024/768/390 are recorded.
+Injected HTTP faults/expected console failures and controlled response delay are separate; two long-token captures are DOM layout doubles.
+`output/g3-verdict-final/notes-1440.png` and `notes-390.png` are component-only synthetic note fixtures, not persisted business examples.
+Component suites: class115/115; child133/133 (old127+6). Pure34/42/63, validate and Next+tsup passed per delivery record; no rerun here.
+No fabricated comp-diff score, FORM seed, QUALITY BAR or hero gate pass; scope is human layout comparison and the seven resolved fixes.
+NOT_RUN: real provider, hosted DB/object bucket, deploy, real phones/soft keyboard, Safari and manual screen reader. No push/merge.
