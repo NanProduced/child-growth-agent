@@ -10,17 +10,22 @@ const safety = require("../harness-safety");
 const { chromium } = require(process.env.PLATFORM_UI_PLAYWRIGHT || path.join(os.tmpdir(), "g3-browser-deps/node_modules/playwright-core"));
 const ROOT = process.cwd();
 const PHASE = process.argv[2];
+const RESUME = process.argv.includes("--resume");
 if (!["before", "after"].includes(PHASE)) throw new Error("Use before or after");
 const OUT = path.join(ROOT, "docs/platform-review/ui-typeset", PHASE);
-if (fs.existsSync(path.join(OUT, "results.json"))) throw new Error("Bounded pass already recorded; refuse another pass");
+const existingPath = path.join(OUT, "results.json");
+const existing = fs.existsSync(existingPath) ? JSON.parse(fs.readFileSync(existingPath, "utf8")) : null;
+if (existing && !RESUME) throw new Error("Bounded pass already recorded; refuse another pass");
+if (RESUME && (PHASE !== "after" || !existing || existing.cleanup_issues.length || existing.coverage_complete === true)) throw new Error("Resume only incomplete final coverage after verified cleanup");
 const widths = [1440, 1024, 768, 390];
-const results = [], errors = [], checks = [], cleanupIssues = [];
+const results = [...(existing?.results || [])], errors = [...(existing?.errors || [])], checks = [...(existing?.checks || [])], cleanupIssues = [];
+let primaryFailure = null;
 const check = (name, ok, level = "real_auth_http_db_browser") => checks.push({ name, ok: Boolean(ok), level });
 
 async function capture(page, name, level = "real_auth_http_db_browser") {
   await page.evaluate(() => document.fonts.ready);
   const metrics = await page.evaluate(() => {
-    const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+    const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden" && !el.classList.contains("sr-only") && el.getAttribute("aria-hidden") !== "true";
     const openPanel = document.querySelector("[data-yaya-panel][data-state=open]");
     const controls = [...(openPanel || document.querySelector("main") || document).querySelectorAll("a,button,input,select,textarea,summary")].filter(visible);
     const hitBox = el => el.closest("label") || (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.contains(el) ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : el);
@@ -48,10 +53,12 @@ async function capture(page, name, level = "real_auth_http_db_browser") {
     return { width: innerWidth, overflow: document.documentElement.scrollWidth > innerWidth + 1, small, obscured, types, contrast_failures: contrast.filter(x => x.ratio < x.threshold), title: document.title };
   });
   if (PHASE === "after" && /stress-|font-fallback/.test(name)) {
+    const visibleTitle = page.locator("main h1:visible");
+    if (await visibleTitle.count() === 1) await visibleTitle.evaluate((el, marker) => el.setAttribute("data-platform-font-probe", marker), name);
     const cdp = await page.context().newCDPSession(page);
     await cdp.send("DOM.enable"); await cdp.send("CSS.enable");
     const { root } = await cdp.send("DOM.getDocument");
-    const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector: "main h1" });
+    const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector: `[data-platform-font-probe="${name}"]` });
     if (nodeId) metrics.platform_fonts = (await cdp.send("CSS.getPlatformFontsForNode", { nodeId })).fonts;
     await cdp.detach();
   }
@@ -62,6 +69,29 @@ async function capture(page, name, level = "real_auth_http_db_browser") {
 
 async function markFixture(page) {
   await page.evaluate(() => { const note = document.createElement("p"); note.textContent = "响应替身：仅验证界面，不代表真实模型质量或已保存业务。"; note.style.cssText = "position:fixed;left:0;top:0;right:0;z-index:9999;margin:0;padding:4px;background:#fff3cd;color:#593c00;font:14px sans-serif;pointer-events:none"; document.body.append(note); });
+}
+
+async function remainingDirectoryFixtures(browser, base, credentials) {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await context.request.post(base + "/api/auth/login", { headers: { origin: base, "x-cga-auth-request": "1" }, data: credentials });
+  const page = await context.newPage();
+  for (const status of [401, 403, 503, "empty"]) {
+    const handler = route => route.fulfill({ status: typeof status === "number" ? status : 200, contentType: "application/json", body: JSON.stringify(status === "empty" ? { classes: [] } : { error: "fixture", message: "响应替身：资料暂不可读取。" }) });
+    await page.route("**/api/classes", handler);
+    await page.goto(base + "/children/new", { waitUntil: "networkidle" });
+    await markFixture(page); await capture(page, `directory-${status}-390`, "browser_response_fixture");
+    await page.unroute("**/api/classes", handler);
+  }
+  // Bound the delayed response; inspect the actual pending request, not a guessed text node.
+  let requested;
+  const requestStarted = new Promise(resolve => { requested = resolve; });
+  const handler = async route => { requested(); await new Promise(resolve => setTimeout(resolve, 3000)); await route.fulfill({ status: 200, contentType: "application/json", body: '{"classes":[]}' }).catch(() => {}); };
+  await page.route("**/api/classes", handler);
+  await page.goto(base + "/children/new", { waitUntil: "domcontentloaded" });
+  await Promise.race([requestStarted, new Promise(resolve => setTimeout(resolve, 5000))]);
+  await markFixture(page); await capture(page, "directory-loading-390", "browser_controlled_delayed_response");
+  await page.unroute("**/api/classes", handler);
+  await context.close();
 }
 
 async function chatFixtures(browser, base, credentials, accountId) {
@@ -88,9 +118,9 @@ async function chatFixtures(browser, base, credentials, accountId) {
       const page = await context.newPage();
       await page.goto(base + "/assistant", { waitUntil: "networkidle" });
       try {
-        await page.locator("[data-yaya-composer-input]").fill("[响应替身] 仅检查这张卡片的排版。");
+        await page.locator("[data-yaya-composer-input]:visible").fill("[响应替身] 仅检查这张卡片的排版。");
         await page.getByRole("button", { name: /^发送(?:消息)?$/ }).click();
-        await page.locator(target).last().waitFor({ timeout: 20000 });
+        await page.locator(target + ":visible").last().waitFor({ timeout: 20000 });
         if (scenario === "answer") await page.getByText("为了覆盖长答展开", { exact: false }).first().waitFor({ timeout: 15000 });
         await markFixture(page);
         if (scenario !== "answer") await page.locator(target).filter({ visible: true }).first().scrollIntoViewIfNeeded();
@@ -142,7 +172,7 @@ async function main() {
       ["review", `/observations/${m.observations.b5_ai_organized.id}/review`],
       ["activities", "/activities"], ["reports", "/reports"], ["assistant", "/assistant"],
     ];
-    for (const role of ["teacher_a", "admin", "teacher_c", "guest"]) {
+    for (const role of RESUME ? ["admin", "teacher_c", "guest"] : ["teacher_a", "admin", "teacher_c", "guest"]) {
       const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
       await context.route("**/*", route => { const u = new URL(route.request().url()); return u.origin === base || ["data:", "blob:"].includes(u.protocol) ? route.continue() : route.abort("blockedbyclient"); });
       if (role !== "guest") {
@@ -183,8 +213,8 @@ async function main() {
           await page.goto(base + href, { waitUntil: "networkidle" });
           await page.evaluate(() => {
             document.documentElement.style.fontSize = "200%";
-            const h = document.querySelector("main h1"); if (h) h.textContent = "[排版替身] 龘靐齉成长观察册——连续多日探索与合作过程的完整观察证据";
-            const p = document.querySelector("main p"); if (p) p.textContent = "[排版替身，非业务事实] " + "幼儿在搭建过程中邀请同伴一起尝试，并描述自己的发现。".repeat(6) + " 1 10 100";
+            const h = [...document.querySelectorAll("main h1")].find(el => el.getClientRects().length > 0); if (h) h.textContent = "[排版替身] 龘靐齉成长观察册——连续多日探索与合作过程的完整观察证据";
+            const p = [...document.querySelectorAll("main p")].find(el => el.getClientRects().length > 0); if (p) p.textContent = "[排版替身，非业务事实] " + "幼儿在搭建过程中邀请同伴一起尝试，并描述自己的发现。".repeat(6) + " 1 10 100";
           });
           await capture(page, `stress-${name}-200percent`, "browser_dom_text_scale_double");
         }
@@ -221,22 +251,6 @@ async function main() {
             await page.evaluate(() => { document.body.style.zoom = "2"; });
             await capture(page, `classes-css-zoom200-${width}`, "browser_css_zoom_double");
           }
-          for (const status of ["loading", 401, 403, 503, "empty"]) {
-            await page.setViewportSize({ width: 390, height: 844 });
-            let release;
-            const gate = new Promise(resolve => { release = resolve; });
-            const handler = async route => {
-              if (status === "loading") await gate;
-              return route.fulfill({ status: typeof status === "number" ? status : 200, contentType: "application/json", body: JSON.stringify(status === "empty" || status === "loading" ? { classes: [] } : { error: "fixture", message: "响应替身：资料暂不可读取。" }) }).catch(() => {});
-            };
-            await page.route("**/api/classes", handler);
-            await page.goto(base + "/children/new", { waitUntil: "domcontentloaded" });
-            if (status === "loading") await page.getByText("班级加载中…", { exact: true }).waitFor();
-            else await page.waitForLoadState("networkidle");
-            await markFixture(page);
-            await capture(page, `directory-${status}-390`, "browser_response_fixture");
-            release(); await page.unroute("**/api/classes", handler);
-          }
         }
       }
       if (role === "guest") check("anonymous API returns 401", (await context.request.get(base + "/api/children")).status() === 401);
@@ -260,6 +274,7 @@ async function main() {
     check("raw_text untouched", JSON.stringify(rawBefore.rows) === JSON.stringify((await db.query("SELECT id,raw_text FROM observations ORDER BY id")).rows), "real_db");
     check("provider guard attempts zero", guard.hits === 0, "egress_guard");
     if (PHASE === "after") {
+      await remainingDirectoryFixtures(browser, base, credentials.teacher_a);
       await chatFixtures(browser, base, credentials.teacher_a, m.accounts.teacher_a.account_id);
       const outage = await browser.newContext({ viewport: { width: 1440, height: 900 } });
       await outage.request.post(base + "/api/auth/login", { headers: { origin: base, "x-cga-auth-request": "1" }, data: credentials.teacher_a });
@@ -276,6 +291,9 @@ async function main() {
       }
       await outage.close();
     }
+  } catch (error) {
+    primaryFailure = error.message;
+    throw error;
   } finally {
     await safety.runCleanupSteps([
       { label: "browser", run: () => browser?.close() },
@@ -285,7 +303,7 @@ async function main() {
       { label: "guard", run: () => guard.close() },
       { label: "generated", run: () => { cleanupIssues.push(...safety.restoreGeneratedArtifacts(snapshot, ROOT).issues); } },
     ], (label, detail) => cleanupIssues.push(label + ": " + detail));
-    fs.writeFileSync(path.join(OUT, "results.json"), JSON.stringify({ phase: PHASE, results, checks, errors, cleanup_issues: cleanupIssues, seed_id: seed?.seed_id, container_id: seed?.container_id, server: server && { pid: server.pid, startedAt: server.startedAt, stopped: server.stopped }, model_requests: 0, guard_attempts: guard.hits }, null, 2));
+    fs.writeFileSync(path.join(OUT, "results.json"), JSON.stringify({ phase: PHASE, coverage_complete: primaryFailure === null, primary_failure: primaryFailure, coverage_resumed: RESUME, prior_resource_run: existing && { seed_id: existing.seed_id, container_id: existing.container_id, server: existing.server, cleanup_issues: existing.cleanup_issues, captures: existing.results.length }, results, checks, errors, cleanup_issues: cleanupIssues, seed_id: seed?.seed_id, container_id: seed?.container_id, server: server && { pid: server.pid, startedAt: server.startedAt, stopped: server.stopped }, model_requests: 0, guard_attempts: guard.hits }, null, 2));
     safety.assertCleanupComplete(cleanupIssues);
     console.log(JSON.stringify({ phase: PHASE, captures: results.length, checks: checks.length, errors: errors.length, cleanup_issues: cleanupIssues.length }));
   }
