@@ -21,7 +21,7 @@ export const metadata: Metadata = {
 };
 
 const chipClass = (active: boolean) =>
-  `rounded-full border px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 ${
+  `inline-flex min-h-11 min-w-11 max-w-full flex-wrap items-center gap-1 rounded-full border px-3 py-2 text-sm [overflow-wrap:anywhere] transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2 ${
     active
       ? 'border-emerald-300 bg-emerald-50 font-medium text-emerald-800'
       : 'border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:bg-amber-50/50'
@@ -69,7 +69,7 @@ export default async function ChildrenPage({
   }
 
   return (
-    <div className="space-y-8">
+    <div data-platform-surface="children" className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">成长档案</h1>
@@ -231,7 +231,7 @@ export default async function ChildrenPage({
         </div>
       )}
 
-      <div className="flex items-center gap-2 text-xs leading-5 text-slate-400">
+      <div className="flex items-start gap-2 text-sm leading-6 text-slate-600">
         <ClipboardList className="size-3.5" aria-hidden="true" />
         原始观察会被保留；确认后的内容才会进入成长小结与支持建议。
       </div>

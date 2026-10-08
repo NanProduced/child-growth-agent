@@ -119,7 +119,7 @@ export default async function ReportsPage({
       : null;
 
   return (
-    <div className="space-y-7">
+    <div data-platform-surface="reports" className="space-y-7">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-slate-900">成长回顾</h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
@@ -266,7 +266,7 @@ export default async function ReportsPage({
                   </p>
                   <p className="mt-3 text-xs leading-5 text-slate-500">
                     {isFallback
-                      ? '已有确认观察会先在这里呈现；下一次确认后，Agent 会继续更新这段小结。'
+                      ? '已有确认观察会先在这里呈现；下一次确认后，观察助手会继续更新这段小结。'
                       : `最近更新：${formatDateTimeCn(profileUpdatedAt)}`}
                   </p>
                 </div>

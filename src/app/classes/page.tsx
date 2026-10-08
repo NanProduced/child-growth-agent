@@ -79,14 +79,10 @@ export default async function ClassesPage() {
   })).filter((group) => group.classes.length > 0);
 
   return (
-    <div className="space-y-8 pb-4 sm:space-y-10">
+    <div data-platform-surface="classes" className="space-y-8 pb-4 sm:space-y-10">
       <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm font-medium text-emerald-700">
-            <School className="size-4" aria-hidden="true" />
-            班级与学段
-          </div>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">班级</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">班级</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
             先找到班级，再回到这个班级里的成长档案与观察记录。
           </p>
@@ -147,12 +143,12 @@ export default async function ClassesPage() {
                       >
                         <span className="min-w-0 flex-1">
                           <span className="flex flex-wrap items-center gap-2">
-                            <strong className="truncate text-base text-slate-900">{klass.name}</strong>
+                            <strong className="min-w-0 break-words text-base text-slate-900">{klass.name}</strong>
                             <Badge variant="secondary" className="font-normal">{klass.school_year}</Badge>
                             {!klass.is_active ? <Badge variant="outline" className="font-normal text-slate-500">已停用</Badge> : null}
                           </span>
                         </span>
-                        <span className="hidden shrink-0 items-center gap-5 text-sm text-slate-500 sm:flex">
+                        <span className="hidden min-w-0 flex-wrap items-center gap-x-5 gap-y-1 text-sm text-slate-500 lg:flex">
                           <span><strong className="font-semibold text-slate-800">{item.children}</strong> 份成长档案</span>
                           {item.pending > 0 ? <span className="text-amber-700"><strong className="font-semibold">{item.pending}</strong> 条待处理</span> : null}
                           <span>{item.latest ? `最近 ${formatDateCn(item.latest)}` : '还没有观察'}</span>
@@ -161,7 +157,7 @@ export default async function ClassesPage() {
                           <span className="sr-only">查看班级</span>
                           <ArrowUpRight className="size-4 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" aria-hidden="true" />
                         </span>
-                        <span className="flex shrink-0 flex-col items-end text-right text-xs text-slate-500 sm:hidden">
+                        <span className="flex shrink-0 flex-col items-end text-right text-sm tabular-nums text-slate-500 lg:hidden">
                           <span>{item.children} 份档案</span>
                           {item.pending > 0 ? <span className="text-amber-700">{item.pending} 条待处理</span> : null}
                         </span>

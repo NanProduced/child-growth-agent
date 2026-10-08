@@ -964,6 +964,7 @@
   }
   .admin-actions > a {
     min-width: 0;
+    flex-basis: 100%;
   }
   .action-extras {
     justify-content: space-between;
@@ -1118,6 +1119,7 @@
   .admin-actions {
     padding-top: 22px;
     gap: 12px;
+    flex-wrap: wrap;
   }
   .admin-footnote {
     text-align: left;

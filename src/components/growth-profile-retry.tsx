@@ -50,7 +50,7 @@ export function GrowthProfileRetry({
         <span>
           {error ?? (hasStoredProfile
             ? '可以根据最新的已确认观察重新整理这段小结。'
-            : '当前内容先根据已确认观察呈现；可以请求 Agent 生成更完整的小结。')}
+            : '当前内容先根据已确认观察呈现；可以请观察助手整理更完整的小结。')}
         </span>
         <Button type="button" variant="outline" size="sm" onClick={() => void handleRetry()} disabled={busy}>
           {busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}

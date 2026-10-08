@@ -340,9 +340,9 @@ export function NewObservationClient({
   }
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6">
+    <div data-platform-surface="observation-new" className="mx-auto max-w-2xl space-y-6">
       <div>
-        <h1 className="flex items-center gap-2 text-xl font-bold">
+        <h1 className="flex items-start gap-2 text-2xl font-semibold">
           <PenLine className="size-5 text-emerald-600" />
           开始记录观察
         </h1>
@@ -530,7 +530,7 @@ export function NewObservationClient({
               onChange={(e) => setRawText(e.target.value)}
               className="leading-7"
             />
-            <p className="text-xs text-slate-400">
+            <p className="text-sm leading-6 text-slate-600">
               提示：只记录看到和听到的，不写评判与猜测；原文保存后将作为不可改写的追溯依据。
             </p>
           </div>

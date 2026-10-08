@@ -167,6 +167,7 @@ export function YayaPanel({ auth }: { auth: AuthStatusResponse }) {
           aria-modal={isMobile ? true : undefined}
           aria-label="芽芽助手"
           data-yaya-panel
+          data-platform-chat
           onInteractOutside={(event) => event.preventDefault()}
           onOpenAutoFocus={(event) => {
             event.preventDefault();

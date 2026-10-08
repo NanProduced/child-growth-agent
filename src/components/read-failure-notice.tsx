@@ -31,9 +31,9 @@ export function ReadFailureNotice({ kind, what, loginHref = "/login", retryHref,
         ? { title: "资料服务暂时不可用", text: `身份或${what}读取暂未完成，不能据此判断为空。请稍后重新读取。` }
         : { title: "资料暂时不可读", text: `${what}读取失败，不代表没有数据。请稍后重新读取。` };
   return (
-    <section role="alert" className="mx-auto max-w-2xl space-y-5 py-8">
+    <section data-platform-surface="read-failure" role="alert" className="mx-auto max-w-2xl space-y-5 py-8">
       <Alert variant="destructive">
-        <AlertTitle>{copy.title}</AlertTitle>
+        <AlertTitle><h1>{copy.title}</h1></AlertTitle>
         <AlertDescription>{copy.text}</AlertDescription>
       </Alert>
       <div className="flex flex-wrap gap-3">
