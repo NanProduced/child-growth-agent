@@ -275,11 +275,11 @@ export function TeacherManagement({ adminAccountId, initialTeachers, initialClas
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-8 pb-8 [&_button]:max-w-full">
+    <div data-platform-surface="teachers" className="mx-auto max-w-5xl space-y-8 pb-8 [&_button]:max-w-full">
       <Button asChild variant="ghost" className="-ml-3 min-h-11"><Link href="/"><ArrowLeft aria-hidden="true" />返回首页</Link></Button>
       <header className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold sm:text-3xl">教师管理</h1>
+          <h1 className="text-2xl font-semibold">教师管理</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">为教师建立账号，添加任教班级，或重置登录密码；每次操作逐条保存，成功后即生效。</p>
         </div>
         <Button disabled={locked} className="min-h-11 self-start" onClick={() => setCreating(!creating)} aria-expanded={creating} aria-controls="create-teacher">

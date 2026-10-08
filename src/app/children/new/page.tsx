@@ -138,7 +138,7 @@ function collectErrors(form: FormState, fields: readonly FieldKey[]): FieldError
 
 function ErrorText({ message }: { message?: string }) {
   if (!message) return null;
-  return <p className="text-sm text-destructive">{message}</p>;
+  return <p role="alert" className="text-base leading-7 text-destructive">{message}</p>;
 }
 
 export default function NewChildPage() {
@@ -349,9 +349,9 @@ export default function NewChildPage() {
     : null;
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6">
+    <div data-platform-surface="child-new" className="mx-auto max-w-2xl space-y-6">
       <div>
-        <h1 className="flex items-center gap-2 text-xl font-bold">
+        <h1 className="flex items-start gap-2 text-2xl font-semibold">
           <UserPlus className="size-5 text-amber-600" />
           建立成长档案
         </h1>
@@ -374,7 +374,7 @@ export default function NewChildPage() {
                   done
                     ? 'bg-emerald-100 text-emerald-700'
                     : active
-                      ? 'bg-amber-500 text-white'
+                      ? 'bg-amber-700 text-white'
                       : 'bg-slate-200 text-slate-500',
                 )}
               >
@@ -387,7 +387,7 @@ export default function NewChildPage() {
                     ? 'font-medium text-slate-900'
                     : done
                       ? 'text-slate-600'
-                      : 'text-slate-400',
+                      : 'text-slate-600',
                 )}
               >
                 {label}
@@ -431,7 +431,7 @@ export default function NewChildPage() {
                     <label
                       key={gender}
                       htmlFor={`gender-${gender}`}
-                      className="flex cursor-pointer items-center gap-2 text-sm"
+                      className="flex min-h-11 min-w-11 cursor-pointer items-center gap-2 text-sm"
                     >
                       <RadioGroupItem id={`gender-${gender}`} value={gender} />
                       {gender}
@@ -533,7 +533,7 @@ export default function NewChildPage() {
           {step === 1 ? (
             <>
               <div className="space-y-1.5">
-                <Label htmlFor="avatar-emoji">头像 Emoji（选填）</Label>
+                <Label htmlFor="avatar-emoji">头像图标（选填）</Label>
                 <div className="flex flex-wrap items-center gap-2">
                   <Input
                     id="avatar-emoji"
@@ -550,7 +550,7 @@ export default function NewChildPage() {
                       aria-label={`选择头像 ${emoji}`}
                       onClick={() => setField('avatar_emoji', emoji)}
                       className={cn(
-                        'flex size-9 items-center justify-center rounded-full border text-lg transition-colors',
+                        'flex size-11 items-center justify-center rounded-full border text-lg transition-colors motion-reduce:transition-none',
                         form.avatar_emoji === emoji
                           ? 'border-amber-400 bg-amber-100'
                           : 'bg-white hover:bg-slate-100',

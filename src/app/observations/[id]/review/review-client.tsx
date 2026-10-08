@@ -656,7 +656,7 @@ export function ReviewClient({
   );
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div data-platform-surface="observation-review" className="mx-auto max-w-3xl space-y-6">
       <Button asChild variant="ghost" size="sm" className="-ml-2">
         <Link href={`/children/${child.id}`}>
           <ArrowLeft className="size-4" />
@@ -668,9 +668,9 @@ export function ReviewClient({
         <CardHeader className="border-b bg-slate-50/60 pb-4">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-2xl">{child.avatar_emoji ?? '🧒'}</span>
-            <CardTitle className="text-base">
+            <h1 className="min-w-0 text-2xl font-semibold [overflow-wrap:anywhere]">
               {child.name} · {formatDateCn(observation.observed_at)}
-            </CardTitle>
+            </h1>
             <span className="ml-auto flex items-center gap-2">
               <StatusBadge status={status} />
             </span>
@@ -704,7 +704,7 @@ export function ReviewClient({
                   ? 'bg-emerald-100 font-medium text-emerald-800'
                   : index < workflowStage
                     ? 'bg-slate-100 text-slate-600'
-                    : 'text-slate-400'
+                    : 'text-slate-600'
               }`}
             >
               <span className="flex size-4 items-center justify-center rounded-full bg-white/80 text-xs" aria-hidden="true">

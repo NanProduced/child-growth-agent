@@ -138,7 +138,7 @@ export default async function ClassDetailPage({
   const latest = observations[0];
 
   return (
-    <div className="space-y-8">
+    <div data-platform-surface="class-detail" className="space-y-8">
       <Button asChild variant="ghost" size="sm" className="-ml-2 min-h-11">
         <Link href="/classes">
           <ArrowLeft className="size-4" />
@@ -150,7 +150,7 @@ export default async function ClassDetailPage({
         <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="min-w-0 break-words text-xl font-semibold tracking-tight text-slate-900">
+              <h1 className="min-w-0 break-words text-2xl font-semibold tracking-tight text-slate-900">
                 {CLASS_STAGE_LABELS[klass.stage]} · {klass.name} · {klass.school_year}
               </h1>
               {klass.is_active ? (

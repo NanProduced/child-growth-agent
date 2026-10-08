@@ -100,7 +100,7 @@ function GrowthProfileSections({
             <p className="max-w-3xl text-base leading-7 text-slate-700">{profile.summary}</p>
             <p className="text-xs leading-5 text-slate-500">
               {isFallback
-                ? '已有确认观察会先在这里呈现；下一次确认后，Agent 会继续更新这段小结。'
+                  ? '已有确认观察会先在这里呈现；下一次确认后，观察助手会继续更新这段小结。'
                 : `最近更新：${formatDateTimeCn(updatedAt)}`}
             </p>
           </CardContent>
@@ -256,7 +256,7 @@ export default async function ChildDetailPage({
   );
 
   return (
-    <div className="space-y-8">
+    <div data-platform-surface="child-detail" className="space-y-8">
       <Button asChild variant="ghost" size="sm" className="-ml-2">
         <Link href="/children">
           <ArrowLeft className="size-4" />
@@ -272,7 +272,7 @@ export default async function ChildDetailPage({
             </span>
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-xl font-semibold tracking-tight text-slate-900">{child.name}</h1>
+                <h1 className="min-w-0 break-words text-2xl font-semibold tracking-tight text-slate-900">{child.name}</h1>
                 <Badge variant="outline" className="font-normal">
                   {child.gender}
                 </Badge>
@@ -282,7 +282,7 @@ export default async function ChildDetailPage({
                 {child.current_class ? (
                   <Link
                     href={`/classes/${child.current_class.id}`}
-                    className="text-xs text-emerald-700 hover:text-emerald-800"
+                    className="inline-flex min-h-11 items-center text-sm text-emerald-700 hover:text-emerald-800"
                   >
                     查看班级
                   </Link>
