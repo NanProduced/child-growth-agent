@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { MediaError } from "@/lib/media/errors";
+import { bindDataAttachmentMetadataPort } from "@/lib/media/data-adapter";
+import { withPrivateWrite } from "@/lib/yaya/data/private-auth";
 import { MEDIA_MAX_IMAGES_PER_UPLOAD, MEDIA_MAX_IMAGE_BYTES } from "@/lib/media/limits";
 import { requireMediaWritePrincipal } from "@/lib/media/request-guard";
 import { mediaRouteError } from "@/lib/media/route-error";
@@ -31,7 +33,9 @@ interface UploadSlot {
 
 export async function POST(request: NextRequest) {
   try {
-    const principal = await requireMediaWritePrincipal(request);
+    // Preserve the original session through all file/object awaits.
+    const carrier = { headers: new Headers(request.headers) };
+    const principal = await requireMediaWritePrincipal(carrier);
     const runtime = mediaRuntimeOrThrow();
     const form = await request.formData().catch(() => null);
     if (form === null) {
@@ -88,7 +92,16 @@ export async function POST(request: NextRequest) {
 
     const batch =
       validInputs.length > 0
-        ? await uploadImages(runtime, {
+        ? await uploadImages({
+            ...runtime,
+            metadata: {
+              ...runtime.metadata,
+              // Object I/O is outside this short transaction; current identity
+              // and pending -> ready registration share the same client.
+              registerAttachment: (input) => withPrivateWrite(carrier, async ({ client }) =>
+                bindDataAttachmentMetadataPort(client).registerAttachment(input)),
+            },
+          }, {
             owner_account_id: principal.account_id,
             files: validInputs,
           })
@@ -111,6 +124,7 @@ export async function POST(request: NextRequest) {
       }
       return result;
     });
+    await requireMediaWritePrincipal(carrier); // Includes idempotent readback, which performs no registration.
     return NextResponse.json({ uploads });
   } catch (error) {
     return mediaRouteError(error);

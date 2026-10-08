@@ -254,6 +254,29 @@ const SCENARIOS: Record<string, () => Promise<void>> = {
     assert.ok(text.includes('读取暂未完成'), '读取失败应为可重试提示而非原始错误');
     assert.equal(findClassFormDialogs(tree).length, 1, '班级管理入口必须保留');
     assert.equal(findSectionTitles(tree, '成长档案').length, 0, '成员区块不应渲染');
+    assert.equal(findElements(tree, (element) => element.type === 'dl').length, 0, '失败时不应从初始空数组生成零值统计');
+    assert.ok(!text.includes('还没有记录'), '读取失败不应显示无记录');
+  },
+
+  'class-observation-failure-is-not-empty': async () => {
+    const tree = await renderClassPage({
+      getClassChildren: async () => [memberA],
+      listObservations: async () => { throw new Error('观察查询失败'); },
+    });
+    const text = treeText(tree);
+    assert.ok(text.includes('班级数据暂不可用'));
+    assert.equal(findElements(tree, (element) => element.type === 'dl').length, 0);
+    assert.equal(findSectionTitles(tree, '最近观察').length, 0);
+    assert.ok(!text.includes('还没有记录') && !text.includes('班级还没有观察记录'));
+  },
+
+  'class-trusted-empty-retains-zero-statistics': async () => {
+    const tree = await renderClassPage({});
+    const text = treeText(tree);
+    assert.equal(findElements(tree, (element) => element.type === 'dl').length, 1);
+    assert.ok(text.includes('还没有记录'));
+    assert.equal(findSectionTitles(tree, '成长档案').length, 1);
+    assert.ok(!text.includes('班级数据暂不可用'));
   },
 
   'class-get-failure-hides-management': async () => {

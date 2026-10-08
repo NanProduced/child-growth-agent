@@ -71,7 +71,7 @@ export function YayaImagePicker({
   );
 }
 
-function useObjectUrl(file: File | undefined): string | null {
+export function useObjectUrl(file: File | undefined): string | null {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     if (file === undefined) {
@@ -99,7 +99,7 @@ function AttachmentTile({
   onRemove: (attachment: Attachment) => void;
   onRetry?: (file: File) => void;
 }) {
-  const pending = attachment.status.type !== "complete";
+  const pending = attachment.status.type !== "complete" && attachment.status.type !== "requires-action";
   const progress =
     attachment.status.type === "running" ? Math.round((attachment.status.progress ?? 0) * 100) : null;
   const failed = attachment.status.type === "incomplete" && attachment.status.reason === "error";

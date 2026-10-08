@@ -133,7 +133,7 @@ export default async function ActivitiesPage() {
   const waiting = rows.filter((row) => row.confirmedCount === 0);
 
   return (
-    <div className="space-y-7">
+    <div data-platform-surface="activities" className="space-y-7">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-slate-900">活动支持</h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">

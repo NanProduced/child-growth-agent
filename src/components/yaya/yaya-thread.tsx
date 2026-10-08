@@ -7,7 +7,7 @@
  */
 import { useEffect } from "react";
 import { AuiIf, ThreadPrimitive, useAui, useAuiState } from "@assistant-ui/react";
-import { RefreshCw } from "lucide-react";
+import { ArrowDown, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -19,10 +19,10 @@ import { YAYA_PART_NAMES } from "./client/parts";
 
 function YayaEmpty() {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-      <YayaAvatar mood="idle" size={56} />
-      <p className="text-sm font-medium text-foreground">我是芽芽，你的幼教工作助手</p>
-      <p className="text-xs leading-5 text-muted-foreground">
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-4 py-8 text-center">
+      <YayaAvatar mood="idle" size={28} />
+      <p className="text-base font-medium leading-[1.65] text-foreground">我是芽芽，你的幼教工作助手</p>
+      <p className="max-w-sm text-sm leading-[1.65] text-muted-foreground">
         可以问幼教问题，也可以说“记一条小满的观察”。
         <br />
         AI 整理结果只是草稿，核对后才进入正式记录。
@@ -35,11 +35,11 @@ export function YayaThreadUnavailable() {
   const aui = useAui();
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center" data-yaya-thread-unavailable>
-      <p className="text-sm font-medium text-foreground">会话读取暂未完成</p>
-      <p className="text-xs leading-5 text-muted-foreground">
+      <p className="text-base font-medium text-foreground">会话读取暂未完成</p>
+      <p className="max-w-sm text-sm leading-[1.65] text-muted-foreground">
         这不代表没有数据，也不会显示成空会话；可稍后重新读取。
       </p>
-      <Button type="button" variant="outline" size="sm" className="h-11" onClick={() => aui.threads.reload()}>
+      <Button type="button" variant="outline" size="sm" className="mt-2 h-11 rounded-xl shadow-none" onClick={() => aui.threads.reload()}>
         <RefreshCw className="size-3.5" aria-hidden />
         重新读取
       </Button>
@@ -84,9 +84,9 @@ export function YayaThread({ className }: { className?: string }) {
   if (availability !== "ready") return <YayaThreadUnavailable />;
 
   return (
-    <ThreadPrimitive.Root className={cn("flex min-h-0 flex-1 flex-col", className)}>
+    <ThreadPrimitive.Root className={cn("flex min-h-0 flex-1 flex-col bg-background text-foreground", className)}>
       <ThreadPrimitive.Viewport
-        className="min-h-0 flex-1 overflow-y-auto px-3 py-3 [overflow-anchor:none]"
+        className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 [overflow-anchor:none] sm:px-5 sm:py-4"
         data-yaya-thread
         turnAnchor="bottom"
       >
@@ -94,6 +94,13 @@ export function YayaThread({ className }: { className?: string }) {
           <YayaEmpty />
         </AuiIf>
         <ThreadPrimitive.Messages>{() => <YayaMessage />}</ThreadPrimitive.Messages>
+        <ThreadPrimitive.ViewportFooter className="pointer-events-none sticky bottom-2 flex justify-center">
+          <ThreadPrimitive.ScrollToBottom asChild behavior="auto">
+            <Button type="button" variant="outline" size="icon" aria-label="回到最新消息" title="回到最新消息" className="pointer-events-auto size-11 rounded-full bg-background shadow-sm disabled:hidden">
+              <ArrowDown className="size-5" aria-hidden />
+            </Button>
+          </ThreadPrimitive.ScrollToBottom>
+        </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
   );

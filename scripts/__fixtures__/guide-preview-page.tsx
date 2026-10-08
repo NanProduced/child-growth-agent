@@ -30,12 +30,22 @@ declare global {
   }
 }
 
-type ScenarioKey = "rich" | "large" | "unavailable";
+type ScenarioKey = "rich" | "large" | "unavailable" | "notes";
+
+// Component-only double: distinguish notes belonging to two different records.
+const notesFixture = structuredClone(CHILD_EVIDENCE_BOOK_FIXTURE);
+const notesItem = notesFixture.goals.flatMap((goal) => goal.items).find((item) => item.item.id === "item.ui.language.1.3-4");
+const latestLink = notesItem?.links.find((link) => link.counts_toward_status);
+if (!notesItem || !latestLink) throw new Error("Missing notes fixture prerequisite");
+latestLink.teacher_note = "[合成] 新记录的备注";
+notesItem.links.push({ ...structuredClone(latestLink), link_id: "link.ui.notes.older", teacher_note: "[合成] 旧记录的备注",
+  basis: latestLink.basis.map((basis) => ({ ...basis, observation_id: "obs.ui.notes.older", observed_at: "2026-09-03", quote: "[合成] 这是较早的观察原文。" })) });
 
 const SCENARIOS: Record<ScenarioKey, { label: string; book: BookDto }> = {
   rich: { label: "完整示例", book: CHILD_EVIDENCE_BOOK_FIXTURE },
   large: { label: "大目录", book: CHILD_EVIDENCE_BOOK_LARGE_FIXTURE },
   unavailable: { label: "记录不可读", book: CHILD_EVIDENCE_BOOK_UNAVAILABLE_FIXTURE },
+  notes: { label: "备注归属（合成）", book: notesFixture },
 };
 
 const GOAL_ID = "goal.ui.language.2";

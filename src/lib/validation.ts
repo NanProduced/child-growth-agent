@@ -115,7 +115,8 @@ export const createChildSchema = z
     birth_date: z
       .string()
       .min(1, "请选择出生日期")
-      .regex(DATE_RE, "出生日期格式应为 YYYY-MM-DD"),
+      .regex(DATE_RE, "出生日期格式应为 YYYY-MM-DD")
+      .refine((value) => parseIsoDateStrict(value) !== null, "出生日期不是真实存在的日历日期"),
     /** 优先用 class_id 分班；class_name 只用于按名称匹配已存在的班级，不再作为唯一来源 */
     class_id: z.string().regex(UUID_RE, "班级标识不合法").optional(),
     class_name: z.string().min(1, "班级名称不能为空").max(50).optional(),
@@ -143,6 +144,7 @@ export const enrollChildSchema = z.object({
   start_date: z
     .string()
     .regex(DATE_RE, "分班日期格式应为 YYYY-MM-DD")
+    .refine((value) => parseIsoDateStrict(value) !== null, "分班日期不是真实存在的日历日期")
     .optional(),
 });
 

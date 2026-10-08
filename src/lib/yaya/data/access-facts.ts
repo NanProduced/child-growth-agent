@@ -229,6 +229,23 @@ export async function evaluateProposalItemAccess(
   }
 }
 
+/** Shared proposal-reference projection: only items associating this image count. */
+export async function evaluateProposalAttachmentAccess(
+  client: TransactionClient, principal: Principal, schoolId: string,
+  proposalId: string, attachmentId: string,
+): Promise<"full" | "historical_read_only" | null> {
+  const proposalItems = await client.query<ProposalItemAccessRow>(
+    `SELECT action, resource, resource_ref, attachment_associations
+       FROM yaya_proposal_items WHERE proposal_id = $1`, [proposalId],
+  );
+  const accesses: YayaProposalItemAccess[] = [];
+  for (const item of proposalItems.rows) {
+    if (!associationIds(item.attachment_associations).includes(attachmentId)) continue;
+    accesses.push(await evaluateProposalItemAccess(client, principal, schoolId, item));
+  }
+  return aggregateProposalRecordAccess(accesses);
+}
+
 /**
  * 聊天附件投影：未知/缺失授权一律拒绝；历史只读只返回元数据。
  * 查询失败（权限/存储服务不可用）返回 unavailable，不默认 full。
@@ -283,17 +300,7 @@ export async function evaluateAttachmentAccess(
         } else if (record.record_kind === "proposal") {
           // 提案引用必须按**当前业务来源**投影：仅凭“提案属于本人”不足以 full。
           // 同一提案内可能多条匹配同一附件：评估全部条目并取最佳合法投影（顺序无关）。
-          const proposalItems = await client.query<ProposalItemAccessRow>(
-            `SELECT action, resource, resource_ref, attachment_associations
-               FROM yaya_proposal_items WHERE proposal_id = $1`,
-            [record.record_id],
-          );
-          const accesses: YayaProposalItemAccess[] = [];
-          for (const item of proposalItems.rows) {
-            if (!associationIds(item.attachment_associations).includes(attachmentId)) continue;
-            accesses.push(await evaluateProposalItemAccess(client, principal, schoolId, item));
-          }
-          const best = aggregateProposalRecordAccess(accesses);
+          const best = await evaluateProposalAttachmentAccess(client, principal, schoolId, record.record_id, attachmentId);
           if (best !== null) {
             recordAccess.push({
               record_kind: "proposal",

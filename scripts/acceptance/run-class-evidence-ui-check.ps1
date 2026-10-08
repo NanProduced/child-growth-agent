@@ -18,6 +18,7 @@ param(
   [string]$OutDir = "",
   [string]$PlaywrightCoreDir = "",
   [string]$ChromePath = "",
+  [switch]$Production,
   [int]$ReadyTimeoutSeconds = 180
 )
 
@@ -86,13 +87,13 @@ $typeRoots = @(
 $typeSnapshot = @{}
 foreach ($typeRoot in $typeRoots) {
   if (-not (Test-Path -LiteralPath $typeRoot)) { continue }
-  Get-ChildItem -LiteralPath $typeRoot -File -ErrorAction SilentlyContinue |
+  Get-ChildItem -LiteralPath $typeRoot -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like "*.ts" } |
-    ForEach-Object { $typeSnapshot[$_.FullName] = Get-Content -LiteralPath $_.FullName -Raw }
+    ForEach-Object { $typeSnapshot[$_.FullName] = [System.IO.File]::ReadAllBytes($_.FullName) }
 }
 $nextEnvPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "next-env.d.ts"))
 $nextEnvSnapshot = if (Test-Path -LiteralPath $nextEnvPath -PathType Leaf) {
-  Get-Content -LiteralPath $nextEnvPath -Raw
+  [System.IO.File]::ReadAllBytes($nextEnvPath)
 } else {
   $null
 }
@@ -102,10 +103,16 @@ try {
   Copy-Item -LiteralPath $templatePath -Destination $routeFile
   $routeCreated = $true
 
+  if ($Production) {
+    & $pnpm exec next build
+    if ($LASTEXITCODE -ne 0) { throw "fixture production build failed" }
+  }
+
   $serverOut = Join-Path $OutDir "dev-out.log"
   $serverErr = Join-Path $OutDir "dev-err.log"
+  $nextArgs = if ($Production) { @("exec", "next", "start", "--hostname", "127.0.0.1", "--port", "$Port") } else { @("exec", "next", "dev", "--webpack", "--hostname", "127.0.0.1", "--port", "$Port") }
   $server = Start-Process -FilePath $pnpm `
-    -ArgumentList @("exec", "next", "dev", "--hostname", "127.0.0.1", "--port", "$Port") `
+    -ArgumentList $nextArgs `
     -WorkingDirectory $repoRoot `
     -RedirectStandardOutput $serverOut `
     -RedirectStandardError $serverErr `
@@ -136,6 +143,7 @@ try {
   if ($PlaywrightCoreDir) { $env:PLAYWRIGHT_CORE_DIR = [System.IO.Path]::GetFullPath($PlaywrightCoreDir) }
   if ($ChromePath) { $env:CHROME_PATH = [System.IO.Path]::GetFullPath($ChromePath) }
 
+  Start-Sleep -Seconds 3
   Write-Output "runner_pid=$runnerPid server_pid=$serverPid base_url=$baseUrl out=$OutDir"
   & $node $checkScript --base-url $baseUrl --out $OutDir
   $checkExit = $LASTEXITCODE
@@ -167,24 +175,27 @@ try {
   if ($routeCreated) {
     foreach ($typeRoot in $typeRoots) {
       if (-not (Test-Path -LiteralPath $typeRoot)) { continue }
-      Get-ChildItem -LiteralPath $typeRoot -File -ErrorAction SilentlyContinue |
+      Get-ChildItem -LiteralPath $typeRoot -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like "*.ts" } |
         ForEach-Object {
           $content = Get-Content -LiteralPath $_.FullName -Raw -ErrorAction SilentlyContinue
           if ($content -match "guide-preview-class") {
             if ($typeSnapshot.ContainsKey($_.FullName)) {
-              Set-Content -LiteralPath $_.FullName -Value $typeSnapshot[$_.FullName] -Encoding utf8 -NoNewline
+              [System.IO.File]::WriteAllBytes($_.FullName, $typeSnapshot[$_.FullName])
             } else {
               Remove-Item -LiteralPath $_.FullName -Force
             }
           }
         }
     }
+    # Build may remove a previously existing file completely; restore those too.
+    foreach ($entry in $typeSnapshot.GetEnumerator()) {
+      $parent = Split-Path -Parent $entry.Key
+      if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+      [System.IO.File]::WriteAllBytes($entry.Key, $entry.Value)
+    }
     if ($null -ne $nextEnvSnapshot -and (Test-Path -LiteralPath $nextEnvPath -PathType Leaf)) {
-      $currentNextEnv = Get-Content -LiteralPath $nextEnvPath -Raw
-      if ($currentNextEnv -ne $nextEnvSnapshot) {
-        Set-Content -LiteralPath $nextEnvPath -Value $nextEnvSnapshot -Encoding utf8 -NoNewline
-      }
+      [System.IO.File]::WriteAllBytes($nextEnvPath, $nextEnvSnapshot)
     }
   }
 

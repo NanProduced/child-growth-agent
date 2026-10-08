@@ -4,6 +4,9 @@ import { useEffect, useRef, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { ChildEvidenceBook } from "./child-evidence-book";
 import { ClassEvidenceOverview } from "./class-evidence-overview";
+import styles from "./class-evidence-overview.module.css";
+import { useTeacher } from "@/components/teacher-provider";
+import { authIdentityKey } from "@/lib/accounts/client";
 import {
   evidenceQueryString,
   recordObservationHref,
@@ -26,6 +29,9 @@ type Props = {
 
 /** 正式页面装配：只读 DTO + 记录相关观察的合法返回上下文；决定与模型调用不在本适配器内。 */
 export function EvidenceRouteClient(props: Props) {
+  const teacher = useTeacher();
+  const readerIdentityKey = !teacher.loading && teacher.auth.state.kind === "authenticated"
+    ? authIdentityKey(teacher.auth) : null;
   const router = useRouter();
   const root = useRef<HTMLDivElement>(null);
   const [pending, startTransition] = useTransition();
@@ -67,11 +73,12 @@ export function EvidenceRouteClient(props: Props) {
       : props.canRecordObservation === true;
 
   return (
-    <div ref={root} aria-busy={pending} className="min-w-0">
+    <div ref={root} aria-busy={pending} className={`${styles["route-shell"]} min-w-0`}>
       {pending ? <p role="status" className="mb-3 text-sm text-emerald-800">正在读取所选范围…</p> : null}
       {props.audience === "child" ? (
         <ChildEvidenceBook
           book={props.data}
+          focusedItemId={props.focusedItemId}
           semesters={props.semesters}
           onScopeChange={(scope) => navigate(scope, props.data.filters)}
           onFiltersChange={(filters) => navigate(props.data.scope, filters)}
@@ -81,6 +88,9 @@ export function EvidenceRouteClient(props: Props) {
         <ClassEvidenceOverview
           overview={props.data}
           semesters={props.semesters}
+          readerIdentityKey={readerIdentityKey}
+          onRevalidateIdentity={() => { void teacher.revalidate(); }}
+          onRefreshOverview={() => router.refresh()}
           onScopeChange={(scope) => navigate(scope, props.data.filters)}
           onFiltersChange={(filters) => navigate(props.data.scope, filters)}
           onRecordObservation={anyOperable ? recordObservation : undefined}

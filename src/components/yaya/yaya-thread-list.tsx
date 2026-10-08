@@ -41,12 +41,12 @@ function YayaThreadListItem() {
   const isMain = useAuiState((state) => state.threads.mainThreadId === state.threadListItem.id);
   const [confirmOpen, setConfirmOpen] = useState(false);
   return (
-    <ThreadListItemPrimitive.Root className="flex items-center gap-1 rounded-lg px-1">
-      <ThreadListItemPrimitive.Trigger className="flex min-h-11 min-w-0 flex-1 flex-col items-start justify-center rounded-lg px-2 py-1 text-left hover:bg-accent aria-[current=true]:bg-accent">
+    <ThreadListItemPrimitive.Root className="flex items-center gap-1 rounded-xl px-1 py-1">
+      <ThreadListItemPrimitive.Trigger className="flex min-h-11 min-w-0 flex-1 flex-col items-start justify-center gap-1 rounded-xl px-3 py-2 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary aria-[current=true]:bg-emerald-50 aria-[current=true]:text-emerald-950 motion-reduce:transition-none">
         <span className="w-full truncate text-sm text-foreground">
           <ThreadListItemPrimitive.Title fallback="未命名会话" />
         </span>
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-xs tabular-nums text-muted-foreground">
           {lastMessageAt !== undefined ? formatWhen(lastMessageAt) : "新会话"}
           {isMain ? " · 当前" : ""}
         </span>
@@ -56,7 +56,7 @@ function YayaThreadListItem() {
           type="button"
           variant="ghost"
           size="icon"
-          className="size-11 shrink-0 text-muted-foreground"
+          className="size-11 shrink-0 rounded-xl text-muted-foreground hover:text-rose-700"
           aria-label="删除会话"
           onClick={(event) => {
             event.preventDefault();
@@ -67,7 +67,7 @@ function YayaThreadListItem() {
         </Button>
       </ThreadListItemPrimitive.Delete>
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <AlertDialogContent>
+        <AlertDialogContent className="rounded-2xl">
           <AlertDialogHeader>
             <AlertDialogTitle>删除这个会话？</AlertDialogTitle>
             <AlertDialogDescription>
@@ -75,8 +75,9 @@ function YayaThreadListItem() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogCancel className="min-h-11 rounded-xl shadow-none">取消</AlertDialogCancel>
             <AlertDialogAction
+              className="min-h-11 rounded-xl shadow-none"
               onClick={() => {
                 const trigger = document.activeElement;
                 if (trigger instanceof HTMLElement) trigger.blur();
@@ -97,16 +98,16 @@ export function YayaThreadList({ className }: { className?: string }) {
   if (!mounted) return <div className={className} aria-busy="true"><p className="p-3 text-sm text-muted-foreground">正在读取历史会话…</p></div>;
   return (
     <ThreadListPrimitive.Root className={className}>
-      <div className="flex items-center justify-between px-3 py-2">
-        <h2 className="text-sm font-medium text-foreground">历史会话</h2>
+      <div className="flex items-center justify-between gap-2 px-4 py-3">
+        <h2 className="text-sm font-semibold text-foreground">历史会话</h2>
         <ThreadListPrimitive.New asChild>
-          <Button type="button" variant="outline" size="sm" className="h-11" data-yaya-new-thread>
+          <Button type="button" variant="outline" size="sm" className="h-11 rounded-xl shadow-none" data-yaya-new-thread>
             <MessageSquarePlus className="size-3.5" aria-hidden />
             新对话
           </Button>
         </ThreadListPrimitive.New>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-4">
         <ThreadListPrimitive.Items components={{ ThreadListItem: YayaThreadListItem }} />
       </div>
     </ThreadListPrimitive.Root>

@@ -1,0 +1,21 @@
+Use case: ui-mockup. Produce ONE high-fidelity derivative desktop application redesign, logical viewport 1440 x 1024, matching the established 芽芽观察 companion chat design in Image 1. Direction name: 可核对的记录.
+Image 1 is the new desktop companion design: preserve its clean readable Chinese sans typography, gentle green, warm white, brand and docked split-screen geometry. Image 2 is the original incumbent screenshot: use only for product identity and vocabulary, not its bad overlay or floating button. Image 3 is the existing sprout-face avatar: use tiny in the chat header, not decorative hero artwork.
+A real professional teacher AI workspace, precise shadcn-style controls and assistant-ui message hierarchy, no device/browser frame, no collage, no multiple alternatives, no competitor logos. Main page ~960px left, assistant ~480px right, separate columns with one thin rule. Left page stays visible and unobstructed. NEVER show a floating launch bubble over the open assistant. NEVER show a required child selector, business-module selector, source category form, model picker, voice control, rating, radar chart or diagnostic conclusion.
+Current date 2026-10-08. Everything is synthetic and a design proposal, not actual service evidence. Top app header preserve “芽芽观察”, “首页”“班级”“成长档案”“观察记录”, signed in “林老师 · 教师” (NOT admin because this frame prepares a teaching write).
+Left main: “小满的成长档案”, subtitle “向日葵班 · 中班”. Simple calm profile heading with generic small initial/avatar, no realistic child photograph. A grouped “最近观察” list of exactly TWO existing records: “10月7日 · 积木区” and “10月6日 · 区域活动”, each “已确认归档”. Short excerpts “积木倒塌后，他重新尝试。” and “他把底层换成了大积木。” Use just light rows, not nested cards. Below a quiet section “指南证据” with text “查看观察依据” and “已有相关线索”, no percentages, scores, achievement or invented medical measurements. Make main-page controls believable but secondary to the right-pane hero task.
+Assistant header consistent with Image 1, tiny sprout, “芽芽”, “幼教工作助手”, history/new-chat/expand/close icons.
+Thread: a right-aligned soft-neutral teacher bubble with EXACT text:
+“给小满记录今天的观察：在积木区，积木倒了后，小满把底层换成大积木，重新搭起来，还邀请阿依一起搭。”
+An assistant lead-in, borderless and readable:
+“已准备小满的观察，请核对后保存。”
+Then ONE clear standalone review card, no card-inside-card. Amber status “待你核对”, title “新观察原文”. Fields displayed as readable label/value rows, NOT pre-task selection forms:
+“幼儿  小满 · 向日葵班”
+“观察日期  2026-10-08”
+“情境  积木区”
+“原始观察”
+Quote block containing this exact text without any added punctuation or paraphrase:
+“在积木区，积木倒了后，小满把底层换成大积木，重新搭起来，还邀请阿依一起搭。”
+One plain line below: “本次只保存原文，不会确认归档。”
+Actions: one prominent green primary button “确认保存原文”, secondary outline “修改内容”, quiet text “稍后核对”. No green success tick yet, no “已保存”, no “已归档” for this pending item. Technical IDs are hidden; don't display UUIDs, JSON, revisions, approval fields or development controls.
+At viewport bottom, the same unified spacious composer, with optional removable chip “已引用：小满的成长档案” above writing area. The input is empty and shows placeholder “继续描述，或补充需要修改的内容…”. Bottom toolbar contains “添加”, “引用当前页”, and a visually DISABLED send arrow with muted low-contrast inactive treatment because input is empty. Input/card/buttons fully visible, no overlap, no bottom clipping. 14-16px body, 16px input, 44px min control hit areas in the intended implementation. Use purposeful whitespace and typography before borders; no heavy shadows.
+Small nonintrusive app-frame note “设计示例 · 合成数据”. Render Chinese accurately. Focus on trust, natural language and a teacher-understandable approval consequence, not feature inventory.

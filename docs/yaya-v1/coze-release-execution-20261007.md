@@ -41,6 +41,30 @@
 - GitHub只推本地已核无凭证的发布提交；不操作本地 main 未跟踪资产。
 - 平台 fetch/sync 后核源文件 blob与所选平台 commit，固定部署目标，不默认发布旧 7f54266，不把任意平台 merge 当已测版本。
 
-## 尚未完成（当前 checkpoint）
+## 正式部署与线上合成验证（完成于 2026-10-08）
 
-生产 AUTH Origin/媒体/模型配置、代码同步、固定提交发布、公开 HTTPS 浏览器和合成业务链路仍待执行。当前线上仍旧版本；管理员表已初始化但旧接口不能以新账号登录。模型预算已预登记15/20，余5；任何线上模型尝试和重试继续编号，不重置。真实图片推理尚未通过，不能从文本或 HTTP200 外推。
+- GitHub main / 发布源 `260c6f6e1cafdee5cbf1f43c7c350ddc5fa50b9e`；不改本地受保护 main、不 force/squash。平台私有旧历史没有推往 GitHub；恢复 ref 保留，源码普通 merge，无冲突。平台 merge/包裹身份不是源 Git SHA，最终发布页面明确选中原源提交。
+- 部署记录 `7693953170015518758`：Succeeded，commitHash 与源完整 SHA 相同。正式域名 `https://childgrowth.coze.site` 与 `https://snjs3ctb76.coze.site`。单实例 1 CPU/2GB，未同步开发库表/种子。
+- 生产普通变量已配置 AUTH_TRUSTED_ORIGINS（两正式 HTTPS 源）、AUTH_COOKIE_SECURE、AUTH_SCHOOL_ID、YAYA_PLATFORM_AUTH、文本 StepFun/图片 Coze、豆包 Mini、s3 和每 run 2 次模型尝试上限。COZE 系统身份/桶变量由平台提供，不手填、不导出运行时凭证。旧口令值没有重新启用授权。
+- 最终平台传输纯检查 35/35；engine29、API57、原 LLM7、validate、Next+tsup 构建通过。源提交的构建已完成，随后新增的线上验收脚本不改运行时。
+
+### 实际通过
+
+1. HTTPS 登录 API + 真实 Chrome 管理员/教师登录；Cookie HttpOnly/Secure/SameSite；匿名读取401、管理员教学写403、教师只看本轮独立班级/幼儿。
+2. 真实 multipart 上传合成红蓝 PNG，同幂等身份重传；扣子代理的 original/thumbnail/model 三对象均可授权读回；DB 为 ready+media/prod 内容地址；其他账号不能读取。
+3. 真实 Coze `doubao-seed-2-0-mini-260215` 一次模型调用，8636 input/40 output，正确答“左红右蓝”，合法 NDJSON answered。不是本地对象模式或模型替身。
+4. 真实 StepFun `step-5-preview` 一次调用，7218 input/1610 output，生成 create_observation 提案；未批准时业务观察0。真实 Chrome 按原 run 恢复原提案→完整对象/日期/原文核对→明确批准→真实 operations HTTP 回执 committed；DB 恰好一条 draft，raw_text 与**浏览器批准的卡片**逐字一致。没有声称 draft 已整理/已归档。
+5. Chrome 1440/1024/390 实际页面无横向溢出，输入框可见且高度≥44；截图位于受保护、gitignored 的 release-0cd3dab1 目录。不是 fixture 浏览器证据。
+6. 所有原 children7/observations6/classes3/enrollments8 的原列逐字节摘要与备份一致。新增合成数据按独立 ID 登记，没有回填旧证据。
+
+入口 `scripts/yaya/check-release-live.ts`（必须显式 stage；不会自动调用模型）。累计断言含重复登录/旧数据核对，不能当独立场景总数。模型新增实际2次；账本保守预登记4个槽位（16–19），其中17/19没有派发。此前15次全部计入，旧40不变；本轮不再加测。使用最多2次/run限制，避免隐藏规划重试越过总授权。
+
+### 发现与限制（不改预期冒充全通过）
+
+- P1：看图回答当场正常，重新打开会话显示“历史消息当前不可读”。已定位 runtime/terminal-message 的 image dependency 被计 unmapped，安全降 unknown；图片来源尚不能通过冻结的 child/class/observation 来源模型无损映射。不得用 independently_readable=true 或默认 bound 绕过。原 run 查询仍可核验，待来源/历史 owner 返修。
+- P2：1440 桌面侧栏展开时浮动芽芽入口仍显示，遮挡输入区/发送区；手机已单独隐藏。批准后上方旧“尚不能证明保存”摘要未同步，下面新回执已显示已保存。待 UI 共享状态/入口展示修复。
+- 文本抽取检查：初始严格 raw 检查 FAIL，提案多带一个句号。实际测试消息拼接本身有双句号（原文末句号+指令分隔句号），不能把该输入歧义定性为模型必然改写。未把失败改成 PASS；另行由真实教师核对卡选择采用提案文本，再验证**已批准文本→DB**一致。正式使用仍须逐字核对，不能自动放行。
+- NOT_RUN：真实 provider 的整理→追问→正式确认归档整链、复杂多人/全部工具质量、真实幼儿图片、软键盘真机/Safari/屏幕阅读器、代理长连接边界、多实例限流/生产安全认证。线上 smoke 通过不等于全业务/全模型质量/全安全验收。
+- 合成班级/幼儿/一条 draft、聊天及三对象保留供复核，精确身份在 live-smoke.json；测试教师已停用、全部会话撤销。不是“零测试数据残留”。不存在临时本地服务器/容器；备份、凭证与截图受保护且不提交。
+
+本轮完成固定源版本上线与已列线上验证。后续优先关闭图片历史投影与桌面入口遮挡，再扩大真实模型业务验收；不得退回已退役的旧口令版本。

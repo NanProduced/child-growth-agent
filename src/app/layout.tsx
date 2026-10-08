@@ -4,9 +4,7 @@ import './globals.css';
 import '@/components/home-v2/home-fonts.css';
 import { Toaster } from '@/components/ui/sonner';
 import { TeacherProvider } from '@/components/teacher-provider';
-import { TopNav } from '@/components/top-nav';
-import { YayaEntry } from '@/components/yaya/yaya-entry';
-import { YayaPanel } from '@/components/yaya/yaya-panel';
+import { YayaAppShell } from '@/components/yaya/yaya-app-shell';
 import { YayaSurface } from '@/components/yaya/yaya-provider';
 import { resolveServerAuth } from '@/lib/accounts/access';
 
@@ -34,10 +32,7 @@ export default async function RootLayout({
       <body className="min-h-screen bg-background antialiased">
         <TeacherProvider initial={initial}>
           <YayaSurface auth={initial}>
-            <TopNav />
-            <main className="mx-auto w-full max-w-[1536px] px-4 pb-16 pt-6 sm:px-6 lg:px-10">{children}</main>
-            <YayaEntry auth={initial} />
-            <YayaPanel auth={initial} />
+            <YayaAppShell auth={initial}>{children}</YayaAppShell>
           </YayaSurface>
         </TeacherProvider>
         <Toaster richColors position="top-center" />

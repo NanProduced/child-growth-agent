@@ -16,8 +16,10 @@ import {
   useRemoteThreadListRuntime,
   type AssistantRuntime,
 } from "@assistant-ui/react";
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { usePathname } from "next/navigation";
 
+import { useTeacher } from "@/components/teacher-provider";
 import { authIdentityKey } from "@/lib/accounts/client";
 import type { AuthStatusResponse } from "@/lib/accounts/types";
 
@@ -39,6 +41,7 @@ export function useYayaStore(): YayaClientStore {
 interface SurfaceState {
   open: boolean;
   setOpen: (open: boolean) => void;
+  isMobile: boolean;
 }
 const SurfaceContext = createContext<SurfaceState | null>(null);
 
@@ -109,7 +112,6 @@ function YayaRuntimeMount({ store, children }: { store: YayaClientStore; childre
  * identityKey 变化时重建 store 与运行时；TeacherProvider 同步会先展示更新状态。
  */
 export function YayaSurface({
-  auth,
   children,
   defaultOpen = false,
 }: {
@@ -118,8 +120,20 @@ export function YayaSurface({
   /** 仅用于预览/演示：初始打开面板。 */
   defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
-  const surface = useMemo(() => ({ open, setOpen }), [open]);
+  const { auth } = useTeacher();
+  const [requestedOpen, setOpen] = useState(defaultOpen);
+  const [isMobile, setIsMobile] = useState(false);
+  const pathname = usePathname();
+  const isWorkspace = pathname === "/assistant" || pathname?.startsWith("/assistant/") === true;
+  const open = requestedOpen && !isWorkspace;
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 1023px)");
+    const update = () => setIsMobile(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  const surface = useMemo(() => ({ open, setOpen, isMobile }), [open, isMobile]);
   const identityKey = authIdentityKey(auth);
   const store = useMemo(() => {
     const principal = auth.state.kind === "authenticated" ? auth.state.principal : null;

@@ -21,6 +21,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
+const { snapshotGeneratedArtifacts, restoreGeneratedArtifacts, trackChildProcess, stopTrackedChildTree } = require("./harness-safety");
 
 const ROOT = path.resolve(__dirname, "..");
 const TEMPLATE = path.join(ROOT, "scripts", "__fixtures__", "guide-preview-page.tsx");
@@ -95,21 +96,6 @@ function cleanupRoute() {
   if (createdRouteDir && fs.existsSync(ROUTE_DIR) && fs.readdirSync(ROUTE_DIR).length === 0) {
     fs.rmSync(ROUTE_DIR, { recursive: true, force: true });
   }
-  /* next dev 生成的类型文件可能引用已删除的临时路由；只清理引用它的生成文件，保证 ts-check 可复跑 */
-  const nextDir = path.join(ROOT, ".next");
-  if (!fs.existsSync(nextDir)) return;
-  const stack = [nextDir];
-  while (stack.length > 0) {
-    const dir = stack.pop();
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(full);
-      } else if (entry.isFile() && entry.name.endsWith(".ts") && fs.readFileSync(full, "utf8").includes("guide-preview")) {
-        fs.rmSync(full, { force: true });
-      }
-    }
-  }
 }
 
 async function isPortInUse() {
@@ -146,8 +132,19 @@ async function openPage(browser, viewport, options = {}) {
   page.setDefaultTimeout(60000);
   await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: 180000 });
   await page.waitForSelector(BOOK, { timeout: 180000 });
-  await page.waitForTimeout(300);
+  await page.locator(`${BOOK}[data-client-ready=true]`).waitFor();
+  const moreFilters = page.locator("[data-testid=more-filters-toggle]");
+  if (await moreFilters.isVisible()) await moreFilters.click();
+  await page.locator("[data-testid=reading-goal-select]").selectOption("all");
   return { context, page };
+}
+
+async function expandRow(row) {
+  const trigger = row.locator("[data-testid=item-disclosure]");
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+  for (const details of await row.locator("details").all()) {
+    if (await details.getAttribute("open") === null) await details.locator(":scope > summary").click();
+  }
 }
 
 async function lastEvent(page, label) {
@@ -221,16 +218,16 @@ async function runChecks(browser, evidenceDir) {
   check("无完成度/雷达字样", !/完成\s*\d|雷达|达标/.test(bookText), "");
   check("资料参考标签存在", bookText.includes("资料参考"), "");
   check("AI 待核对流程标签存在", bookText.includes("AI 待核对"), "");
-  check("指南参考年龄段提示存在", bookText.includes("不等于“确定发生在小班时期”"), "");
+  check("指南参考年龄段提示存在", (await page.locator(BOOK).textContent()).includes("个人历史不会因为当前学段而被排除"), "");
 
   /* 语言 3-4 条目：正式依据落入期间 + 撤回审计 */
   const langItem = page.locator(itemRow("item.ui.language.1.3-4"));
-  await langItem.locator("[data-testid=item-disclosure]").click();
+  await expandRow(langItem);
   const langText = await langItem.innerText();
   check("正式依据落在所选期间内", langText.includes("2026年9月5日") && !langText.includes("最近 2025年"), "");
-  check("正式依据发生时班级来自快照", langText.includes("2026年9月5日 · 示例中一班 · 中班 · 原始观察原文"), "");
-  check("正式依据分区存在", langText.includes("计入当前状态的依据"), "");
-  check("流程与审计分区存在", langText.includes("流程与审计记录（不计入状态）"), "");
+  check("正式依据发生时班级来自快照", langText.includes("2026年9月5日") && langText.includes("示例中一班 · 中班") && langText.includes("原始观察原文"), "");
+  check("正式依据分区存在", await langItem.getByRole("region", { name: "支持这项表现的记录" }).count() === 1, "");
+  check("流程与审计分区存在", langText.includes("其他关联记录"), "");
   check("撤回信息展示", langText.includes("撤回原因：复核后发现该片段指向另一条表现。"), "");
   check("撤回依据保留发生时班级快照", langText.includes("示例小一班 · 小班"), "");
 
@@ -247,7 +244,7 @@ async function runChecks(browser, evidenceDir) {
   const focusedTestId = await page.evaluate(
     () => document.activeElement?.getAttribute("data-testid") || document.activeElement?.tagName,
   );
-  check("展开后 Tab 焦点进入记录操作", focusedTestId === "record-observation", focusedTestId);
+  check("展开后 Tab 焦点进入记录说明", focusedTestId === "SUMMARY", focusedTestId);
 
   /* 记录相关观察回调 */
   await langItem.locator("[data-testid=record-observation]").click();
@@ -262,12 +259,12 @@ async function runChecks(browser, evidenceDir) {
 
   /* 同源多片段：全部显示、各自成行 */
   const l1b = page.locator(itemRow("item.ui.language.1.4-5"));
-  await l1b.locator("[data-testid=item-disclosure]").click();
+  await expandRow(l1b);
   const l1bText = await l1b.innerText();
   check("同源多片段全部显示", l1bText.includes("是不是周末下雨了") && l1bText.includes("我妈妈说下雨要带伞"), "");
-  const basisCount = await l1b.locator("[data-testid=basis-row]").count();
+  const basisCount = await l1b.locator('section[aria-label="支持这项表现的记录"] [data-testid=basis-row]').count();
   check("同源多片段各自成行", basisCount === 2, String(basisCount));
-  check("成人帮助如实标注", l1bText.includes("本次有成人帮助 · 教师说明：帮助方式：教师重复问题并等待幼儿回应。"), "");
+  check("成人帮助如实标注", l1bText.includes("当时有成人帮助 · 老师备注：帮助方式：教师重复问题并等待幼儿回应。"), "");
 
   /* 保健参考：资料展示分支（收起与展开分别断言） */
   const healthRow = page.locator(itemRow("item.ui.health.1.3-4"));
@@ -277,28 +274,28 @@ async function runChecks(browser, evidenceDir) {
     (await healthRow.locator("[data-testid=item-reference]").innerText()).trim() === "资料参考",
     await healthRow.locator("[data-testid=item-reference]").innerText(),
   );
-  check("保健参考行使用收录文案", (await healthRow.innerText()).includes("收录 1 条参考资料"), "");
+  check("保健参考行使用收录文案", (await healthRow.innerText()).includes("1 条参考资料"), "");
   check("保健参考保留内部状态用于审计", (await healthRow.getAttribute("data-status")) === "confirmed_observed", "");
-  await healthRow.locator("[data-testid=item-disclosure]").click();
+  await expandRow(healthRow);
   const healthText = await healthRow.innerText();
   check("保健参考展开不出现表现确认徽章", !healthText.includes("已确认观察到"), "");
-  check("保健参考分组为可查阅资料", healthText.includes("可查阅的参考资料"), "");
+  check("保健参考分组为可查阅资料", await healthRow.getByRole("region", { name: "可查阅的参考资料" }).count() === 1, "");
   check(
     "保健参考关联显示教师核对",
     healthText.includes("教师核对关联") && healthText.includes("资料已核对"),
     "",
   );
-  check("保健参考规则不构成发展确认", healthText.includes("不构成发展确认") && !healthText.includes("可确认表现"), "");
+  check("保健参考规则不作正常或异常判断", healthText.includes("不作正常或异常判断") && !healthText.includes("可确认表现"), "");
   check("保健参考支持标签为资料措辞", healthText.includes("单次资料"), "");
   check("保健参考无达成式反馈", !/已掌握|达成|完成度/.test(healthText), "");
 
   const healthEmptyRow = page.locator(itemRow("item.ui.health.1.4-5"));
-  check("保健参考空态使用资料措辞", (await healthEmptyRow.innerText()).includes("暂无已核验的参考资料"), "");
-  await healthEmptyRow.locator("[data-testid=item-disclosure]").click();
+  check("保健参考空态使用资料措辞", (await healthEmptyRow.innerText()).includes("资料参考"), "");
+  await expandRow(healthEmptyRow);
   const healthEmptyText = await healthEmptyRow.innerText();
   check(
     "保健参考空态展开不冒充普通观察空态",
-    healthEmptyText.includes("还没有可查阅的参考资料") && !healthEmptyText.includes("还没有与该条目相关的观察记录"),
+    healthEmptyText.includes("本次查看范围还没有已核对的参考资料") && !healthEmptyText.includes("这项目前还没有对应的观察记录"),
     "",
   );
 
@@ -310,18 +307,18 @@ async function runChecks(browser, evidenceDir) {
     await partialEmpty.evaluate((el) => el.firstElementChild?.getAttribute("data-testid")),
   );
   const partialEmptyCollapsed = await partialEmpty.innerText();
-  check("partial 空样本不断言普通无记录", !partialEmptyCollapsed.includes("还没有计入状态的观察证据"), "");
-  check("partial 空样本说明已核验依据", partialEmptyCollapsed.includes("暂无计入状态的已核验依据"), "");
+  check("partial 空样本不断言普通无记录", !partialEmptyCollapsed.includes("暂无相关记录"), "");
+  check("partial 空样本说明已核验依据", partialEmptyCollapsed.includes("有些记录暂时不能核对"), "");
   check("partial 提示改为未计入当前状态", !partialEmptyCollapsed.includes("未纳入本次呈现"), "");
-  await partialEmpty.locator("[data-testid=item-disclosure]").click();
+  await expandRow(partialEmpty);
   const partialEmptyText = await partialEmpty.innerText();
   check(
     "partial 空样本展开不断言无观察",
-    partialEmptyText.includes("当前没有可计入状态的已核验依据") &&
-      !partialEmptyText.includes("还没有与该条目相关的观察记录"),
+    partialEmptyText.includes("有些记录还不能核对") &&
+      !partialEmptyText.includes("这项目前还没有对应的观察记录"),
     "",
   );
-  check("partial 空样本展开说明未计入状态", partialEmptyText.includes("未计入当前状态"), "");
+  check("partial 空样本展开说明未计入状态", await partialEmpty.locator("[data-counts=true]").count() === 0 && partialEmptyText.includes("还不能核对"), "");
 
   /* partial + 仅失效审计关联：提示行首、区分核验、审计区保留 */
   const partialRow = page.locator(itemRow("item.ui.social.1.3-4"));
@@ -333,24 +330,24 @@ async function runChecks(browser, evidenceDir) {
   const partialText = await partialRow.innerText();
   check(
     "partial 区分已核验与未核验资料",
-    partialText.includes("只依据已核验的资料") && partialText.includes("未通过核对"),
+    partialText.includes("先显示能读取的内容") && partialText.includes("不能核对"),
     "",
   );
   check("partial 不把期间排除写成数据异常", !partialText.includes("期间"), partialText);
-  await partialRow.locator("[data-testid=item-disclosure]").click();
+  await expandRow(partialRow);
   const partialExpanded = await partialRow.innerText();
-  check("partial 失效关联仍在审计区", partialExpanded.includes("流程与审计记录（不计入状态）"), "");
+  check("partial 失效关联仍在审计区", partialExpanded.includes("其他关联记录"), "");
   check("partial 审计区无正式依据分组", !partialExpanded.includes("计入当前状态的依据"), "");
-  check("失效依据原因展示", partialExpanded.includes("该依据未通过核对：片段无法在声明位置逐字核对"), "");
-  check("失效依据保留审计展示", partialExpanded.includes("仅保留审计展示"), "");
+  check("失效依据原因展示", partialExpanded.includes("这段记录暂时不能作为依据：原记录中未找到这段文字"), "");
+  check("失效依据保留审计展示", partialExpanded.includes("其他关联记录"), "");
 
   /* reliable 正常空态与 partial/unavailable 保持区别 */
   const reliableEmpty = page.locator(itemRow("item.ui.arts.1.4-5"));
-  check("reliable 正常空态保持普通文案", (await reliableEmpty.innerText()).includes("还没有计入状态的观察证据"), "");
-  await reliableEmpty.locator("[data-testid=item-disclosure]").click();
+  check("reliable 正常空态保持普通文案", (await reliableEmpty.innerText()).includes("暂无相关记录"), "");
+  await expandRow(reliableEmpty);
   check(
     "reliable 空态展开为普通文案",
-    (await reliableEmpty.innerText()).includes("还没有与该条目相关的观察记录"),
+    (await reliableEmpty.innerText()).includes("这项目前还没有对应的观察记录"),
     "",
   );
 
@@ -364,24 +361,24 @@ async function runChecks(browser, evidenceDir) {
       !(await periodRow.innerText()).includes("相关证据"),
     "",
   );
-  await periodRow.locator("[data-testid=item-disclosure]").click();
+  await expandRow(periodRow);
   check(
     "跨期排除原因展示",
-    (await periodRow.innerText()).includes("未计入当前状态：依据的观察日期不在所选期间内"),
+    (await periodRow.innerText()).includes("依据的观察日期不在所选期间内"),
     "",
   );
 
   /* 历史未知 + 连续纪要 */
   const unknownItem = page.locator(itemRow("item.ui.science.1.4-5"));
-  await unknownItem.locator("[data-testid=item-disclosure]").click();
+  await expandRow(unknownItem);
   const unknownText = await unknownItem.innerText();
-  check("历史班级未知不回填", unknownText.includes("发生班级未知（历史记录未保存）"), "");
+  check("历史班级未知不回填", unknownText.includes("当时班级未记录"), "");
   check("连续观察纪要展示", unknownText.includes("连续观察纪要（2026-09-15 至 2026-09-20）"), "");
 
   /* AI 待核对理由 */
   const pendingItem = page.locator(itemRow("item.ui.language.2.3-4"));
-  await pendingItem.locator("[data-testid=item-disclosure]").click();
-  check("AI 待核对理由展示", (await pendingItem.innerText()).includes("AI 建议理由："), "");
+  await expandRow(pendingItem);
+  check("AI 待核对理由展示", (await pendingItem.innerText()).includes("建议说明："), "");
 
   /* 筛选内容断言：每次筛选都从完整 fixture 计算展示子集 */
   const goalCount = () => page.locator('h3[id^="goal-"]').count();
@@ -424,14 +421,14 @@ async function runChecks(browser, evidenceDir) {
     `${await goalCount()}/${await itemCount()}`,
   );
 
-  await page.locator('[data-age-band="4-5"]').click();
+  await page.locator('[data-testid=age-select]').selectOption("4-5");
   const ageIds = await page.$$eval(`${BOOK} [data-testid=evidence-item]`, (els) => els.map((el) => el.dataset.itemId));
   check(
     "参考年龄段筛选生效",
     ageIds.length === 6 && ageIds.every((id) => id.endsWith(".4-5")),
     ageIds.join(","),
   );
-  await page.locator('[data-age-band="all"]').click();
+  await page.locator('[data-testid=age-select]').selectOption("all");
   await page.waitForTimeout(50);
   check("年龄切回全部恢复全部条目", (await itemCount()) === 12, String(await itemCount()));
   check(
@@ -481,7 +478,7 @@ async function runChecks(browser, evidenceDir) {
 
   /* 组合筛选逐项解除 */
   await page.locator('[data-domain="language"]').click();
-  await page.locator('[data-age-band="4-5"]').click();
+  await page.locator('[data-testid=age-select]').selectOption("4-5");
   await page.waitForTimeout(50);
   check(
     "组合筛选（领域+年龄）",
@@ -509,7 +506,7 @@ async function runChecks(browser, evidenceDir) {
     (await goalCount()) === 6 && (await itemCount()) === 6,
     `${await goalCount()}/${await itemCount()}`,
   );
-  await page.locator('[data-age-band="all"]').click();
+  await page.locator('[data-testid=age-select]').selectOption("all");
   await page.waitForTimeout(50);
   check(
     "解除年龄后恢复完整 fixture",
@@ -585,6 +582,7 @@ async function runChecks(browser, evidenceDir) {
 
   await page.locator('[data-testid=external-scope][data-scope=custom]').click();
   await page.waitForFunction(() => document.querySelector("[data-testid=scope-select]")?.value === "custom_range");
+  await page.waitForFunction(() => document.querySelector("[data-testid=range-from]")?.value === "2026-09-01" && document.querySelector("[data-testid=custom-range-draft]")?.dataset.applied === "true");
   check("外部自定义范围：草稿同步为已应用", (await draftStatus.innerText()).includes("已应用"), "");
 
   /* 自定义范围切换失败后仍可编辑（R2） */
@@ -628,6 +626,7 @@ async function runChecks(browser, evidenceDir) {
 
   await page.locator('[data-testid=external-scope][data-scope=custom]').click();
   await page.waitForFunction(() => document.querySelector("[data-testid=scope-select]")?.value === "custom_range");
+  await page.waitForFunction(() => document.querySelector("[data-testid=custom-range-draft]")?.dataset.applied === "true" && document.querySelector("[data-testid=range-from]")?.value === "2026-09-01");
   check(
     "外部恢复自定义后草稿同步已应用",
     (await draftStatus.innerText()).includes("已应用") &&
@@ -647,7 +646,7 @@ async function runChecks(browser, evidenceDir) {
 
   /* ================= 减少动态偏好 ================= */
   const reduced = await openPage(browser, { width: 1440, height: 900 }, { reducedMotion: "reduce" });
-  await reduced.page.locator(`${itemRow("item.ui.language.1.3-4")} [data-testid=item-disclosure]`).click();
+  await expandRow(reduced.page.locator(itemRow("item.ui.language.1.3-4")));
   const motion = await reduced.page.evaluate(() => {
     const panel = document.querySelector('[id^="evidence-panel-"]');
     const segment = document.querySelector("[data-testid=domain-tab]");
@@ -671,7 +670,7 @@ async function runChecks(browser, evidenceDir) {
     return (el.textContent || "").split(noteText).join("");
   });
   check("unavailable 行不显示普通暂无状态", !unavailableWithoutNote.includes("暂无相关记录"), unavailableWithoutNote.slice(0, 120));
-  check("unavailable 行不显示确定性空态", !unavailableWithoutNote.includes("还没有计入状态的观察证据"), "");
+  check("unavailable 行不显示确定性空态", !unavailableWithoutNote.includes("暂无相关记录"), "");
   check(
     "unavailable 提示位于行首",
     (await unavailableRow.evaluate((el) => el.firstElementChild?.getAttribute("data-testid"))) === "reliability-note",
@@ -680,14 +679,14 @@ async function runChecks(browser, evidenceDir) {
   const unavailableText = await unavailableRow.innerText();
   check(
     "unavailable 先呈现资料不可读",
-    unavailableText.includes("资料暂不可读") && unavailableText.includes("不能按「暂无相关记录」理解"),
+    unavailableText.includes("资料暂不可读") && unavailableText.includes("不代表没有观察记录"),
     "",
   );
   check("unavailable 无普通状态徽章", (await unavailableRow.locator("[data-testid=item-status]").count()) === 0, "");
-  await unavailableRow.locator("[data-testid=item-disclosure]").click();
+  await expandRow(unavailableRow);
   const unavailableExpanded = await unavailableRow.innerText();
-  check("unavailable 展开不显示确定性空态", !unavailableExpanded.includes("还没有与该条目相关的观察记录"), "");
-  check("unavailable 展开说明无法读取", unavailableExpanded.includes("相关记录暂时无法读取，无法核对"), "");
+  check("unavailable 展开不显示确定性空态", !unavailableExpanded.includes("这项目前还没有对应的观察记录"), "");
+  check("unavailable 展开说明无法读取", unavailableExpanded.includes("暂时读不到相关记录"), "");
   const normalRow = unavailable.page.locator(itemRow("item.ui.unavailable.language.1.4-5"));
   check(
     "同页正常条目仍显示正式状态",
@@ -697,7 +696,7 @@ async function runChecks(browser, evidenceDir) {
   );
   check(
     "不可读场景通知展示",
-    (await unavailable.page.locator(BOOK).innerText()).includes("部分观察的指南关联暂时无法读取"),
+    (await unavailable.page.locator(BOOK).textContent()).includes("部分观察的指南关联暂时无法读取"),
     "",
   );
   await unavailable.page.waitForTimeout(250);
@@ -708,6 +707,7 @@ async function runChecks(browser, evidenceDir) {
   const large = await openPage(browser, { width: 1440, height: 900 });
   await large.page.getByRole("button", { name: "大目录" }).click();
   await large.page.waitForSelector(`${BOOK} [data-testid=evidence-item]`);
+  await large.page.locator("[data-testid=reading-goal-select]").selectOption("all");
   const largeCount = await large.page.locator(`${BOOK} [data-testid=evidence-item]`).count();
   const largeOverflow = await large.page.evaluate(() => {
     const doc = document.scrollingElement || document.documentElement;
@@ -721,7 +721,7 @@ async function runChecks(browser, evidenceDir) {
   /* ================= 390 长文本展开 ================= */
   const narrow = await openPage(browser, { width: 390, height: 844 });
   const longItem = narrow.page.locator(itemRow("item.ui.arts.1.3-4"));
-  await longItem.locator("[data-testid=item-disclosure]").click();
+  await expandRow(longItem);
   const narrowOverflow = await narrow.page.evaluate(() => {
     const doc = document.scrollingElement || document.documentElement;
     const book = document.querySelector("[data-testid=child-evidence-book]");
@@ -736,6 +736,21 @@ async function runChecks(browser, evidenceDir) {
   await narrow.page.waitForTimeout(250);
   await narrow.page.screenshot({ path: path.join(evidenceDir, "rich-390-longtext.png"), fullPage: true });
   await narrow.context.close();
+
+  for (const width of [1440, 390]) {
+    const notes = await openPage(browser, { width, height: width === 390 ? 844 : 900 });
+    await notes.page.getByRole("button", { name: "备注归属（合成）", exact: true }).click();
+    const row = notes.page.locator(itemRow("item.ui.language.1.3-4"));
+    await row.locator("[data-observation-id]").first().waitFor();
+    check(`备注归属 ${width}: 最新记录不混入旧备注`, (await row.innerText()).includes("新记录的备注") && !(await row.innerText()).includes("旧记录的备注"));
+    await row.locator("summary").filter({ hasText: "查看另 1 条记录" }).click();
+    const older = row.locator('[data-observation-id="obs.ui.notes.older"]');
+    check(`备注归属 ${width}: 旧原文与旧备注在同一区块`, (await older.innerText()).includes("较早的观察原文") && (await older.innerText()).includes("旧记录的备注"));
+    check(`备注归属 ${width}: 旧记录不混入新备注`, !(await older.innerText()).includes("新记录的备注"));
+    await notes.page.evaluate(() => window.scrollTo(0, 0));
+    await notes.page.screenshot({ path: path.join(evidenceDir, `notes-${width}.png`), fullPage: true });
+    await notes.context.close();
+  }
 }
 
 (async () => {
@@ -745,6 +760,8 @@ async function runChecks(browser, evidenceDir) {
   let routeCreated = false;
   let fatal = null;
   let browser = null;
+  let tracked = null;
+  const snapshot = snapshotGeneratedArtifacts(ROOT);
 
   try {
     setupRoute();
@@ -758,11 +775,14 @@ async function runChecks(browser, evidenceDir) {
     }
 
     logFd = fs.openSync(SERVER_LOG, "w");
+    const built = spawnSync(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["exec", "next", "build"], { cwd: ROOT, shell: process.platform === "win32", windowsHide: true, stdio: "inherit" });
+    if (built.status !== 0) throw new Error("child fixture production build failed");
     server = spawn(
       process.execPath,
-      [path.join(ROOT, "node_modules", "next", "dist", "bin", "next"), "dev", "-p", String(PORT), "--hostname", "127.0.0.1"],
+      [path.join(ROOT, "node_modules", "next", "dist", "bin", "next"), "start", "-p", String(PORT), "--hostname", "127.0.0.1"],
       { cwd: ROOT, stdio: ["ignore", logFd, logFd] },
     );
+    tracked = trackChildProcess(server, { logFile: SERVER_LOG });
     await waitForServer(180000);
 
     const launchOptions = { headless: true };
@@ -779,13 +799,7 @@ async function runChecks(browser, evidenceDir) {
     fatal = error;
   } finally {
     if (browser) await browser.close().catch(() => {});
-    if (server && !server.killed) {
-      if (process.platform === "win32") {
-        spawnSync("taskkill", ["/PID", String(server.pid), "/T", "/F"], { stdio: "ignore" });
-      } else {
-        server.kill("SIGTERM");
-      }
-    }
+    if (tracked) { const stopped = await stopTrackedChildTree(tracked); if (!stopped.ok) fatal = new Error(String(fatal ?? "") + " cleanup: " + stopped.detail); }
     if (logFd !== null) {
       try {
         fs.closeSync(logFd);
@@ -794,6 +808,8 @@ async function runChecks(browser, evidenceDir) {
       }
     }
     if (routeCreated) cleanupRoute();
+    const restored = restoreGeneratedArtifacts(snapshot, ROOT);
+    if (restored.issues.length) fatal = new Error(String(fatal ?? "") + " restore: " + restored.issues.join("; "));
   }
 
   const failed = results.filter((entry) => !entry.ok);

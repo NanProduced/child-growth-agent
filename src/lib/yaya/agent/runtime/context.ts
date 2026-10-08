@@ -16,6 +16,7 @@ import { loadAccountsConfig } from '@/lib/accounts/config';
 import type { HeaderCarrier } from '@/lib/accounts/guards';
 import type { AccessAction, AccessResource, Principal } from '@/lib/accounts/types';
 import { withPrivateRead, yayaDataRepository } from '@/lib/yaya/data';
+import { pageFocusForModel, quoteFromReferenceFragment } from '@/lib/yaya/page-reference';
 import { projectMessageRow } from '@/lib/yaya/data/projection';
 import type { YayaMessageRow } from '@/lib/yaya/data/rows';
 import { bindDataAttachmentMetadataPort } from '@/lib/media/data-adapter';
@@ -155,7 +156,12 @@ async function loadHistory(
   for (const message of view.messages) {
     if (message.role !== 'user' && message.role !== 'assistant') continue;
     const text = message.fragments
-      .map((fragment) => fragment.text)
+      .filter((fragment) => fragment.visibility === 'full')
+      .map((fragment) => {
+        if (!fragment.fragment_id.endsWith(':page-focus')) return fragment.text;
+        const focus = quoteFromReferenceFragment(fragment.text);
+        return focus?.yayaPage.owner_account_id === state.run.owner_account_id ? pageFocusForModel(focus) : null;
+      })
       .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
       .join('\n');
     if (text.trim().length === 0) continue;
@@ -177,6 +183,21 @@ async function loadHistory(
         fragment_id: fragment.fragment_id,
         projection: 'any',
       });
+      if (fragment.fragment_id.endsWith(':page-focus')) {
+        const focus = quoteFromReferenceFragment(fragment.text);
+        if (focus?.yayaPage.owner_account_id !== state.run.owner_account_id) continue;
+        for (const resource of focus.yayaPage.sources) {
+          const kind = resource.kind;
+          const resourceId = kind === 'child' ? resource.child_id : kind === 'class' ? resource.class_id : resource.observation_id;
+          const ref: YayaSourceRef = { kind: 'tool_result', ref_id: kind + ':' + resourceId, label: focus.yayaPage.title, derived_from: null };
+          const key = sourceKey(ref);
+          if (!sourceKeys.has(key)) { sourceKeys.add(key); sources.push(ref); }
+          dependencies.push({
+            ref, tool: kind === 'child' ? 'get_child_growth_profile' : kind === 'class' ? 'get_class' : 'get_observation',
+            image_id: null, message_id: null, fragment_id: null, projection: 'full',
+          });
+        }
+      }
     }
   }
   return { turns, sources, dependencies };

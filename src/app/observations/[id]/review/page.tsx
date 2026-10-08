@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import { resolveServerAuth } from '@/lib/accounts/access';
@@ -54,9 +55,10 @@ export default async function ObservationReviewPage({
   if (!observation) notFound();
   if (!observation.can_write) {
     return (
-      <div className="space-y-4">
-        <p>{observation.access_projection === 'historical_read_only' ? '原班历史观察 · 只读回看' : '观察记录 · 管理员只读'}</p>
-        <p className="whitespace-pre-wrap">{observation.raw_text}</p>
+      <div data-platform-surface="observation-review" className="mx-auto max-w-3xl space-y-5">
+        <h1 className="text-2xl font-semibold">{observation.access_projection === 'historical_read_only' ? '原班历史观察 · 只读回看' : '观察记录 · 管理员只读'}</h1>
+        <Link href="/observations" className="inline-flex min-h-11 items-center text-sm text-primary underline underline-offset-4">返回观察记录</Link>
+        <p className="max-w-[70ch] whitespace-pre-wrap leading-7">{observation.raw_text}</p>
         {observation.confirmed_content ? <p>{observation.confirmed_content.objective_description}</p> : null}
       </div>
     );

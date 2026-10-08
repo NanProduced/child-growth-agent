@@ -8,7 +8,7 @@
  */
 import { useState } from "react";
 import type { DataMessagePartProps } from "@assistant-ui/react";
-import { AlertTriangle, Check, Clock, Info, RefreshCw, Search, Square } from "lucide-react";
+import { AlertTriangle, BookOpen, Check, ChevronDown, Clock, Info, RefreshCw, Search, Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -27,7 +27,6 @@ import type {
   YayaToolResultPartData,
 } from "./client/parts";
 import { receiptShowsSuccess } from "./client/adapters";
-import { YayaAvatar } from "./yaya-avatar";
 import { YayaMarkdown } from "./yaya-markdown";
 
 function CardShell({
@@ -46,11 +45,11 @@ function CardShell({
   dataAttr?: string;
 }) {
   const toneClass = {
-    neutral: "border-border bg-card",
-    amber: "border-amber-200 bg-amber-50/70",
-    rose: "border-rose-200 bg-rose-50/70",
-    emerald: "border-emerald-200 bg-emerald-50/70",
-    sky: "border-sky-200 bg-sky-50/70",
+    neutral: "border-border",
+    amber: "border-amber-200/70",
+    rose: "border-rose-200/70",
+    emerald: "border-emerald-200/70",
+    sky: "border-border",
   }[tone];
   const iconClass = {
     neutral: "text-muted-foreground",
@@ -61,15 +60,15 @@ function CardShell({
   }[tone];
   return (
     <div
-      className={cn("rounded-xl border p-3 text-sm", toneClass, className)}
+      className={cn("py-2 text-base leading-[1.65] text-foreground sm:text-sm", (dataAttr === "receipt" || dataAttr === "run-error") && "rounded-xl border bg-card p-4", toneClass, className)}
       data-yaya-card={dataAttr}
     >
       <div className="flex items-start gap-2">
         <span className={cn("mt-0.5 shrink-0", iconClass)} aria-hidden>
           {icon}
         </span>
-        <div className="min-w-0 flex-1 space-y-2">
-          <p className="font-medium text-foreground">{title}</p>
+        <div className="min-w-0 flex-1 space-y-2 [overflow-wrap:anywhere]">
+          <p className="font-semibold text-foreground">{title}</p>
           {children}
         </div>
       </div>
@@ -92,18 +91,21 @@ export function YayaSourcesPart({ data }: DataMessagePartProps<YayaSourcesPartDa
   const sources: readonly YayaSourceRef[] = data.sources;
   if (sources.length === 0) return null;
   return (
-    <div className="mt-1 space-y-1 text-xs text-muted-foreground" data-yaya-sources>
-      <p className="font-medium text-foreground/80">来源</p>
-      <ul className="space-y-0.5">
+    <details className="group text-sm leading-6 text-muted-foreground" data-yaya-sources>
+      <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg px-2 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary [&::-webkit-details-marker]:hidden">
+        <BookOpen className="size-4" aria-hidden />参考来源 · {sources.length} 项
+        <ChevronDown className="ml-auto size-4 transition-transform group-open:rotate-180 motion-reduce:transition-none" aria-hidden />
+      </summary>
+      <ul className="space-y-2 px-2 pb-2 [overflow-wrap:anywhere]">
         {sources.map((source, index) => (
           <li key={`${source.kind}-${index}`}>
             {SOURCE_KIND_LABEL[source.kind] ?? source.kind}
             {source.label !== null && source.label !== "" ? ` · ${source.label}` : ""}
-            {source.ref_id !== null ? `（${source.ref_id}）` : ""}
+            {source.ref_id !== null ? <span className="block text-xs">来源标识：{source.ref_id}</span> : null}
           </li>
         ))}
       </ul>
-    </div>
+    </details>
   );
 }
 
@@ -121,12 +123,19 @@ export function YayaClarifyPart({ data }: DataMessagePartProps<YayaClarifyPartDa
   );
 }
 
+const TOOL_LABELS = new Map([
+  ["list_children", "幼儿名册"], ["list_classes", "班级列表"], ["get_class", "班级资料"],
+  ["resolve_child_class", "幼儿班级归属"], ["list_observations", "观察记录"], ["get_observation", "观察详情"],
+  ["get_child_growth_profile", "成长小结"], ["get_child_evidence_book", "个人证据册"],
+  ["get_class_evidence_overview", "班级证据概览"], ["list_guide_items", "指南目录"],
+  ["get_guide_item", "指南条目"], ["list_education_suggestions", "教育建议"], ["list_teacher_accounts", "教师账号"],
+]);
+
 export function YayaToolResultPart({ data }: DataMessagePartProps<YayaToolResultPartData>) {
   return (
-    <p className="flex items-center gap-1.5 text-xs text-muted-foreground" data-yaya-tool-result>
+    <p className="flex items-center gap-2 py-1 text-sm text-muted-foreground" data-yaya-tool-result data-tool-name={data.tool}>
       <Search className="size-3.5" aria-hidden />
-      已查询：{data.tool}（{data.outcome === "ok" ? "完成" : "失败"}
-      {data.source_kind !== null ? ` · ${SOURCE_KIND_LABEL[data.source_kind] ?? data.source_kind}` : ""}）
+      {data.outcome === "ok" ? "已查询" : "查询未完成"} · {TOOL_LABELS.get(data.tool) ?? "平台资料"}
     </p>
   );
 }
@@ -221,29 +230,35 @@ export function YayaReceiptPart({ data }: DataMessagePartProps<YayaReceiptPartDa
       title={headline.title}
       dataAttr="receipt"
     >
-      <p className="text-xs text-muted-foreground">原操作：{data.operation_id}</p>
       {receipt !== null ? (
-        <p className="text-xs text-muted-foreground">
-          业务对象：{receipt.business_object_id ?? "—"} · 记录时间：{receipt.recorded_at}
+        <p className="text-xs tabular-nums text-muted-foreground">
+          记录时间：{receipt.recorded_at}
         </p>
       ) : null}
+      <details className="text-xs leading-5 text-muted-foreground">
+        <summary className="min-h-11 cursor-pointer content-center rounded-lg px-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">查看原操作审计标识</summary>
+        <div className="space-y-1 pb-2 [overflow-wrap:anywhere]">
+          <p>原操作：{data.operation_id}</p>
+          {receipt !== null ? <p>业务对象：{receipt.business_object_id ?? "—"}</p> : null}
+        </div>
+      </details>
       {outcome.kind === "unknown" ? (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           {outcome.reason === "verification_required"
             ? "当前消息没有完整原计划，不能证明成功；请从待核对提案入口读取。"
             : "不会自动重复提交，也不会重新发起新提案。"}
         </p>
       ) : null}
       {outcome.kind !== "saved" && outcome.kind !== "saved_detail_unavailable" ? (
-        <Button type="button" variant="outline" size="sm" className="h-11" onClick={() => void recheck()} disabled={checking}>
+        <Button type="button" variant="outline" size="sm" className="h-11 rounded-xl shadow-none" onClick={() => void recheck()} disabled={checking}>
           <RefreshCw className={cn("size-3.5", checking && "animate-spin motion-reduce:animate-none")} aria-hidden />
           {checking ? "正在读取…" : "重新读取核对"}
         </Button>
       ) : null}
-      {checkError !== null ? <p className="text-xs text-rose-700">{checkError}</p> : null}
+      {checkError !== null ? <p role="alert" className="text-sm text-rose-700">{checkError}</p> : null}
       {isSuccess ? (
-        <p className="flex items-center gap-1 text-xs text-muted-foreground">
-          <YayaAvatar mood="saved" size={16} /> 绿色勾只表示平台操作回执，不代表幼儿发展达标。
+        <p className="text-xs text-muted-foreground">
+          保存状态来自平台操作回执，不表示幼儿发展达标。
         </p>
       ) : null}
     </CardShell>
@@ -299,16 +314,19 @@ export function YayaRunErrorPart({ data }: DataMessagePartProps<YayaRunErrorPart
     >
       <p className="text-foreground/90">{data.message}</p>
       {data.detail !== null && data.detail !== "" ? (
-        <p className="text-xs text-muted-foreground">协议校验：{data.detail}</p>
+        <details className="text-xs text-muted-foreground">
+          <summary className="min-h-11 cursor-pointer content-center rounded-lg px-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">查看校验详情</summary>
+          <p className="pb-2 [overflow-wrap:anywhere]">协议校验：{data.detail}</p>
+        </details>
       ) : null}
       <p className="text-xs text-muted-foreground">没有明确回执前不会显示“已保存”。</p>
       {canLookup ? (
-        <Button type="button" variant="outline" size="sm" className="h-11" onClick={() => void lookup()} disabled={checking}>
+        <Button type="button" variant="outline" size="sm" className="h-11 rounded-xl shadow-none" onClick={() => void lookup()} disabled={checking}>
           <RefreshCw className={cn("size-3.5", checking && "animate-spin motion-reduce:animate-none")} aria-hidden />
           {checking ? "正在读取…" : "重新读取核对"}
         </Button>
       ) : null}
-      {status !== null ? <p className="text-xs text-muted-foreground">{status}</p> : null}
+      {status !== null ? <p role="status" className="text-sm text-muted-foreground">{status}</p> : null}
     </CardShell>
   );
 }

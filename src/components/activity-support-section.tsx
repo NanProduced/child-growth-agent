@@ -49,7 +49,7 @@ function ActivitySupportCard({ support }: { support: ActivitySupport['suggestion
         </div>
 
         <details className="group rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
-          <summary className="cursor-pointer list-none font-medium text-slate-600 group-open:mb-2">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center font-medium text-slate-600 group-open:mb-2">
             <span className="group-open:hidden">材料与调整方式</span>
             <span className="hidden group-open:inline">收起材料与调整方式</span>
           </summary>

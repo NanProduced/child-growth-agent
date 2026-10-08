@@ -1,0 +1,193 @@
+{
+  "source_root": "C:/Users/nanpr/AppData/Local/Temp/yui-v2",
+  "source_base": "41d4a3f20889edac83cfe1697dd5125261b62f22",
+  "scope": "user-authorized exact snapshot of chatbox-v2; not runtime/production approval",
+  "source_untouched": true,
+  "excluded": [
+    ".env",
+    "logs",
+    "output",
+    "node_modules",
+    "rejected child-evidence-v2/v3",
+    "class/child design assets already carried by f371ba3"
+  ],
+  "models_requested": 0,
+  "files": [
+    {
+      "path": "design-qa.md",
+      "sha256": "61432edd6ae2bad9a87b3f75d1373df6ff19025a7dff03851fd11a5db9bdf19d"
+    },
+    {
+      "path": "next.config.ts",
+      "sha256": "758815c751d98c8aaf79a5c6456ea1f8b62be8a1d132053f0e7d90a214099ae2"
+    },
+    {
+      "path": "scripts/yaya/check-final-browser.cjs",
+      "sha256": "24abdd2b992adb05939b1b9848a8bf71bc4d5ac6741fdce29b9d56052800e0b8"
+    },
+    {
+      "path": "scripts/yaya/check-final-wiring.ts",
+      "sha256": "28d7561ec388340d653911a4bd5aad14933cb6c06a533415ed52710f5924f973"
+    },
+    {
+      "path": "src/app/globals.css",
+      "sha256": "691ed7b15bb351ff8e5d168a645e494170b40f1f8941cb4dfee1d333e9ef1303"
+    },
+    {
+      "path": "src/app/layout.tsx",
+      "sha256": "0f88e2ce46f393ff4777d1becf5f313973061ca08e3a5ebde87d360c936eed46"
+    },
+    {
+      "path": "src/components/home-v2/homepage.module.css",
+      "sha256": "11786a93f86d6185ef06cbcfdcebd51b7f25d3e6e887eaffc38fdb221e6b07c6"
+    },
+    {
+      "path": "src/components/yaya/client/actions.ts",
+      "sha256": "24a05bb86ff207b44c7ee408a7cbf2d8bfb2d0a0275c4addb342875ddbb28b36"
+    },
+    {
+      "path": "src/components/yaya/client/adapters.ts",
+      "sha256": "336a67180363950642cb11ce39fea652e1372c02c7bbf02d591a51566b6614e8"
+    },
+    {
+      "path": "src/components/yaya/client/mapping.ts",
+      "sha256": "23a1d084278d5103cc454abae459caec58407c3d60a8357c83003f13c1314aee"
+    },
+    {
+      "path": "src/components/yaya/yaya-attachment.tsx",
+      "sha256": "c5646404b043fd35a4541c54019f41d567a119239f729d2ed0521768554e47df"
+    },
+    {
+      "path": "src/components/yaya/yaya-composer.tsx",
+      "sha256": "ae1abcb1b4c728ffe5ec83bb8515b465700cdeb08be35a770e1fe2d9d6a5d583"
+    },
+    {
+      "path": "src/components/yaya/yaya-entry.tsx",
+      "sha256": "78fb0837cc51ed35421ea65da7372e9e95fae64cd6999e3e8b1ccf11b3c52abc"
+    },
+    {
+      "path": "src/components/yaya/yaya-markdown.tsx",
+      "sha256": "387b478ceeadf9cfc5c2115e99970a4da973b067c9dea21a2d5822ea8127b790"
+    },
+    {
+      "path": "src/components/yaya/yaya-message.tsx",
+      "sha256": "e7d5ef315281e465e5316e82552f9b213e5da1ea99051a81264ce7211c3cdc0b"
+    },
+    {
+      "path": "src/components/yaya/yaya-panel.tsx",
+      "sha256": "8abddb9b49a9e681a5c360200db1cb0496f075d9525b5fe74c4427436d67c63d"
+    },
+    {
+      "path": "src/components/yaya/yaya-parts.tsx",
+      "sha256": "4b06cdf63a4504c015b16e8d69fc555de8ad3a6d7becc5e8371ca34b8e4ed71a"
+    },
+    {
+      "path": "src/components/yaya/yaya-proposal.tsx",
+      "sha256": "b938ea08c09c1f0f8451f5bc8b38c32c572f243023ce64ae8adfa8f2144ffbfc"
+    },
+    {
+      "path": "src/components/yaya/yaya-provider.tsx",
+      "sha256": "8b8055de41f13e4da9a1dd3d9a39eef2eec96b329b4625c43dfdcac681612f1a"
+    },
+    {
+      "path": "src/components/yaya/yaya-recovery.tsx",
+      "sha256": "c2de2f5c1a82910369b8d9085c2a02701b8a06ff80e1e2b00c1fc4bca685afa7"
+    },
+    {
+      "path": "src/components/yaya/yaya-review-panel.tsx",
+      "sha256": "a5b46eef2979d36170b5e98eabc5ed49dfc059f7626f59534645ecd85c5714c3"
+    },
+    {
+      "path": "src/components/yaya/yaya-thread-list.tsx",
+      "sha256": "16046c76ddbceb634dc009bcab6b7f6984088e49081bed12a9242fb5fd8a76c9"
+    },
+    {
+      "path": "src/components/yaya/yaya-thread.tsx",
+      "sha256": "82d47477c8f555696ba1f59b84a597dade7fae40b380ff7b9c1926b405a995de"
+    },
+    {
+      "path": "src/components/yaya/yaya-workspace.tsx",
+      "sha256": "7d51e249ab866280e5b5db0262d0f0c923b093c8d17a34fb01b3eb8144043e51"
+    },
+    {
+      "path": "src/lib/yaya/agent/runtime/context.ts",
+      "sha256": "7a7f48f95ce7ac3470d53fce755c55bb1a9977524282c3ca653fc611b0be3c3b"
+    },
+    {
+      "path": ".impeccable/surfaces/src-components-yaya-yaya-app-shell-tsx.md",
+      "sha256": "9764882f62a1cbbb251c85b65793a3ade972b497ddb9499d763f5c95fad7e8eb"
+    },
+    {
+      "path": "docs/design/yaya-chatbox-v2/README.md",
+      "sha256": "1ed92826108a3ee40e738482edba26f7b906660146cd5b6c82cc2cf7045b9385"
+    },
+    {
+      "path": "docs/design/yaya-chatbox-v2/approval.json",
+      "sha256": "bb2437cc9a073a378a02bec60bbdc8697de3040c8ec3713a6c02ead9fd04c273"
+    },
+    {
+      "path": "docs/design/yaya-chatbox-v2/desktop-companion.png",
+      "sha256": "7e6e71ef7cff0f65a62c8e9e27e60fe2037af350aaaea98c9fc2325353b97bcf"
+    },
+    {
+      "path": "docs/design/yaya-chatbox-v2/desktop-companion.png.prompt.txt",
+      "sha256": "675db89d02c3edf1e47d08dfc1c803a1cdf0726032967eaf833b20445dc0a826"
+    },
+    {
+      "path": "docs/design/yaya-chatbox-v2/desktop-review.png",
+      "sha256": "82c1a4859344a042df05ef33a02a754bc632d2b4894877b0e805930f7bc5e4e5"
+    },
+    {
+      "path": "docs/design/yaya-chatbox-v2/desktop-review.png.prompt.txt",
+      "sha256": "1cee27ff11da2814c674c744f455d004bb3593781eb4d11e95d6f00e41bf373f"
+    },
+    {
+      "path": "docs/design/yaya-chatbox-v2/mobile-conversation.png",
+      "sha256": "d43c41b6a4893a06bf31dd4dd0c0d49ed2dc0fe19b268b110dee37a8ee02e345"
+    },
+    {
+      "path": "docs/design/yaya-chatbox-v2/mobile-conversation.png.prompt.txt",
+      "sha256": "793bd36054fe50fdcd964f6b7cabd42ad258f225508705a688e0307ddfced35f"
+    },
+    {
+      "path": "docs/yaya-v1/chatbox-v2-components.md",
+      "sha256": "1ead74e79f011948ac1bf1c1da88eaad93d6e016c84df3bdc43edd63cd93ab32"
+    },
+    {
+      "path": "docs/yaya-v1/chatbox-v2-delivery.md",
+      "sha256": "e60cbd8049c3418f49bede252705071f893e5704467c12674625801ded6d0f20"
+    },
+    {
+      "path": "docs/yaya-v1/local-ui-preview.md",
+      "sha256": "19f24f11be65a00c76cddb18951df45bf5f8d83c41b2d7619235c32d2798cff8"
+    },
+    {
+      "path": "scripts/yaya/check-chatbox-v2.ts",
+      "sha256": "517b306da7d5758e08f02388bc1c74d3194571a7618f3e479a26d5fe4ef5cf59"
+    },
+    {
+      "path": "scripts/yaya/check-message-ui.tsx",
+      "sha256": "1b8b018f89f812778c3d31cb4c85941daed9bbb1ac9f1dcd5314523637241e9c"
+    },
+    {
+      "path": "scripts/yaya/stop-ui-preview.ts",
+      "sha256": "f807c4422ab944d9ddd1bbc994f830f8aa76d3f8fac19649ac7e51b3c179f2f4"
+    },
+    {
+      "path": "src/app/api/yaya/page-reference/route.ts",
+      "sha256": "30ce8686574cb9c9378a4732530c3d7d2d791fb10bc92e900ff0f7b4442e2ee1"
+    },
+    {
+      "path": "src/components/yaya/yaya-app-shell.tsx",
+      "sha256": "8998a434976f2c59e020683fa0b356dc335cb12d678271fc31bb1bf24329ea5c"
+    },
+    {
+      "path": "src/lib/yaya/page-reference-service.ts",
+      "sha256": "6e8c68e0b4a4006c19e483e9170aff9a1561ecd731ab2bc26c59ff2a7a8ea04a"
+    },
+    {
+      "path": "src/lib/yaya/page-reference.ts",
+      "sha256": "d11259f21d8598345e1b7c58f94158805fd23bbb9bede57dbf85e453a5952a58"
+    }
+  ]
+}

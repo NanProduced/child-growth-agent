@@ -37,7 +37,7 @@ type FieldErrors = Partial<Record<FieldKey, string>>;
 
 function ErrorText({ message }: { message?: string }) {
   if (!message) return null;
-  return <p className="text-sm text-destructive">{message}</p>;
+  return <p role="alert" className="text-base leading-7 text-destructive">{message}</p>;
 }
 
 /** 默认学年：8 月及以后为当年学年，否则为上一学年 */
@@ -184,9 +184,9 @@ export function ClassFormDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label>学段 *</Label>
+            <Label htmlFor="class-stage">学段 *</Label>
             <Select value={stage} onValueChange={setStage} disabled={hasHistory}>
-              <SelectTrigger className="w-full">
+              <SelectTrigger id="class-stage" className="w-full">
                 <SelectValue placeholder="选择学段" />
               </SelectTrigger>
               <SelectContent>
@@ -218,17 +218,17 @@ export function ClassFormDialog({
             ) : null}
           </div>
 
-          <div className="flex items-center justify-between gap-3 rounded-lg border bg-slate-50/70 px-3 py-2.5">
+          <label htmlFor="class-active" className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-lg border bg-slate-50/70 px-3 py-2.5">
             <div>
-              <Label htmlFor="class-active" className="text-sm">
+              <span className="text-sm font-medium">
                 启用班级
-              </Label>
+              </span>
               <p className="mt-0.5 text-xs text-slate-500">
                 停用后不能再新分班，已有儿童与观察保持不变。
               </p>
             </div>
             <Switch id="class-active" checked={active} onCheckedChange={setActive} />
-          </div>
+          </label>
           <ErrorText message={errors.is_active} />
         </div>
 
@@ -321,9 +321,9 @@ export function TransferClassDialog({
 
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <Label>转入班级 *</Label>
+            <Label htmlFor="transfer-class">转入班级 *</Label>
             <Select value={targetId} onValueChange={setTargetId}>
-              <SelectTrigger className="w-full">
+              <SelectTrigger id="transfer-class" className="w-full">
                 <SelectValue placeholder="选择班级" />
               </SelectTrigger>
               <SelectContent>

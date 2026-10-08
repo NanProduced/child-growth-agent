@@ -11,6 +11,7 @@ import { yayaAttachmentContentUrl, yayaAttachmentIdFromUrl } from "./api";
 import { YAYA_PART_NAMES } from "./parts";
 import type { ProjectedMessage } from "./schemas";
 import { parseYayaChatRecoveryMark } from "@/lib/yaya/chat-bind-contract";
+import { parsePageQuote, quoteFromReferenceFragment, referenceFragmentText, type YayaPageQuote } from "@/lib/yaya/page-reference";
 
 function fragmentIdFor(messageId: string, index: number): string {
   return `${messageId}:f${index}`;
@@ -209,6 +210,16 @@ export function persistShape(message: ThreadMessage): PersistedShape | null {
     }
   }
 
+  const quote = message.role === "user" ? parsePageQuote(message.metadata.custom?.quote) : null;
+  if (quote !== null) {
+    fragments.push({
+      fragment_id: message.id + ":page-focus",
+      text: referenceFragmentText(quote),
+      sources: quote.yayaPage.sources,
+      independently_readable: quote.yayaPage.sources.length === 0,
+      provenance: { kind: "tool_result", ref_id: "page:" + quote.yayaPage.path, label: quote.yayaPage.title, derived_from: null },
+    });
+  }
   if (hasProposal && executionState === "none") executionState = "pending_approval";
   if (fragments.length === 0 && attachmentIds.length === 0 && executionState === "none") return null;
   const messageKind: PersistedShape["messageKind"] = hasReceipt
@@ -227,7 +238,13 @@ export function persistShape(message: ThreadMessage): PersistedShape | null {
 export function projectedToThreadMessageLike(view: ProjectedMessage): ThreadMessageLike | null {
   if (view.role !== "user" && view.role !== "assistant") return null;
   const parts: ThreadAssistantMessagePart[] = [];
+  let pageQuote: YayaPageQuote | null = null;
   for (const fragment of view.fragments) {
+    if (view.role === "user" && fragment.fragment_id.endsWith(":page-focus")) {
+      const parsedQuote = fragment.visibility === "full" ? quoteFromReferenceFragment(fragment.text) : null;
+      if (parsedQuote?.yayaPage.owner_account_id === view.owner_account_id) pageQuote = parsedQuote;
+      continue; // Never print reference JSON as the teacher's original observation.
+    }
     if (fragment.visibility === "full" && fragment.text !== null && fragment.text !== "") {
       parts.push({ type: "text", id: fragment.fragment_id, text: fragment.text, status: { type: "complete" } });
     }
@@ -295,5 +312,6 @@ export function projectedToThreadMessageLike(view: ProjectedMessage): ThreadMess
     createdAt: new Date(view.created_at),
     ...(view.role === "assistant" ? { status: { type: "complete" as const, reason: "stop" as const } } : {}),
     content: parts,
+    ...(pageQuote === null ? {} : { metadata: { custom: { quote: pageQuote } } }),
   };
 }

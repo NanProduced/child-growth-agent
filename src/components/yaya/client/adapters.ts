@@ -36,6 +36,7 @@ import { useMemo } from "react";
 import { YAYA_MAX_RUN_ATTACHMENTS, type YayaRunWireEvent } from "@/lib/yaya/api-contract";
 import { receiptProvesSuccess, type YayaOperationQueryOutcome } from "@/lib/yaya/types";
 import { fetchWithAccountAuth } from "@/lib/accounts/client";
+import { parsePageQuote, pageReferenceResponseSchema } from "@/lib/yaya/page-reference";
 
 import {
   yayaApiErrorToPart,
@@ -238,7 +239,10 @@ export function createYayaChatModelAdapter(store: YayaClientStore, aui: Assistan
 
       // 上下文 chips 只随本条消息发送；冻结协议没有独立上下文字段，
       // 有限并入 user_text（不写入业务 raw_text，历史保存仍是教师原文）。
-      const userText = composeRunUserText(facts.text, options.runConfig.custom?.yaya_context);
+      const pageQuote = parsePageQuote(lastUser.metadata.custom?.quote);
+      // Page focus arrives through the current authorized projection of a separate
+      // stored fragment. Do not resend stale private snapshots in raw user_text.
+      const userText = pageQuote === null ? composeRunUserText(facts.text, options.runConfig.custom?.yaya_context) : facts.text;
 
       try {
         await wiring.waitForWrites();
@@ -372,6 +376,22 @@ export function createYayaThreadHistoryAdapter(store: YayaClientStore, aui: Assi
     const shape = persistShape(message);
     if (shape === null) return;
     const wiring = store.threadWiring(remoteId);
+    const quote = parsePageQuote(message.metadata.custom?.quote);
+    if (quote !== null) {
+      if (quote.yayaPage.owner_account_id !== store.identity.accountId) {
+        throw new YayaApiError(401, "reference_identity_changed", "账号已变化，请重新引用资料。");
+      }
+      const live = await yayaGetJson(
+        "/api/yaya/page-reference?path=" + encodeURIComponent(quote.yayaPage.path),
+        pageReferenceResponseSchema,
+      );
+      if (live.reference.owner_account_id !== store.identity.accountId
+        || live.reference.path !== quote.yayaPage.path || live.reference.revision !== quote.yayaPage.revision
+        || live.reference.summary !== quote.yayaPage.summary || live.reference.title !== quote.yayaPage.title
+        || JSON.stringify(live.reference.sources) !== JSON.stringify(quote.yayaPage.sources)) {
+        throw new YayaApiError(409, "reference_changed", "引用资料已变化，请重新引用后再发送。");
+      }
+    }
     const ensureRevision = async (): Promise<number> => {
       if (wiring.revision === null) {
         const { conversation } = await yayaGetJson(conversationPath(remoteId), conversationResponseSchema);

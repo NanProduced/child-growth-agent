@@ -36,7 +36,7 @@ const STATUS_PRIORITY: Record<ObservationStatus, number> = {
 };
 
 const chipClass = (active: boolean) =>
-  `rounded-full border px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 ${
+  `inline-flex min-h-11 min-w-11 max-w-full flex-wrap items-center gap-1 rounded-full border px-3 py-2 text-sm [overflow-wrap:anywhere] transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2 ${
     active
       ? 'border-emerald-300 bg-emerald-50 font-medium text-emerald-800'
       : 'border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:bg-amber-50/50'
@@ -103,7 +103,7 @@ export default async function ObservationsPage({
   const nothingAtAll = active === 'all' && activeClass === 'all';
 
   return (
-    <div className="space-y-7">
+    <div data-platform-surface="observations" className="space-y-7">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">观察记录</h1>

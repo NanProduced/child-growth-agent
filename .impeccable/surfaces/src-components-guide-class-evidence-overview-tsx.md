@@ -1,47 +1,76 @@
 ---
-version: 4
+version: 6
 slug: "src-components-guide-class-evidence-overview-tsx"
 primary_target: "src/components/guide/class-evidence-overview.tsx"
-related_targets: ["src/components/guide/class-evidence-overview.module.css","src/components/guide/__fixtures__/class-evidence-overview-fixture.ts","scripts/check-class-evidence-overview.ts","scripts/acceptance/run-class-evidence-ui-check.ps1","scripts/acceptance/check-class-evidence-ui.cjs","scripts/acceptance/preview-page.template.tsx"]
+related_targets: ["src/components/guide/class-evidence-overview.module.css","src/components/guide/evidence-route-client.tsx","src/lib/guide/evidence-read.ts","src/components/guide/__fixtures__/class-evidence-overview-fixture.ts","scripts/check-class-evidence-overview.ts","scripts/acceptance/check-class-evidence-ui.cjs","scripts/check-evidence-pages-browser.cjs"]
 ---
 
-# 班级指南证据概览 ClassEvidenceOverview — 指南证据链 G4-R2（fixture 组件验收）
-Mode: Operate. Scope: 只读组件（受控期间 + 草稿、领域/参考年龄/目标筛选、可靠性优先的名单下钻与回调意图）。正式路由、API 接入与页面装配由 G6 处理；本轮未改 G0 冻结类型、API、queries、正式班级页与全局样式。
+# 班级指南证据概览 — 证据下钻工作台
 
-## Direction contract（R2 修）
-THESIS: 保守展示——只有完全可靠的统计才画“完整三类分布”；含未知时只给可核验依据摘要与核验限制；保健参考先讲可靠性，再讲参考说明。
-OWN-WORLD: 沿用“轻量成长观察册”（暖白/深墨/芽绿/晨光蓝/观察琥珀/柔和珊瑚、10–16px 圆角、1px 暖灰线、无卡片嵌套）；不引入健康测评、雷达、饼图、排名或班级 AI 方案。
-SIGNATURE: reliable → 分布条+三类图例+占比（X/N 人+期间）；partial → 名单分母 + 已确认表现/线索下限 + “其余暂无法确认”，不画完整三类分布；unavailable → 只保留核验提示、名单与个人证据入口。
+Mode: Operate. Scope: 两类证据页面普通扩展中的班级页，正式路由 `/classes/[id]/evidence`，只读授权 DTO 与既有记录入口。记录本地候选的实际实现，不建立新的视觉世界或全站规则。
 
-## R2 修正清单（对应反例）
+## Direction contract
 
-| # | 反例（修复前） | R2 规则 |
-|---|---|---|
-| 1 | partial 图例 3/2/15，展开普通名单 3/2/14，另有 1 人不可读取，完整分布暗示全体已分类 | partial 不再渲染三类分布条/图例：改为“可核验依据摘要”（在班名单分母 + 服务端已确认表现/线索人数，标“可确认下限” + “其余是否暂无相关记录暂无法确认”）；展开普通无记录组标注“（已读取范围）”，不可读取/partial+no_records 幼儿进入“核验受限，未计入普通名单”；服务端 counts 原样不改、不从名单重算、不新增状态 |
-| 2 | 保健参考分支早于可靠性处理，unavailable 显示成普通参考空态 | 参考条目可靠性优先：unavailable 收起态显示珊瑚核验警告，展开为“相关资料暂不可读取”名单+个人证据入口，绝不断言“没有可供查阅”；partial 只描述已核验资料范围并保留受限名单；待核对建议单列“AI 关联待核对（不计入已核验资料）”，工作流标签而非状态徽章，也不被确定性空态掩盖；仍不恢复行为分布/占比/状态徽章 |
-| 3 | 验收不可一键复现 | 提供工作树外一次性装置 `g4-browser\run-acceptance.ps1`（从模板建立临时预览路由 → 启动 dev:3101 → 跑 115 项浏览器检查 → 清理路由与 `.next`），不覆盖已有文件、仓库不保留 mock 路由；展开态截图在收起前拍摄 |
+THESIS: 从指南条目人数分布，进入一个条目的幼儿名单与逐字观察，再同期间下钻个人证据册。
+OWN-WORLD: 沿用“轻量成长观察册”的暖白、深墨、芽绿、细线与浅色面；绿色和蓝色辅助识别证据状态，不表达能力等级。
+STORY: 班级身份／当前在班名单与期间 → 领域／参考年龄筛选 → 行为条目分布 → 单一详情、名单与引用 → 同范围个人证据册；保健资料独立查阅。
+FIRST VIEWPORT: 优先连续可扫读的指南原文与对齐人数条；说明按需展开。窄屏详情是单独阅读状态，可返回指南条目，不能把滚动后的详情截图当初始首屏。
+FORM: 用户选择第三稿“证据下钻工作台”；方向图为 `docs/design/class-overview-v2-20261008/03-evidence-workspace.png`。按布局关系适配授权 DTO，不照搬图中合成姓名、20 人分母或短标题。
+SIGNATURE: 实际 N 的共同人数标尺、一个选中条目与一个 inspector；保健参考收在独立折叠入口，统计说明用页内中文阅读区。
 
-## 验收与可复现（QA1 起装置纳入仓库 scripts）
-- 装置（随仓库克隆可用，不依赖个人 Temp 目录，不新增项目依赖）：
-  - `scripts/acceptance/run-class-evidence-ui-check.ps1`：runner（Windows PowerShell 7+）
-  - `scripts/acceptance/check-class-evidence-ui.cjs`：115 项浏览器检查，`--base-url` / `--out` 参数化
-  - `scripts/acceptance/preview-page.template.tsx`：临时预览页模板（验收后删除，仓库不保留 mock 路由）
-  - `scripts/acceptance/README.md`：前置条件、命令与安全边界
-- 运行：`pwsh -NoProfile -File scripts/acceptance/run-class-evidence-ui-check.ps1 -Port 3113 -OutDir <结果目录> -PlaywrightCoreDir <含 playwright-core 的 node_modules>`；playwright-core 由验收环境临时提供（scratch 安装见 README），不加入项目依赖。
-- QA1 安全验证（全部实测）：
-  - 端口被自有占位服务占用 → runner 拒绝启动（exit 1），占位服务仍存活；
-  - 预览路由预先存在 → 拒绝运行，文件内容保持不变；
-  - 非默认端口 3110 / 3112 / 3113 全量 **115/115**，结束后进程树与临时路由均清理，端口释放；
-  - 中途失败（缺少 playwright-core，check exit 2）→ 进程与路由仍清理，`acceptance-run.json` 记录 `runner_pid`/`server_pid`/`check_exit`；
-  - 类型生成物快照/恢复：预置 `.next/dev/types/routes.d.ts` 哨兵内容运行后原样恢复，`next-env.d.ts` 未被修改，`pnpm ts-check` 运行后仍通过；检视无残留 `guide-preview-class` 类型引用；
-  - 截图等待展开动画结束（面板 opacity→1 或动画关闭）后拍摄。
-- fixture/类型/风格：`pnpm ts-check`、`pnpm lint:build`、`pnpm lint:style`、`pnpm exec tsx scripts/check-class-evidence-overview.ts`（`{"passed":42,"total":42,"fixture_only":true}`）。
-- 浏览器口径回归（R2 结果，本 QA 未改主组件）：修复前 `g4-evidence-r2-before\results.json` **95/115**；修复后与 QA1 复跑 **115/115**（`g4-qa1-run-3112-final`、`g4-qa1-run-3113-snapshot`）。
-- 截图（展开态、与报告状态一致）：`health-reference-expanded-1440.png`、`health-reference-unavailable-expanded-1440.png`、`health-reference-partial-expanded-1440.png`、`health-reference-pending-expanded-1440.png`、`mixed-partial-expanded-1440.png`、`unavailable-expanded-1440.png`、`expanded-1440.png`、`main-1440x900/768x1024/390x844.png`、`empty-roster-1440.png`、`narrow-390-notices.png`、`narrow-longtext-390.png`、`tablet-expanded-768.png`。
+## Implemented layout and local styles
 
-## Impeccable
-- detector：**0 primary**；28 条 advisory 全为 `design-system-radius` / `design-system-font-size`——DESIGN.md 明示 non-homepage 刻度未决（全局 `--radius:0.625rem` 与既有 10/12/16px、12–20px 字号），继承自 G3/G4 既有世界，不为消除 advisory 改画风。
-- harden/adapt 后一次 polish：新增状态（partial 摘要、参考三态、受限名单）已按展开态截图核对，无需返工。
+- 未选条目时主栏全宽；容器宽度 ≥1000px 且存在详情时为主栏 + 360px inspector，间隔 24px，详情顶端 sticky 24px；这是容器断点，不是固定 1024px 视口断点。
+- 容器 <1000px 时，选中条目后隐藏主列表、展示同一个详情；“返回指南条目”关闭详情并恢复原触发按钮焦点。Portal 挂到独立详情区域，不叠多个绝对定位面板。
+- 行为条目完整原文、人数条和操作对齐；共享图例保留三种正式文案。参考年龄集中在筛选／详情，短占比的完整分母及期间仍有可访问文字。
+- 保健参考默认收起，位于主列表底部独立 `details/summary`；展开后原文、来源与个人入口仍可读，不参与行为统计、不作正常／异常判定。
+- “统计说明”由 `aria-expanded/aria-controls` 展开页内 section，无模态遮罩；使用“资料完整时”“还有资料待核对”“暂时读不到”等中文，保留分母、期间、三态和参考资料边界。
+- 局部页面标题（24px）、工作区／详情标题（18px）、指南原文与引用（16px），辅助标签／日期多为（14px）；其余容器／说明仍有（15px），不写成全站统一字号。
+- 字体使用现有 `Home Noto Sans SC / Microsoft YaHei / sans-serif` 栈；原文与引用 `overflow-wrap: anywhere`，不据此宣称完整业务字形或跨系统字体已验收。
+- 列表为平面细分隔，详情无阴影；控件（8px）、工具栏（12px）、引用容器（10px）是当前局部尺寸。绿／蓝／琥珀／珊瑚用现有页面 CSS，文字与细线关联全局主题，不提升为新 token。
+- 原生 button/select/input 与 summary 最小高度（44px）；清晰焦点（3px，偏移 2px），减少动态偏好下关闭动画／过渡。灰底“暂无相关记录”标签明确保留深色字。
+- 两页正式 route-shell 将既有助手 launcher 停靠文档顶部返回工具栏，随页面滚走；使用已有导航 ≤1090px 断点，助手展开时隐藏 launcher。只在这两个页面生效，共享 YAYA、导航与 AUTH 未改。
 
-## NOT_RUN（不得当作通过）
-G5 读模型与 API 未接入；真实 StepFun/Coze 调用；实库迁移/写入；`classes/[id]/page.tsx` 正式装配与登录态全链路（G6）；验收装置仅验证 Windows PowerShell 7+ 环境，非 Windows/非 PowerShell 环境未验证。fixture 浏览器验收不是正式 API/数据库闭环。
+## Data, source and teacher boundaries
+
+- 人数、分母与占比读取服务端 `ClassEvidenceOverview`；`peopleTicks(N)` 生成 0–N 整数标尺，段宽按 DTO 人数比例呈现。0 人不产生占比；正式本地样本 N=3 是验收数据，不是显示常量。
+- 仅可靠的具体行为条目显示既有“已确认观察到占比”，带分母与期间；不新增领域总分、聚合指标、雷达、排名或教学成效结论，不将跨条目人数相加。
+- `partial` 只显示服务端可确认人数下限，不给余数补“暂无”；`unavailable` 不画普通三态分布、不显示正常 0%，保留名单分母与个人入口。UNKNOWN ≠ 0，技术异常不是第四种儿童状态。
+- 来源实际读取 `GET /api/children/[id]/evidence-book` 的 `links[].basis[]`，复用既有链接 schema；核对儿童、当前班级／阶段、目录版本、期间、筛选、条目及全部必需依据，不把损坏 JSON 当空记录。
+- 读取绑定账号投影、儿童、条目、范围和本次服务端 item 对象；切换／取消后的旧响应不能写回新目标或清除新 loading。401 重新核验身份，损坏／范围变化刷新概览，其他失败保留重试和明确提示，不显示假引用。
+- 引用原样呈现来源文字、日期、原始观察／教师确认稿标签与发生时班级快照；未知班级不回填。指南允许成人帮助时不自动降级，独立要求按条目处理。
+- 下钻保留期间、筛选、目标与 focused item；记录入口复用原有教师流程，不预填“已做到”。管理员只读，客户端可见性不代替服务端授权；raw_text 与教师确认边界保持不变。
+
+## Historical component acceptance — retained
+
+以下保留旧 brief 的验收历史原文；旧接线范围、装置流程、detector 与 NOT_RUN 只描述当时，不作为当前实现或本轮执行结论。当前证据与最终七项 verdict 见下一节。
+
+### 验收与回归
+- 离线 fixture 自检：`pnpm exec tsx scripts/check-class-evidence-overview.ts`：**42/42 通过**；
+- 浏览器全景验收装置：`scripts/acceptance/run-class-evidence-ui-check.ps1` 在端口 3123 启动真实 Chromium：
+  - 覆盖 1440×900, 768×1024, 390×844 视口；
+  - 覆盖 reliable, partial, unavailable, health-reference, empty-roster 各场景；
+  - 覆盖键盘 Tab/Enter 导航、无障碍焦点落点、筛选受控与钻取回调；
+  - **115/115 全量通过**（exit code 0）；
+- 代码质量与类型：`pnpm ts-check`（0 errors）、`pnpm lint:build`（0 errors）、`pnpm lint:style`（0 errors）；
+- Impeccable 检测器：`impeccable detect --json`：**0 primary violations**。
+
+### NOT_RUN
+非 Windows/非 PowerShell 环境；真实 StepFun/Coze LLM 调用（本轮模型预算为 0）；生产数据库写入。
+
+## Evidence and scoped disposition
+
+- 交付记录：`docs/guide-evidence-v1/evidence-ui-polish-delivery.md`；正式页面结果：`output/playwright/evidence-pages-206ffba5/results.json`，保存记录 103/103、errors=[]、model_requests=0、guard_attempts=0、cleanup_issues=[]。
+- 正式套件基于真实 Next 生产 HTTP + AUTH + 自有隔离 PostgreSQL + Chrome，使用合成名册；包括真实分母、逐字引用、唯一详情、关闭焦点、越班拒绝与管理员只读。注入 HTTP 故障和受控迟到响应单独标注。
+- `class-long-token-1440.png / class-long-token-390.png` 是明确标注的 DOM 排版替身，只证明换行；不证明长文本持久化业务链路。
+- 班级原组件浏览器覆盖 115/115（`output/g4-verdict/results.json`，合成 fixture），不冒充实库统计验收；纯检查分别 34/34（parser/Response 替身）、42/42（班级 fixture）、63/63（个人 fixture）。
+- `pnpm validate` 与 Next + tsup 构建通过见交付记录；本次仅文档核对，没有复跑、启动服务、访问 DB／provider／网络、安装依赖或再次运行 context／detector。
+- 初始 `.impeccable/review/evidence-ui-polish/REVIEW.md` 保留 FIX 历史；最终 `VERDICT-1.md` disposition: ship，F1–F7 全部 resolved，仅限 ORIGINAL SEVEN FIXES ONLY，不等于两页全范围、全站或生产认证。
+- 人工布局比较与选定原图、正式捕获记录见 `design-qa.md` 的本任务追加段；没有补造 comp-diff 分数、FORM seed、QUALITY BAR 或 hero gate PASS。
+- 本轮无新 shipped UI raster assets。方向图相邻 `PROMPTS.md / provenance.json` 保留生成来源；班级 provenance 的 pending/approved:false 是生成时历史，最新用户选择与交付记录决定本轮方向，不改元数据。
+
+## Drift and NOT_RUN
+
+既有 DESIGN 的非首页色彩／字体占位及“尚未实现”口径仍有漂移，home-* 仍只约束首页。两页比方向图更暖的背景是继承主题的有意适配；本轮仅记录，不修复、不固化为新全站标准，不改 DESIGN、sidecar 或 config。
+
+NOT_RUN：真实 provider、托管 DB／对象桶、生产数据／部署、真实手机／软键盘、Safari、人工屏幕阅读器；未 push／merge。

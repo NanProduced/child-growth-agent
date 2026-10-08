@@ -138,7 +138,7 @@ export default async function ClassDetailPage({
   const latest = observations[0];
 
   return (
-    <div className="space-y-8">
+    <div data-platform-surface="class-detail" className="space-y-8">
       <Button asChild variant="ghost" size="sm" className="-ml-2 min-h-11">
         <Link href="/classes">
           <ArrowLeft className="size-4" />
@@ -150,7 +150,7 @@ export default async function ClassDetailPage({
         <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="min-w-0 break-words text-xl font-semibold tracking-tight text-slate-900">
+              <h1 className="min-w-0 break-words text-2xl font-semibold tracking-tight text-slate-900">
                 {CLASS_STAGE_LABELS[klass.stage]} · {klass.name} · {klass.school_year}
               </h1>
               {klass.is_active ? (
@@ -199,7 +199,7 @@ export default async function ClassDetailPage({
           </div>
         </div>
 
-        <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-slate-100 pt-4 sm:grid-cols-4">
+        {dbError ? null : <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-slate-100 pt-4 sm:grid-cols-4">
           <div className="min-w-0">
             <dt className="text-xs text-slate-500">成长档案</dt>
             <dd className="mt-1 text-sm font-medium text-slate-800">{children.length} 份</dd>
@@ -220,7 +220,7 @@ export default async function ClassDetailPage({
               {latest ? formatDateCn(latest.observed_at) : '还没有记录'}
             </dd>
           </div>
-        </dl>
+        </dl>}
       </section>
 
       {!klass.is_active ? (

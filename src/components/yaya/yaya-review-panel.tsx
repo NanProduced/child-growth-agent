@@ -45,7 +45,7 @@ export function YayaReviewPanel({ className }: { className?: string }) {
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {proposalId !== null && origin !== null ? (
-          <YayaProposalPanel proposalId={proposalId} origin={origin} variant="panel" />
+          <YayaProposalPanel key={proposalId} proposalId={proposalId} origin={origin} variant="panel" />
         ) : (
           <p className="px-2 py-8 text-center text-sm text-muted-foreground">
             当前没有待核对的操作。在左侧对话里说“记一条观察”，核对卡会出现在这里。

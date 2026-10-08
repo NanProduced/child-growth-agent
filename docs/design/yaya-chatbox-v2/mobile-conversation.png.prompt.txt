@@ -1,0 +1,20 @@
+Use case: ui-mockup. Adapt the attached 芽芽 assistant design to ONE beautiful professional MOBILE FULL-SCREEN conversation, portrait logical 390 x 844, aspect ratio 390:844. Direction name: 随手咨询.
+Image 1 is the newly designed companion desktop screen: preserve the warm-white/green brand, clarity and unified writing surface. Image 2 is the record-review desktop state: preserve visual language but this mobile screen is GENERAL EDUCATION Q&A, not a record-writing approval screen. Image 3 is the existing sprout-face mascot, tiny only. Image 4 is the old app screenshot, product context/anti-reference only: do not recreate its cramped composer or context form.
+Output app content only, one full-height portrait mobile UI. NO phone bezel, rounded device mask, OS status bar, Dynamic Island, clock/battery/signal, home indicator, browser chrome, device shadow, collage, multiple frames or perspective. Do not stretch or crop. Layout designed for logical 390x844, scaled up only to render crisply.
+This is 芽芽观察 for a logged-in teacher. Already approved: natural language first; a reference is OPTIONAL focus/context emphasis and never compulsory child/module selection. LLM chooses how to answer and which tools to read. General education questions do not require child name, class or business module. No old 上下文/对象/来源 settings, no child dropdown, no floating 芽芽 button, no fabricated voice/mic capability, no compulsory workflow tabs.
+Header ~64px: left back arrow, tiny sprout face and “芽芽”; subtitle “幼教工作助手”; right quiet new-chat icon and more/history menu icon. Hairline divider. Product warmth is subtle green, off-white and ink-dark text, not infantilized, not glossy, not neon, no gradient, no rainbow chips, no excessive cards. Comfortable 16px logical body type, ~1.6 line-height and generous but useful spacing.
+A small conversation date separator “10月8日”. Current anchor 2026-10-08. A right-aligned soft mint-neutral user message:
+“幼儿争抢积木时，教师可以怎样引导？”
+A borderless assistant message, tiny avatar next to the first line only:
+“可以先帮助他们表达，再一起寻找办法。”
+Three readable numbered blocks, with whitespace separating them:
+“1. 先听清双方想法”
+“请每个孩子说说自己想搭什么，不急着替他们分配。”
+“2. 提供可协商的选择”
+“可以轮流使用，也可以一起搭。让孩子参与决定。”
+“3. 留意真实过程”
+“观察他们怎样表达和协商，记下具体语言与行为。”
+A restrained last sentence “这些是一般支持建议，不是对某个幼儿的发展判断。”
+A small copy control under the answer. No fake read-record counts, no sources pretending to come from saved records, no record-save card, no formal-evidence checkmark, no claim that a child has mastered anything. Do not invent large visual feature blocks to fill whitespace.
+At bottom, ONE spacious rounded composer with enough mobile safe-area breathing room. It contains an actual unsent draft text “可以给我一个示例引导语吗？”, not a placeholder, so the send action is enabled. Bottom toolbar inside the same composer has a plus button labeled “添加”, a quiet OPTIONAL text action “引用页面”, and a green send arrow at the right. Do NOT show a selected reference chip because the teacher has not chosen one. Keep all controls unobstructed and visibly separated, designed for >=44px hit areas. Footer “写入前会请你核对确认”. Do not draw a keyboard; this is not a keyboard behavior proof. Tiny secondary “设计示例 · 合成数据” at the bottom edge, without an extra title board.
+Preserve accurate, legible Chinese and disciplined typography. The goal is a real mobile agent conversation that feels as straightforward and polished as a mature general assistant, while keeping 芽芽's education-only and teacher-confirmation boundaries.
