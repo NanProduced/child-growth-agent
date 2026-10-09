@@ -156,3 +156,41 @@ One batched desktop/mobile inspection simplified query/source noise, duplicate b
 Chrome24 grouped records (including3 geometry), errors0; original scope preserved, native copy/quote/remove/scroll and keyboard menus work. Full fields remain before approval. Real local HTTP/PG70/70, client56/56, quote42/42, new actual-render15/15 and NextWebpack build pass. Impeccable targeted detector0 primary/5 advisory, not a visual-quality or production certificate.
 
 `取消提案` is corrected to `撤销未执行批准` because the existing repository does not close proposals. Honest null feedback leaves a proposal reviewable and does not undo any saved observation. Unknown results still query original identity. Exact artifacts, component inventory and NOT_RUN are in `docs/yaya-v1/chatbox-v2-components.md`. True mobile keyboard, screen reader, real provider/bucket and deployment remain NOT_RUN; local model is a protocol double.
+
+## 2026-10-09 家园沟通 v1（只限新增模块）
+
+final result: passed
+
+本节保留上述首页/聊天框的历史范围，不把本轮局部终检升级为整站、生产或模型质量认证。
+
+### Source / rendered evidence
+
+用户选择第2张作为设计方向：`docs/design/family-communication-v1/approved-direction.png`，原生1487×1058。
+同状态（3/5已选、草稿未核对）实页：`output/playwright/family-communication/draft-desktop-1440.png`，full-page1440×1133。
+参考按约等比例归一化为1440×1024，实页只取顶部1440×1024，deviceScaleFactor=1；组合对照`comparison-desktop.png`（2880×1024，左参考/右实页），编辑区局部对照`comparison-editor.png`。
+
+桌面/平板/手机：1440×1024、1024×900、768×1024、390×844；手机full-page390×1859不冒充首屏高度。
+复制拒绝完整截图`clipboard-denied.png`为1440×1251；空记录/服务不可用/管理员只读各有截图。图片均已打开核对，有效且不包含真实幼儿照片。
+
+### Comparison history and scoped verdict
+
+1. 首轮结构检查发现浮动助手覆盖正文/按钮、手机来源过长；修正为平台既有文档顶部入口定位与手机默认折叠来源。
+2. 独立fresh子任务`01a11e68-e406-71a2-a692-3c0424127617`打开全部11张输入并只读抽查源码，disposition FIX：完整复制署名未可见、面板偏粉、失败条混用成功绿色、展开更多缺ARIA。
+3. 一批修正：可信署名在生成时作为完整正文存储并可见编辑；正常和fallback均只取全文；浅绿表面以现有accent/card作sRGB混色；非成功使用中性Info/alert；更多来源补展开语义。
+4. 该独立终检人重新打开六张最终比较/手机/错误/复制拒绝证据，逐项评分原四项为4/4 resolved，disposition SHIP，严格只覆盖这四项修复，未开展新一轮整站hunt。
+
+### Five fidelity surfaces
+
+- Typography：沿用本地Home Noto Sans SC与既有中文系统后备；标题32/手机26px、正文16px；不虚构任意稀有姓名的跨系统字体验收。
+- Spacing/layout：桌面左右事实/文字、顶部控件、编辑右下主行动；手机单列并可展开来源，四宽度无横溢且核心目标44px。
+- Colors：修后编辑浅绿采样约RGB(242,251,244)；原参考RGB(243,251,245)。未知/失败不是成功绿，文字和图标共同表达状态。
+- Assets：无新运行时图片、CSS画作或假童照片；Sprout/Lucide和既有助手素材复用。批准原生图片只作设计归档，不烘焙成页面。
+- Copy/content：真实日期/数量，简单中文和纯文本输入；角色/空/失败分开；老师明确核对后复制，不显示已发送。模板内容为隔离演示与协议替身，不是真实模型作品。
+
+### Functional evidence / residuals
+
+实际Next production HTTP+隔离PG+真实AUTH+Chrome37/37，errors=[]，3次StepFun协议替身HTTP调用、真实provider请求0。
+覆盖生成、编辑、刷新、源选择、署名全文复制、Windows仅CRLF/LF归一化的内容核对、剪贴板拒绝后的全文选中、原请求只GET恢复、空/503/admin、键盘Tab/Enter及减少动态；无force click。
+纯37、DB54、原business113、source-save24、role21、account-client33、auth36、guide19与核心68通过；这不等于在线模型、实际送达或生产迁移。
+
+本节NOT_RUN：真实provider、平台代理TTFB/90s闲断边界、真实kill进程恢复、Safari/暗色/真机键盘/屏幕阅读器、生产迁移与发布。开发模式webpack layout eval问题OPEN；生产包浏览器成功不宣称其已关闭。

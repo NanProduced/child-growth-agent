@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { AccountsError } from '@/lib/accounts/errors';
 import Link from 'next/link';
-import { ArrowUpRight, Baby, ClipboardList, Sprout, UserPlus } from 'lucide-react';
+import { ArrowUpRight, Sprout, UserPlus } from 'lucide-react';
 
 import { ReadFailureNotice, readFailureKind } from '@/components/read-failure-notice';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -49,7 +49,7 @@ export default async function ChildrenPage({
     ]);
   } catch (e) {
     if (e instanceof AccountsError) return <ReadFailureNotice kind={readFailureKind(e)} what="成长档案" retryHref="/children" />;
-    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
+    dbError = '成长档案暂时无法加载，请稍后重试。';
   }
 
   const activeClass =
@@ -74,7 +74,7 @@ export default async function ChildrenPage({
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">成长档案</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-            从最近一次观察回到每个小朋友的成长片段。
+            查看每名幼儿的观察记录和成长小结。
           </p>
         </div>
         <Button asChild className="w-full sm:w-auto">
@@ -110,7 +110,7 @@ export default async function ChildrenPage({
 
       {dbError ? (
         <Alert variant="destructive">
-          <AlertTitle>数据库暂不可用</AlertTitle>
+          <AlertTitle>成长档案暂时无法查看</AlertTitle>
           <AlertDescription>{dbError}</AlertDescription>
         </Alert>
       ) : children.length === 0 ? (
@@ -181,7 +181,7 @@ export default async function ChildrenPage({
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <h2 className="font-semibold text-slate-900">{child.name}</h2>
+                          <h2 className="font-semibold text-slate-900 [overflow-wrap:anywhere]">{child.name}</h2>
                         </div>
                         <p className="mt-1 text-sm text-slate-500">
                           {classLabel(child.class_stage, child.class_name) ?? '未分班'} ·{' '}
@@ -231,10 +231,6 @@ export default async function ChildrenPage({
         </div>
       )}
 
-      <div className="flex items-start gap-2 text-sm leading-6 text-slate-600">
-        <ClipboardList className="size-3.5" aria-hidden="true" />
-        原始观察会被保留；确认后的内容才会进入成长小结与支持建议。
-      </div>
     </div>
   );
 }

@@ -251,7 +251,7 @@ const SCENARIOS: Record<string, () => Promise<void>> = {
     }, "admin");
     const text = treeText(tree);
     assert.ok(text.includes('班级数据暂不可用'), '应显示数据不可用提示');
-    assert.ok(text.includes('读取暂未完成'), '读取失败应为可重试提示而非原始错误');
+    assert.ok(text.includes('暂时无法加载') && text.includes('请稍后重试'), '读取失败应为可重试提示而非原始错误');
     assert.equal(findClassFormDialogs(tree).length, 1, '班级管理入口必须保留');
     assert.equal(findSectionTitles(tree, '成长档案').length, 0, '成员区块不应渲染');
     assert.equal(findElements(tree, (element) => element.type === 'dl').length, 0, '失败时不应从初始空数组生成零值统计');
@@ -286,7 +286,7 @@ const SCENARIOS: Record<string, () => Promise<void>> = {
       },
     });
     const text = treeText(tree);
-    assert.ok(text.includes('数据库暂不可用'));
+    assert.ok(text.includes('班级资料暂时无法查看'));
     assert.equal(findClassFormDialogs(tree).length, 0, '班级实体未加载时不应出现管理入口');
   },
 

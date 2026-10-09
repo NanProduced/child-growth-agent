@@ -104,7 +104,7 @@ try {
   $routeCreated = $true
 
   if ($Production) {
-    & $pnpm exec next build
+    & $pnpm exec next build --webpack
     if ($LASTEXITCODE -ne 0) { throw "fixture production build failed" }
   }
 

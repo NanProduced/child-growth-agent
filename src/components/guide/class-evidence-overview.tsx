@@ -35,7 +35,7 @@ import styles from "./class-evidence-overview.module.css";
  * - 可靠性优先于普通状态展示：不可读取的幼儿不归入普通三类名单，完全不可用时不画三类分布；
  * - partial 只展示可核验人数下限与“数据待核验”，不把余数推断为暂无记录；
  * - 保健参考条目单列查阅，不参与行为统计（不计占比），不做正常／异常判断；
- * - 统计说明集中在模态对话框，不在每行重复长警告段落；
+ * - 目标按需展开，统计说明在页内查阅，不在每行重复长警告段落；
  * - 依据片段异步复用 GET /api/children/[id]/evidence-book，真实数据展示，绝不捏造示例正文。
  */
 
@@ -828,6 +828,9 @@ export function ClassEvidenceOverview({
   }, [overview.goals]);
 
   const referenceItems = overview.goals.flatMap((group) => group.items).filter(isReferenceItem);
+  const firstBehaviorGoalId = overview.goals.find((group) =>
+    group.items.some((item) => !isReferenceItem(item)),
+  )?.goal.id;
   function renderItem(item: ClassGuideItemView) {
     return <ItemRow key={item.item.id} item={item} index={itemIndexMap.get(item.item.id) ?? 1}
       scope={overview.scope} filters={overview.filters} rosterById={rosterById}
@@ -1153,25 +1156,38 @@ export function ClassEvidenceOverview({
                     .filter(Boolean)
                     .join(" · ") || "指南目标";
                 return (
-                  <section
+                  <details
                     key={goal.id}
                     className={cx("goal-group")}
                     aria-labelledby={`class-goal-${goal.id}`}
                     data-testid="goal-group"
+                    data-goal-id={goal.id}
+                    open={goal.id === firstBehaviorGoalId}
+                    onToggle={(event) => {
+                      if (!event.currentTarget.open && behaviorItems.some((item) => expandedIds.has(item.item.id))) {
+                        setExpandedIds(new Set());
+                      }
+                    }}
                   >
-                    <h3 className={cx("goal-title")} id={`class-goal-${goal.id}`}>
-                      <span className={cx("goal-path")} data-testid="goal-path">
-                        {pathText}
-                      </span>
-                      <span className={cx("goal-heading")}>
-                        <span className={cx("goal-index")}>{goal.index}</span>
-                        {goal.title}
-                      </span>
-                    </h3>
+                    <summary className={cx("goal-summary")} data-testid="goal-disclosure">
+                      <h3 className={cx("goal-title")} id={`class-goal-${goal.id}`}>
+                        <span className={cx("goal-path")} data-testid="goal-path">
+                          {pathText}
+                        </span>
+                        <span className={cx("goal-heading")}>
+                          <span className={cx("goal-index")}>{goal.index}</span>
+                          {goal.title}
+                        </span>
+                        <span className={cx("goal-meta")}>
+                          {behaviorItems.length} 项
+                          <ChevronDown className={cx("goal-chevron")} aria-hidden="true" />
+                        </span>
+                      </h3>
+                    </summary>
                     <ul className={cx("item-list")}>
                       {behaviorItems.map(renderItem)}
                     </ul>
-                  </section>
+                  </details>
                 );
               })}
             </div>

@@ -35,31 +35,31 @@ export function YayaRecoveryPart({ data }: DataMessagePartProps<YayaChatRecovery
           });
           const outcome = checked.outcome;
           const success = (outcome.kind === 'saved' || outcome.kind === 'saved_detail_unavailable') && receiptProvesSuccess(outcome.receipt);
-          results.push({ id: item.operation_id, text: success ? '回执已核实保存' : outcome.kind === 'in_progress' ? '仍在进行中' : '当前结果尚不能证明已保存' });
+          results.push({ id: item.operation_id, text: success ? '已保存' : outcome.kind === 'in_progress' ? '仍在处理中' : '保存结果待核对' });
         }
         setOperations(results);
       }
       const result = await lookupOriginalRun(mark.conversation_id, mark.run.client_request_id);
-      if (!result || !('run_id' in result) || result.run_id !== mark.run.run_id) { setNotice('原运行目前无法核验；不会重新发送。'); return; }
-      if (result.status !== 'finished') { setNotice('原运行尚未得到可核验的终态；仅保留原身份。'); return; }
+      if (!result || !('run_id' in result) || result.run_id !== mark.run.run_id) { setNotice('暂时无法确认上次请求的结果，不会自动重发。'); return; }
+      if (result.status !== 'finished') { setNotice('上次请求还没有可确认的结果，请稍后再核对。'); return; }
       if (result.outcome.kind === 'answered') setText(result.outcome.content);
       else if (result.outcome.kind === 'clarified') setText(result.outcome.question);
       else if (result.outcome.kind === 'proposed' && mark.proposal && result.outcome.proposals.some(item => item.proposal_id === mark.proposal?.proposal_id && item.batch_id === mark.proposal.batch_id)) setProposal(mark.proposal.proposal_id);
-      else setNotice('本次运行已停止；已提交操作不会因此回滚。');
-    } catch { setNotice('读取暂未完成；不会把它当作未保存或自动重发。'); }
+      else setNotice('上次回复已停止；已经保存的内容不会撤销。');
+    } catch { setNotice('暂时读不到上次结果，不会自动重复提交。'); }
     finally { setChecking(false); }
   };
   return <div className="space-y-4">
     <section className="space-y-2 rounded-xl border border-border bg-card p-4 text-base leading-[1.65] text-foreground sm:text-sm" aria-busy={checking}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-      <h3 className="flex items-center gap-2 font-semibold"><History className="size-4 text-muted-foreground" aria-hidden />历史核对</h3>
-      <Button className="min-h-11 rounded-xl shadow-none" variant="outline" disabled={checking} onClick={() => void check()}>{checking ? '正在核对…' : '核对原运行'}</Button>
+      <h3 className="flex items-center gap-2 font-semibold"><History className="size-4 text-muted-foreground" aria-hidden />上次请求的结果</h3>
+      <Button className="min-h-11 rounded-xl shadow-none" variant="outline" disabled={checking} onClick={() => void check()}>{checking ? '正在核对…' : '核对上次结果'}</Button>
       </div>
-      <p className="text-sm text-muted-foreground">历史核对仅读取原运行，不会自动执行操作。</p>
+      <p className="text-sm text-muted-foreground">只检查上次请求，不会再次执行操作。</p>
       {notice ? <p role="status">{notice}</p> : null}
       {operations.map((item, index) => <p key={item.id} role="status" className="text-sm">第 {index + 1} 项：{item.text}</p>)}
       <details className="text-xs leading-5 text-muted-foreground">
-        <summary className="min-h-11 cursor-pointer content-center rounded-lg px-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">查看原身份与核对详情</summary>
+        <summary className="min-h-11 cursor-pointer content-center rounded-lg px-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">查看请求信息</summary>
         <div className="space-y-2 pb-2 [overflow-wrap:anywhere]">
           <p>原会话：{mark.conversation_id}</p>
           <p>历史所有者：{mark.owner_account_id}</p>

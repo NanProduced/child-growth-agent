@@ -315,7 +315,7 @@ export function TransferClassDialog({
         <DialogHeader>
           <DialogTitle>为 {child.name} 转班</DialogTitle>
           <DialogDescription>
-            转班只改变当前归属：旧的分班关系保留为历史，已保存的观察仍显示当时的班级语境。
+            转班后，原有观察仍保留当时的班级，不会移到新班。
           </DialogDescription>
         </DialogHeader>
 

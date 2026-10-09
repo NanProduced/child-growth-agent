@@ -30,7 +30,7 @@ export function YayaAppShell({ auth, children }: { auth: AuthStatusResponse; chi
           ]
         )}
       >
-        <TopNav />
+        <TopNav assistantEntry={<YayaEntry auth={auth} />} />
         <main className={cn(
           "mx-auto w-full max-w-[1536px] px-4 pb-16 pt-6 sm:px-6",
           open ? "lg:px-6 lg:[container-name:yaya-main] lg:[container-type:inline-size]" : "lg:px-10"
@@ -39,7 +39,6 @@ export function YayaAppShell({ auth, children }: { auth: AuthStatusResponse; chi
         </main>
       </div>
       <YayaPanel auth={auth} />
-      <YayaEntry auth={auth} />
     </div>
   );
 }

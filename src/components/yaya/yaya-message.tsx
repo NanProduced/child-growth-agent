@@ -110,7 +110,7 @@ function UserContent() {
               </div>
             ) : null}
             <p className="tabular-nums">引用时间：<time dateTime={quote.yayaPage.captured_at}>{quote.yayaPage.captured_at}</time></p>
-            <p>仅作对话的关注线索，不作为观察事实依据，也不会自动指定操作对象。</p>
+            <p>本页内容仅供这次对话参考，观察仍需确认后归档。</p>
           </div>
         </details>
         ) : null;

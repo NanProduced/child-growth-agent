@@ -472,21 +472,21 @@ function ItemOutcomeLine({ outcome, onRecheck, checking }: {
   const text =
     outcome.kind === "saved"
       ? success
-        ? "已保存（服务端回执核对一致）"
-        : "回执缺少完整成功证明"
+        ? "已保存"
+        : "保存结果还无法确认"
       : outcome.kind === "saved_detail_unavailable"
         ? success
-          ? "已保存，详情暂不可读"
-          : "回执缺少完整成功证明"
+          ? "已保存，暂时读不到详情"
+          : "保存结果还无法确认"
         : outcome.kind === "in_progress"
-          ? "此操作仍在进行中"
+          ? "仍在处理中"
           : outcome.kind === "conflict"
-            ? "前提已变化，需要重新核对"
+            ? "相关信息有变化，请重新核对"
             : outcome.kind === "failed"
               ? outcome.effect === "none"
-                ? "没有完成，无提交效果"
-                : "失败，但可能已有提交效果"
-              : "保存结果未知，按原操作核对";
+                ? "这次操作未保存"
+                : "操作未完成，保存结果待核对"
+              : "保存结果待核对";
   return (
     <p role="status" className={cn("flex flex-wrap items-center gap-2 text-sm leading-[1.65]", tone)}>
       <span className="inline-flex items-center gap-1">
@@ -709,14 +709,14 @@ export function YayaProposalPanel({
         {proposal !== null ? (
           <>
             <Badge variant="secondary" className={cn("text-xs", proposal.status === "open" ? allSaved ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-800" : "bg-muted text-muted-foreground")}>
-              {proposal.status === "open" ? allSaved ? "回执已核对" : "待核对" : proposal.status === "cancelled" ? "已取消" : "已结束"}
+              {proposal.status === "open" ? allSaved ? "已保存" : "待核对" : proposal.status === "cancelled" ? "已取消" : "已结束"}
             </Badge>
             <span className="w-full text-xs leading-5 text-muted-foreground">
-              本批 {proposal.items.length} 条 · 可提交 {pendingCount} · 已选 {selectedIds.length} · 已保存回执 {savedCount} · 受限/待补 {restrictedCount}
+              共 {proposal.items.length} 项 · 可确认 {pendingCount} · 已选 {selectedIds.length} · 已保存 {savedCount} · 待补充或核对 {restrictedCount}
             </span>
           </>
         ) : (
-          <span className="text-xs text-muted-foreground">{loading ? "正在读取提案…" : "提案不可读"}</span>
+          <span className="text-xs text-muted-foreground">{loading ? "正在读取操作内容…" : "暂时无法查看操作内容"}</span>
         )}
         <span className="text-xs text-muted-foreground">
           {origin === "model_suggestion" ? "芽芽建议" : "教师发起"}
@@ -875,7 +875,7 @@ export function YayaProposalPanel({
       {proposal !== null && proposal.status === "open" && !allSaved ? (
         <footer className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-4">
           <p className="w-full text-sm leading-[1.65] text-muted-foreground">
-            批准只执行卡片中的操作；保存原文或整理草稿不等于确认归档。取消提案不会撤销已提交的业务。
+            只处理你勾选的操作。仅保存原文或草稿时，不会自动归档；取消不撤回已保存内容。
           </p>
           <p className="mb-2 w-full text-xs leading-5 text-muted-foreground">需要调整时，请在对话中说明补充内容。</p>
           <Button

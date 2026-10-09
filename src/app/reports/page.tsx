@@ -62,7 +62,7 @@ export default async function ReportsPage({
     ]);
   } catch (e) {
     if (e instanceof AccountsError) return <ReadFailureNotice kind={readFailureKind(e)} what="成长回顾" retryHref="/reports" />;
-    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
+    dbError = '成长回顾暂时无法加载，请稍后重试。';
   }
 
   const observationsByChild = new Map<string, ScopedObservation[]>();
@@ -123,13 +123,13 @@ export default async function ReportsPage({
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-slate-900">成长回顾</h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-          挑一个小朋友，沿已确认的观察回看这一段成长：小结、最近变化、线索、活动支持与证据时间线。
+          选一名幼儿，回看已确认的观察和成长小结。
         </p>
       </div>
 
       {dbError ? (
         <Alert variant="destructive">
-          <AlertTitle>数据库暂不可用</AlertTitle>
+          <AlertTitle>成长回顾暂时无法查看</AlertTitle>
           <AlertDescription>{dbError}</AlertDescription>
         </Alert>
       ) : children.length === 0 || !selected ? (
@@ -141,7 +141,7 @@ export default async function ReportsPage({
             <div>
               <h2 className="font-medium text-slate-800">还没有成长档案</h2>
               <p className="mt-1 max-w-lg text-sm leading-6 text-slate-500">
-                建立成长档案并确认一条观察后，这里会出现这个小朋友的成长回顾。
+                建档并确认一条观察后，可以在这里回顾。
               </p>
             </div>
             <Button asChild>
@@ -155,10 +155,10 @@ export default async function ReportsPage({
       ) : (
         <>
           <nav
-            aria-label="选择小朋友"
+            aria-label="选择幼儿"
             className="flex flex-wrap items-center gap-x-1 gap-y-1 text-sm"
           >
-            <span className="mr-1 text-xs text-slate-500">选择小朋友</span>
+            <span className="mr-1 text-xs text-slate-500">选择幼儿</span>
             {children.map((child) => {
               const active = child.id === selected.id;
               const count = confirmedCountOf(child.id);
@@ -176,7 +176,7 @@ export default async function ReportsPage({
                   <span aria-hidden="true">{child.avatar_emoji ?? '🧒'}</span>
                   <span className="min-w-0 break-words">{child.name}</span>
                   {count === 0 ? (
-                    <span className="text-xs font-normal text-slate-400">待首条确认</span>
+                    <span className="text-xs font-normal text-slate-400">尚无确认观察</span>
                   ) : null}
                 </Link>
               );
@@ -234,8 +234,7 @@ export default async function ReportsPage({
                 <div>
                   <h2 className="font-medium text-slate-800">还没有已确认观察</h2>
                   <p className="mt-1 max-w-xl text-sm leading-6 text-slate-500">
-                    成长回顾只依据教师确认后的观察，不会把草稿当作正式记录。确认第一条观察后，
-                    这里会出现成长小结、最近变化、观察到的线索、活动支持摘要和证据时间线。
+                    由任教教师确认一条观察后，可以在这里回顾。
                   </p>
                 </div>
                 <Button asChild size="sm" className="min-h-11">
@@ -254,21 +253,17 @@ export default async function ReportsPage({
                     <h2 id="summary-title" className="text-base font-semibold">
                       成长小结
                     </h2>
-                    <p className="mt-1 text-xs text-slate-500">基于已确认观察更新</p>
+                    <p className="mt-1 text-xs text-slate-500">来自教师已确认的观察</p>
                   </div>
                   <Badge variant="outline" className="font-normal">
-                    {isFallback ? '根据现有观察呈现' : '已更新'}
+                    {isFallback ? '观察摘要' : '已更新'}
                   </Badge>
                 </div>
                 <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-5 sm:p-6">
                   <p className="max-w-3xl break-words text-base leading-7 text-slate-700">
                     {profile.summary}
                   </p>
-                  <p className="mt-3 text-xs leading-5 text-slate-500">
-                    {isFallback
-                      ? '已有确认观察会先在这里呈现；下一次确认后，观察助手会继续更新这段小结。'
-                      : `最近更新：${formatDateTimeCn(profileUpdatedAt)}`}
-                  </p>
+                  {!isFallback ? <p className="mt-3 text-xs leading-5 text-slate-500">最近更新：{formatDateTimeCn(profileUpdatedAt)}</p> : null}
                 </div>
               </section>
 
@@ -293,7 +288,7 @@ export default async function ReportsPage({
                 </h2>
                 {profile.development_clues.length === 0 ? (
                   <p className="mt-2 text-sm leading-6 text-slate-500">
-                    继续记录并确认观察后，这里会积累这个小朋友的发展线索。
+                    还没有可回顾的线索，可以继续记录并确认观察。
                   </p>
                 ) : (
                   <ul className="mt-2 max-w-3xl space-y-2 text-sm leading-6 text-slate-600">
@@ -319,7 +314,7 @@ export default async function ReportsPage({
                     活动支持摘要
                   </h2>
                   <p className="mt-1 text-xs text-slate-500">
-                    {isAdmin ? '由教师从已确认观察整理生成' : '从已确认观察整理，可在成长档案里重新生成'}
+                    {isAdmin ? '由任教教师整理' : '完整建议在成长档案中查看'}
                   </p>
                 </div>
                 {support ? (
@@ -351,8 +346,8 @@ export default async function ReportsPage({
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <p className="max-w-xl text-sm leading-6 text-slate-600">
                       {isAdmin
-                        ? '还没有活动支持建议。教师可在成长档案里从这些已确认观察生成活动支持。'
-                        : '还没有活动支持建议。进入成长档案后，可以从这些已确认观察生成 2～3 个可试试的活动。'}
+                        ? '还没有可查看的建议，可请任教教师整理。'
+                        : '可在成长档案中整理活动建议。'}
                     </p>
                     <Link
                       href={`/children/${selected.id}`}
@@ -372,7 +367,7 @@ export default async function ReportsPage({
                       观察证据时间线
                     </h2>
                     <p className="mt-1 text-xs text-slate-500">
-                      原始观察、AI 草稿与教师确认稿分开放置，展开可逐一对照
+                      展开记录，对照原文、AI 草稿和教师确认稿。
                     </p>
                   </div>
                   <span className="text-xs text-slate-500">共 {confirmed.length} 条</span>
@@ -429,7 +424,7 @@ export default async function ReportsPage({
                               <div className="rounded-lg border border-violet-200 bg-violet-50/40 p-3">
                                 <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-medium text-slate-500">
                                   <Sparkles className="size-3.5 text-violet-500" aria-hidden="true" />
-                                  AI 草稿（确认前版本，仅供追溯）
+                                  AI 草稿（确认前）
                                   <AiBadge />
                                 </div>
                                 <DraftView draft={observation.ai_draft} />
@@ -439,7 +434,7 @@ export default async function ReportsPage({
                             <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
                               <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-medium text-emerald-700">
                                 <BadgeCheck className="size-3.5" aria-hidden="true" />
-                                教师确认稿（已进入正册）
+                                教师确认稿（已归档）
                                 <span className="font-normal text-slate-500">
                                   {formatDateTimeCn(observation.confirmed_at)}
                                 </span>

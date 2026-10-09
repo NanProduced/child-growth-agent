@@ -85,7 +85,7 @@ export default async function ClassDetailPage({
       if (e.code === 'not_found') notFound();
       return <ReadFailureNotice kind={readFailureKind(e)} what="班级资料" retryHref={`/classes/${encodeURIComponent(id)}`} />;
     }
-    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
+    dbError = '班级资料暂时无法加载，请稍后重试。';
   }
 
   if (dbError) {
@@ -98,7 +98,7 @@ export default async function ClassDetailPage({
           </Link>
         </Button>
         <Alert variant="destructive">
-          <AlertTitle>数据库暂不可用</AlertTitle>
+          <AlertTitle>班级资料暂时无法查看</AlertTitle>
           <AlertDescription>{dbError}</AlertDescription>
         </Alert>
       </div>
@@ -122,7 +122,7 @@ export default async function ClassDetailPage({
       if (e.code === 'not_found') notFound();
       return <ReadFailureNotice kind={readFailureKind(e)} what="班级内的成长档案与观察" retryHref={`/classes/${encodeURIComponent(id)}`} />;
     }
-    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
+    dbError = '班级内的档案与观察暂时无法加载，请稍后重试。';
   }
 
   const observations = allObservations
@@ -167,7 +167,7 @@ export default async function ClassDetailPage({
               )}
             </div>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-              这个班级的成长档案与观察证据都集中在这里。
+              查看班上幼儿的成长档案与观察记录。
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -258,7 +258,7 @@ export default async function ClassDetailPage({
           <section>
             <SectionTitle
               title="成长档案"
-              hint="点击进入每个小朋友的成长档案"
+              hint="选一名幼儿查看档案"
               extra={<span className="text-xs text-slate-500">共 {children.length} 份</span>}
             />
             {children.length === 0 ? (
@@ -341,7 +341,7 @@ export default async function ClassDetailPage({
             />
             {recent.length === 0 ? (
               <EmptyHint
-                text={isAdmin ? '班级还没有观察记录。教师录入并确认后，记录会显示在这里。' : '班级还没有观察记录，从一次具体行为开始记录。'}
+                text={isAdmin ? '教师记录观察后，会显示在这里。' : '班级还没有观察记录，可以记录幼儿的具体行为或原话。'}
                 action={isAdmin ? undefined : (
                   <Button asChild size="sm" className="min-h-11">
                     <Link href="/observations/new">

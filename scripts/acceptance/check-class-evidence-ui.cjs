@@ -89,8 +89,13 @@ async function openPage(browser, viewport, options = {}) {
   page.on("pageerror", (err) => console.error("[BROWSER PAGE_ERROR]", err.message, err.stack));
   await page.goto(BASE_URL, { waitUntil: "domcontentloaded", timeout: 180000 });
   await page.waitForSelector(OVERVIEW + "[data-client-ready=true]", { timeout: 180000 });
-  const references = page.locator("[data-testid=reference-library]");
-  if (await references.count() && await references.getAttribute("open") === null) await references.locator(":scope > summary").click();
+  if (options.expandGroups !== false) {
+    for (const group of await page.locator("details[data-goal-id]").all()) {
+      if (await group.getAttribute("open") === null) await group.locator(":scope > summary").click();
+    }
+    const references = page.locator("[data-testid=reference-library]");
+    if (await references.count() && await references.getAttribute("open") === null) await references.locator(":scope > summary").click();
+  }
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(1500);
   return { context, page };
@@ -136,6 +141,8 @@ async function waitPanelSettled(page) {
 }
 
 async function togglePanel(page, locator) {
+  const goal = locator.locator("xpath=ancestor::details[@data-goal-id]");
+  if (await goal.count() && await goal.getAttribute("open") === null) await goal.locator(":scope > summary").click();
   await locator.scrollIntoViewIfNeeded().catch(() => {});
   await locator.click();
   await waitPanelSettled(page);
@@ -148,7 +155,9 @@ async function capture(page, fileName) {
 }
 
 async function auditViewport(browser, width, height, label) {
-  const { context, page } = await openPage(browser, { width, height });
+  const { context, page } = await openPage(browser, { width, height }, { expandGroups: false });
+  const groups = page.locator("details[data-goal-id]");
+  check(`${label}: 默认只展开首个目标`, await groups.count() > 1 && await groups.locator("[data-testid=goal-disclosure]").count() === await groups.count() && await page.locator("details[data-goal-id][open]").count() === 1);
   const overflow = await page.evaluate(() => {
     const doc = document.scrollingElement || document.documentElement;
     const overview = document.querySelector("[data-testid=class-evidence-overview]");
@@ -167,7 +176,7 @@ async function auditViewport(browser, width, height, label) {
 
   const smallTargets = await page.evaluate(() => {
     const nodes = document.querySelectorAll(
-      "[data-testid=class-evidence-overview] button, [data-testid=class-evidence-overview] select, [data-testid=class-evidence-overview] input",
+      "[data-testid=class-evidence-overview] button, [data-testid=class-evidence-overview] select, [data-testid=class-evidence-overview] input, [data-testid=class-evidence-overview] summary",
     );
     return [...nodes]
       .filter((el) => el.offsetParent !== null)
@@ -201,6 +210,7 @@ async function auditViewport(browser, width, height, label) {
 
   try {
     await auditViewport(browser, 1440, 900, "1440x900");
+    await auditViewport(browser, 1024, 900, "1024x900");
     await auditViewport(browser, 768, 1024, "768x1024");
     await auditViewport(browser, 390, 844, "390x844");
 
@@ -365,6 +375,19 @@ async function auditViewport(browser, width, height, label) {
     const drilldown = await lastEvent(page, "drilldown");
     check("钻取回调：儿童 + 条目 + 同一筛选范围", drilldown && drilldown.payload.child_id === "fixture-class-mid2-child-01" && drilldown.payload.item_id === MAIN_ITEM && drilldown.payload.scope.label === "2026-2027学年第一学期", JSON.stringify(drilldown));
     await capture(page, "expanded-1440.png");
+
+    /* 目标折叠不留下独立详情，也不删除其他参考年龄条目。 */
+    const mainGoal = main.locator("xpath=ancestor::details[@data-goal-id]");
+    const goalSummary = mainGoal.locator(":scope > summary");
+    await goalSummary.focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.querySelector('[data-current-item-id="item.ui.language.l1.3-4"]') === null);
+    check("目标可用键盘收起", await mainGoal.getAttribute("open") === null);
+    check("收起目标同步关闭独立详情", await mainPanel.count() === 0);
+    await page.keyboard.press("Enter");
+    check("重新展开保留跨年龄条目", await mainGoal.locator("[data-testid=class-evidence-item]").count() === 2);
+    check("重新展开人数比例未改变且不自动打开名单", await main.getAttribute("data-ratio") === "0.3" && await main.locator("[data-testid=item-disclosure]").getAttribute("aria-expanded") === "false");
+    await togglePanel(page, main.locator("[data-testid=item-disclosure]"));
 
     /* ---- 期间受控（保留 R1 场景） ---- */
     await page.locator("[data-testid=scope-select]").selectOption("custom_range");

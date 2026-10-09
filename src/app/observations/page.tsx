@@ -5,7 +5,6 @@ import { ClipboardList, PenLine } from 'lucide-react';
 
 import { ReadFailureNotice, readFailureKind } from '@/components/read-failure-notice';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/components/status-badges';
@@ -22,7 +21,7 @@ export const metadata: Metadata = {
 
 const TABS: { key: ObservationStatus | 'all'; label: string }[] = [
   { key: 'all', label: '全部' },
-  { key: 'draft', label: '待判断' },
+  { key: 'draft', label: '待整理' },
   { key: 'needs_input', label: '待补充' },
   { key: 'ai_organized', label: '待确认' },
   { key: 'confirmed', label: '已确认' },
@@ -71,7 +70,7 @@ export default async function ObservationsPage({
     ]);
   } catch (e) {
     if (e instanceof AccountsError) return <ReadFailureNotice kind={readFailureKind(e)} what="观察记录" retryHref="/observations" />;
-    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
+    dbError = '观察记录暂时无法加载，请稍后重试。';
   }
 
   const activeClass =
@@ -108,11 +107,11 @@ export default async function ObservationsPage({
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">观察记录</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-            先处理需要教师判断的记录，再回到已确认观察的证据时间线。
+            查看草稿、补充信息，或确认观察归档。
           </p>
         </div>
         {isAdmin ? (
-          <p className="max-w-xs text-sm leading-6 text-slate-500">管理员查看全园观察记录（只读）；录入与确认由教师完成。</p>
+          <p className="max-w-xs text-sm leading-6 text-slate-500">管理员可查看全园记录；记录与确认由任教教师完成。</p>
         ) : (
           <Button asChild className="w-full sm:w-auto">
             <Link href="/observations/new">
@@ -163,7 +162,7 @@ export default async function ObservationsPage({
 
       {dbError ? (
         <Alert variant="destructive">
-          <AlertTitle>数据库暂不可用</AlertTitle>
+          <AlertTitle>观察记录暂时无法查看</AlertTitle>
           <AlertDescription>{dbError}</AlertDescription>
         </Alert>
       ) : shown.length === 0 ? (
@@ -176,7 +175,7 @@ export default async function ObservationsPage({
               </h2>
               <p className="mt-1 text-sm leading-6 text-slate-500">
                 {nothingAtAll
-                  ? isAdmin ? '全园还没有观察记录；教师录入后会显示在这里。' : '从一次具体行为开始，保存后再进入 AI 整理。'
+                  ? isAdmin ? '教师记录观察后，会显示在这里。' : '写下幼儿做了什么、说了什么，再请芽芽整理。'
                   : '可以切换其他状态或班级查看其他记录。'}
               </p>
             </div>
@@ -216,11 +215,6 @@ export default async function ObservationsPage({
                 <p className="mt-2 line-clamp-2 text-sm leading-6 text-slate-600">
                   {excerpt(observation.raw_text, 140)}
                 </p>
-                {observation.status === 'confirmed' ? (
-                  <Badge variant="outline" className="mt-3 border-emerald-200 font-normal text-emerald-700">
-                    已进入成长档案依据
-                  </Badge>
-                ) : null}
               </Link>
             );
           })}

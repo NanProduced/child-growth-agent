@@ -608,8 +608,8 @@ export function ReviewClient({
         confirmAppliedIsDecisive(data.guideEvidence) === 'deferred'
           ? '关联选择已保留，将在最终归档时写入。'
           : data.agentReview?.decision === 'accept'
-            ? '已结合补充依据完成审核，请进行最终归档。'
-            : 'Agent 还需要进一步澄清，请继续补充。',
+            ? '已核对补充内容，可以确认归档。'
+            : '还需要补充一些事实，请看下面的问题。',
       );
     } catch (e) {
       // 提交失败保留输入，教师可以直接重试
@@ -685,7 +685,7 @@ export function ReviewClient({
         <CardContent className="space-y-1.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
             <FileText className="size-3.5 text-emerald-700" />
-            观察原文（保存后不可修改，作为追溯依据）
+            观察原文（已保存，不能修改）
           </div>
           <p className="whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-sm leading-7 text-slate-700">
             {observation.raw_text}
@@ -727,8 +727,8 @@ export function ReviewClient({
           <AlertDescription>
             {writeAccess.read_only_reason ??
               (configured
-                ? '生成 AI 整理与确认归档需要教师身份：请点击右上角「园所账号登录」输入账号密码。'
-                : '服务端尚未配置账号认证（AUTH_TRUSTED_ORIGINS），写入与 AI 调用已默认禁用；配置环境变量并重启后可用。')}
+                ? '整理和确认观察由任教教师完成，请使用教师账号。'
+                : '账号信息暂时无法确认，请稍后重试。')}
           </AlertDescription>
         </Alert>
       ) : null}
@@ -802,7 +802,7 @@ export function ReviewClient({
               </Badge>
             </CardTitle>
             <CardDescription>
-              Agent 只在补充内容会影响发展线索或支持建议时提问。原始观察保持不变。
+              补充你记得的事实；记不清时，可以跳过。原文不会改变。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -882,12 +882,12 @@ export function ReviewClient({
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <BadgeCheck className="size-5 text-emerald-600" />
-              教师确认稿（已进入正册）
+              教师确认稿（已归档）
             </CardTitle>
             <CardDescription>
               确认时间：{formatDateTimeCn(confirmedAt)}
-              {aiModel ? ` · 整理模型：${aiModel}` : ''}
             </CardDescription>
+            {aiModel ? <details className="text-sm text-slate-500"><summary className="min-h-11 cursor-pointer content-center">整理信息</summary><p>模型：{aiModel}</p></details> : null}
           </CardHeader>
           <CardContent>
             <DraftView draft={confirmedContent} />
@@ -900,9 +900,9 @@ export function ReviewClient({
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm text-slate-600">
               <Sparkles className="size-4 text-violet-500" />
-              追溯：AI 原始草稿（确认前版本）
+              AI 草稿（确认前）
             </CardTitle>
-            <CardDescription>AI 生成，仅为草稿；保留它与教师确认稿，便于回顾整理过程。</CardDescription>
+            <CardDescription>保留原草稿，可与教师确认稿对照。</CardDescription>
           </CardHeader>
           <CardContent>
             <DraftView draft={aiDraft} />
@@ -915,8 +915,7 @@ export function ReviewClient({
           <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
             <Sparkles className="size-8 text-violet-400" />
             <div className="text-sm text-slate-600">
-              还没有 AI 整理结果。AI 将依据《3-6 岁儿童学习与发展指南》把原文整理为
-              结构化分析卡片，产出仅为草稿，需教师核对确认。
+              原文已保存。可请芽芽参考《3—6岁儿童学习与发展指南》整理草稿，再由你核对确认。
             </div>
             {teacherReady ? (
               <Button onClick={() => void handleOrganize()} disabled={busy !== null || guideBusy}>
@@ -925,7 +924,7 @@ export function ReviewClient({
                 ) : (
                   <Sparkles className="size-4" />
                 )}
-                生成 AI 整理
+                整理观察
               </Button>
             ) : null}
           </CardContent>
@@ -940,18 +939,17 @@ export function ReviewClient({
               AI 整理草稿（教师可修改）
             </CardTitle>
             <CardDescription>
-              AI 生成，仅为草稿。请核对并按需要修改；确认后才进入正册，原文始终不可修改。
-              {aiModel ? ` · 模型：${aiModel}` : ''}
-              {organizedAt ? ` · 整理时间：${formatDateTimeCn(organizedAt)}` : ''}
+              请核对草稿，必要时修改；确认后才归档。
             </CardDescription>
+            {aiModel || organizedAt ? <details className="text-sm text-slate-500"><summary className="min-h-11 cursor-pointer content-center">整理信息</summary>{aiModel ? <p>模型：{aiModel}</p> : null}{organizedAt ? <p>整理时间：{formatDateTimeCn(organizedAt)}</p> : null}</details> : null}
           </CardHeader>
           <CardContent className="space-y-4">
             {contentChanged && !reviewMatchesCurrent ? (
               <Alert className="border-amber-200 bg-amber-50/70">
                 <Sparkles className="size-4 text-amber-600" />
-                <AlertTitle>检测到你修改了 AI 整理内容</AlertTitle>
+                <AlertTitle>整理内容已修改</AlertTitle>
                 <AlertDescription>
-                  提交后 Agent 会先核对修改与原始观察，再完成归档；教师备注单独变化不会触发这一步。
+                  芽芽会先核对修改是否符合观察，再由你确认归档。
                 </AlertDescription>
               </Alert>
             ) : null}
@@ -1013,7 +1011,7 @@ export function ReviewClient({
             </div>
 
             <div className="space-y-1.5">
-              <Label>原文金句</Label>
+              <Label>原文摘录</Label>
               <Input
                 value={form.highlight_quote}
                 onChange={(e) => updateForm({ highlight_quote: e.target.value })}
@@ -1053,7 +1051,7 @@ export function ReviewClient({
                 ) : (
                   <BadgeCheck className="size-4" />
                 )}
-                {contentChanged ? '提交修改审核' : '确认归档'}
+                {contentChanged ? '核对修改内容' : '确认归档'}
               </Button>
             </CardFooter>
           ) : null}
@@ -1076,17 +1074,17 @@ export function ReviewClient({
                 <MessageCircle className="size-5 text-amber-600" />
               )}
               <AiBadge />
-              Agent 修改审核
+              修改内容核对
             </CardTitle>
             <CardDescription>
-              审核结果绑定当前教师修改内容；再次修改后需要重新审核。
+              修改整理内容后，需要重新核对。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm leading-6">
             <div className="rounded-lg bg-white/75 px-3 py-2 font-medium text-slate-700">
               {teacherEditReview.decision === 'accept'
-                ? '已理解这次修改，可以最终归档。'
-                : '需要澄清这次修改，再继续归档。'}
+                ? '芽芽已核对修改，仍需你确认归档。'
+                : '还需要补充事实，再继续归档。'}
             </div>
             <p className="text-slate-700">{teacherEditReview.summary}</p>
             {teacherEditReview.change_summary.length > 0 ? (
@@ -1112,7 +1110,7 @@ export function ReviewClient({
             {teacherEditReview.decision === 'clarify' ? (
               <Alert className="border-amber-200 bg-white/70">
                 <MessageCircle className="size-4 text-amber-600" />
-                <AlertTitle>还需要澄清</AlertTitle>
+                <AlertTitle>还需要补充事实</AlertTitle>
                 <AlertDescription>{teacherEditReview.question}</AlertDescription>
               </Alert>
             ) : null}
@@ -1165,7 +1163,7 @@ export function ReviewClient({
                       disabled={confirmDisabled || !clarifyContent.trim()}
                     >
                       {busy === 'confirm' ? <Loader2 className="size-4 animate-spin" /> : null}
-                      提交澄清并重新审核
+                    补充并重新核对
                     </Button>
                   </div>
                 </div>

@@ -4,7 +4,6 @@ import { useState } from 'react';
 import { Leaf, Loader2, RefreshCw, Sparkles } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useTeacher } from '@/components/teacher-provider';
@@ -71,10 +70,7 @@ function ActivitySupportCard({ support }: { support: ActivitySupport['suggestion
 
         <div className="border-t border-slate-100 pt-3">
           <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-500">
-            <Badge variant="outline" className="font-normal text-slate-500">
-              依据
-            </Badge>
-            已确认观察线索
+            参考的观察
           </div>
           <ul className="space-y-1 text-xs leading-5 text-slate-500">
             {support.evidence.map((evidence, index) => (
@@ -151,14 +147,11 @@ export function ActivitySupportSection({
             <h2 id="activity-support-title" className="text-base font-semibold">
               活动支持
             </h2>
-            <Badge variant="outline" className="font-normal text-emerald-700">
-              少量建议
-            </Badge>
           </div>
           <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
             {readOnly
-              ? '教师从已确认观察和成长小结整理的建议，可在这里查看步骤、材料与依据。'
-              : '从已确认观察和成长小结出发，给下一次活动一个可以试试的方向。'}
+              ? '查看任教教师整理的活动建议。'
+              : '根据已确认的观察，想一想下次可以开展什么活动。'}
           </p>
         </div>
         {!readOnly && confirmedObservationCount > 0 ? (
@@ -185,8 +178,8 @@ export function ActivitySupportSection({
               <h3 className="font-medium text-slate-800">{readOnly ? '还没有活动支持建议' : '先确认一条观察'}</h3>
               <p className="mt-1 text-sm leading-6 text-slate-600">
                 {readOnly
-                  ? '活动支持由教师从已确认观察生成；生成后可以在这里查看完整建议与依据。'
-                  : '活动支持只会读取教师确认后的观察，不会把草稿或待补充内容当成事实。'}
+                  ? '由任教教师确认观察后，再整理活动建议。'
+                  : '确认后，芽芽可以根据这名幼儿的观察整理建议。'}
               </p>
             </div>
           </CardContent>
@@ -214,7 +207,7 @@ export function ActivitySupportSection({
             ))}
           </div>
           <p className="text-xs leading-5 text-slate-500" aria-live="polite">
-            {busy ? '正在用最新的已确认观察重新整理建议…' : '建议已随成长档案保存，可按现场情况灵活调整。'}
+            {busy ? '正在整理新的建议…' : '建议已保存，可按幼儿的实际反应调整。'}
           </p>
         </>
       ) : error ? (
@@ -240,17 +233,17 @@ export function ActivitySupportSection({
               <p className="mt-1 text-sm leading-6 text-slate-600">
                 {readOnly
                   ? hasStaleSupport
-                    ? '已确认观察有更新，上一次建议基于较早的观察；请由教师重新生成后查看最新依据。'
-                    : '暂时还没有可查看的活动支持。生成活动支持由教师在成长档案中完成。'
+                    ? '观察有更新，请由任教教师重新整理建议。'
+                    : '建议由任教教师在成长档案中整理。'
                   : hasStaleSupport
-                    ? '已确认观察有更新，上一次建议基于较早的观察；可以重新生成，旧建议不会冒充最新依据。'
+                    ? '观察有更新，请根据当前记录重新整理建议。'
                     : authLoading
-                      ? '正在确认教师身份…'
+                      ? '正在确认登录状态…'
                       : teacherReady
-                        ? '点击“生成活动支持”，从已确认观察中整理 2～3 个可试试的活动。'
+                        ? '可请芽芽根据已确认的观察整理活动建议。'
                         : configured
-                          ? '进入园所账号后，可以从已确认观察生成活动支持。'
-                          : '当前未配置教师口令，暂时不能生成活动支持。'}
+                          ? '请使用任教教师账号整理活动建议。'
+                          : '账号信息暂时无法确认，请稍后再试。'}
               </p>
             </div>
           </CardContent>

@@ -26,7 +26,7 @@ export function StatusBadge({ status, compact = false }: { status: ObservationSt
   }
   return (
     <Badge variant="secondary" className="bg-sky-100 text-sky-700">
-      已保存 · 待判断
+      已保存 · 待整理
     </Badge>
   );
 }

@@ -45,16 +45,16 @@ export function GrowthProfileRetry({
   return (
     <Alert className={error ? 'border-amber-200 bg-amber-50/70' : 'border-sky-200 bg-sky-50/60'}>
       <RefreshCw className="size-4 text-sky-700" />
-      <AlertTitle>{error ? '成长小结仍未更新' : '成长小结可以继续整理'}</AlertTitle>
+      <AlertTitle>{error ? '小结暂未更新' : hasStoredProfile ? '小结待更新' : '小结尚未整理'}</AlertTitle>
       <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
         <span>
           {error ?? (hasStoredProfile
-            ? '可以根据最新的已确认观察重新整理这段小结。'
-            : '当前内容先根据已确认观察呈现；可以请观察助手整理更完整的小结。')}
+            ? '可根据当前已确认的观察重新整理。'
+            : '当前是观察摘要，可请芽芽整理成小结。')}
         </span>
         <Button type="button" variant="outline" size="sm" onClick={() => void handleRetry()} disabled={busy}>
           {busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-          {busy ? '正在更新…' : '重新生成成长小结'}
+          {busy ? '正在整理…' : hasStoredProfile ? '更新成长小结' : '整理成长小结'}
         </Button>
       </AlertDescription>
     </Alert>
