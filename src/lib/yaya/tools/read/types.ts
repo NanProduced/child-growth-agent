@@ -54,6 +54,8 @@ export interface YayaObservationFilters {
   childId?: string;
   status?: ObservationStatus;
   limit?: number;
+  from?: string;
+  to?: string;
 }
 
 /**

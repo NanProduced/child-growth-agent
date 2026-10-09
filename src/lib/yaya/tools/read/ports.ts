@@ -73,7 +73,7 @@ export function createYayaReadPorts(): YayaReadPorts {
       ),
     listObservations: (filters, request) =>
       scopedListObservations(
-        { childId: filters.childId, status: filters.status, limit: filters.limit },
+        filters,
         request,
       ),
     getObservation: (observationId, request) => scopedGetObservation(observationId, request),

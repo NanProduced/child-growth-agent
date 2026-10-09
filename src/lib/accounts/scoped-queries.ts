@@ -54,7 +54,7 @@ export function scopedListChildren(request?: HeaderCarrier): Promise<Child[]> {
 }
 
 export function scopedListObservations(
-  filters: { childId?: string; status?: string; limit?: number } = {}, request?: HeaderCarrier,
+  filters: { childId?: string; status?: string; limit?: number; from?: string; to?: string } = {}, request?: HeaderCarrier,
 ): Promise<ScopedObservation[]> {
   return withScopedRead(request, async (principal) => {
     const ids = classIds(principal);
@@ -71,6 +71,9 @@ export function scopedListObservations(
       params.push(filters.childId); conditions.push(`o.child_id = $${params.length}`);
     }
     if (filters.status) { params.push(filters.status); conditions.push(`o.status = $${params.length}`); }
+    // Filter the authorized rows before LIMIT; filtering a capped list afterwards can omit the requested month.
+    if (filters.from) { params.push(filters.from); conditions.push(`o.observed_at >= $${params.length}::date`); }
+    if (filters.to) { params.push(filters.to); conditions.push(`o.observed_at <= $${params.length}::date`); }
     params.push(filters.limit ?? 1000);
     const rows = await query<{ data: Row; full: boolean }>(
       `SELECT (${full}) AS full, to_jsonb(o.*) || jsonb_build_object('observed_class',

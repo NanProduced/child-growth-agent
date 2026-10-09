@@ -659,6 +659,30 @@ async function main(): Promise<void> {
     );
     check(emptiedClass.children.length === 0, 'transferred roster becomes a real empty list, not an error');
 
+    /* Date-filtered batch content: shared scoped path, unchanged historical projection. */
+    const outsideMonth = randomUUID();
+    await db.query(`INSERT INTO observations(id,child_id,class_id,observed_at,context,raw_text,status,confirmed_content,confirmed_at)
+      VALUES($1,$2,$3,'2026-10-08','美工区','月份以外的正文不应进入九月批量读取','confirmed',$4::jsonb,clock_timestamp())`,
+      [outsideMonth, ids.childA, ids.classB, JSON.stringify(draft)]);
+    const contentParams = { child_id: ids.childA, status: 'confirmed', from: '2026-09-01', to: '2026-09-30', include_content: true, limit: 1 };
+    const batch = payloadOf(await run(teacherB.token, 'list_observations', contentParams));
+    const batchData = batch.data as { observations: Array<{ observation_id: string; raw_text: string; confirmed_description: string; access_projection: string }>; truncated: boolean };
+    check(batchData.observations.length === 1 && batchData.observations[0].observation_id === ids.obsA, 'batch date filtering happens before row limit');
+    check(batchData.observations[0].raw_text === '幼儿把积木放在一起。' && batchData.observations[0].confirmed_description === draft.objective_description, 'batch includes exact raw and confirmed description');
+    check(batchData.truncated === false, 'complete date window is not marked truncated');
+    check(!JSON.stringify(batch).includes('月份以外的正文'), 'outside-window body never appears in batch');
+    check(batch.recheck_dependencies.some(ref => ref.ref_id === `observation:${ids.obsA}`), 'batch registers the body source dependency');
+    const oldTeacherBatch = payloadOf(await run(teacherA.token, 'list_observations', contentParams));
+    check((oldTeacherBatch.data as typeof batchData).observations[0].access_projection === 'historical_read_only', 'former teacher batch preserves historical projection');
+    check(!JSON.stringify(oldTeacherBatch).includes('ai_draft') && !JSON.stringify(oldTeacherBatch).includes('agent_context'), 'batch never exposes AI draft or private workflow');
+    const foreignBatch = await run(teacherC.token, 'list_observations', contentParams);
+    check(!foreignBatch.ok && foreignBatch.code === 'out_of_scope', 'batch child scope is not bypassed by content flag');
+    const anonymousBatch = await run(null, 'list_observations', contentParams);
+    check(!anonymousBatch.ok && anonymousBatch.code === 'unauthenticated', 'batch rejects anonymous access');
+    const revokedBatch = await run(revoked.token, 'list_observations', contentParams);
+    check(!revokedBatch.ok && revokedBatch.code === 'unauthenticated', 'batch rechecks revoked session');
+    const emptyBatch = dataOf<{ observations: unknown[]; truncated: boolean }>(await run(teacherB.token, 'list_observations', { ...contentParams, from: '2020-01-01', to: '2020-01-31' }));
+    check(emptyBatch.observations.length === 0 && !emptyBatch.truncated, 'batch separates trusted empty period from denial');
     check(guard.hits === 0, 'zero provider network requests');
   } catch (error) {
     failure = error;

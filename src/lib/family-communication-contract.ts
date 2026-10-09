@@ -83,6 +83,10 @@ export const communicationWorkspaceSchema = z.object({
 export type CommunicationWorkspace = z.infer<typeof communicationWorkspaceSchema>;
 
 export const communicationModelSchema = z.object({
-  text: z.string().trim().min(30).max(3000),
-  evidence: z.array(z.object({ observation_id: id, quote: z.string().trim().min(4).max(300) }).strict()).min(1).max(12),
+  stories: z.array(z.object({
+    observation_id: id,
+    text: z.string().trim().min(12).max(800).describe('只写这条观察的具体事例，不写日期或月份；日期由服务端添加'),
+    quote: z.string().trim().min(4).max(300),
+  }).strict()).min(1).max(3),
+  suggestion: z.string().trim().max(500).describe('可选的家庭陪伴建议；不作事实回顾，不写日期，没有合适建议可填空字符串'),
 }).strict();
