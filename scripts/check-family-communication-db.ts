@@ -37,8 +37,8 @@ const model: typeof invokeChatLlm = async (messages) => {
   const facts = JSON.parse(messages[1].content) as { observations: Array<{ observation_id: string; raw_text: string }> };
   assert.ok(facts.observations.every((item) => !item.raw_text.includes("陈沐阳")), "other names redacted before provider");
   return { provider: "stepfun", model: "in-process-double", usage: null, content: JSON.stringify({
-    text: "小禾家长，您好！这段时间我们留下了几个有意思的片段。积木桥倒下后，她把桥墩挪近再试，说：“这次小车能过去了”。在家可以一起试试搭桥，听她说说自己的办法。",
-    evidence: [{ observation_id: ids.first, quote: "这次小车能过去了" }],
+    stories: [{ observation_id: ids.first, text: "积木桥倒下后，她把桥墩挪近再试，说：“这次小车能过去了”。", quote: "这次小车能过去了" }],
+    suggestion: "在家可以一起试试搭桥，听她说说自己的办法。",
   }) };
 };
 
@@ -94,6 +94,7 @@ async function main() {
     const draft = await generateCommunication(request(teacher.token), create, model);
     check("real DB draft is stored", draft.status === "draft" && draft.owner_account_id === teacher.id && draft.text.includes("桥墩"));
     check("model once only", models === 1);
+    check("stored generation uses server-owned observation date", draft.text.includes(`${Number(month.slice(0, 4))}年${Number(month.slice(5))}月2日`));
     const replay = await generateCommunication(request(teacher.token), { ...create, observation_ids: [...create.observation_ids].reverse() }, model);
     check("same request replays no model", replay.id === draft.id && models === 1);
     await denial(() => generateCommunication(request(teacher.token), { ...create, note: "different" }, model), "idempotency_conflict");
@@ -181,6 +182,21 @@ async function main() {
     check("after transfer new teacher does not inherit old private draft", (await lookupCommunication(request(outsider.token), create.client_request_id)) === null);
     const historic = await generateCommunication(request(outsider.token), input(), model);
     check("new responsible teacher can use confirmed history with previous classmates redacted", historic.status === "draft" && !historic.text.includes("陈沐阳"));
+    const wrongDate = input(); let dateAttempts = 0;
+    const recoveredDate = await generateCommunication(request(outsider.token), wrongDate, async (messages, options) => {
+      dateAttempts++;
+      if (dateAttempts === 1) return { provider: "stepfun", model: "wrong-date-double", usage: null, content: JSON.stringify({
+        stories: [{ observation_id: ids.first, text: "九月里，她把桥墩挪近再试，说：“这次小车能过去了”。", quote: "这次小车能过去了" }], suggestion: "" }) };
+      return model(messages, options);
+    });
+    check("invalid narration date retries only once", dateAttempts === 2 && recoveredDate.status === "draft" && !recoveredDate.text.includes("九月里"));
+    const permanentlyBadDate = input(); let invalidDateAttempts = 0;
+    await denial(() => generateCommunication(request(outsider.token), permanentlyBadDate, async () => {
+      invalidDateAttempts++; return { provider: "stepfun", model: "wrong-date-double", usage: null, content: JSON.stringify({
+        stories: [{ observation_id: ids.first, text: "去年她把桥墩挪近再试，说：“这次小车能过去了”。", quote: "这次小车能过去了" }], suggestion: "" }) };
+    }), "generation_failed");
+    const invalidDateRow = (await db.query("SELECT state,body FROM family_communications WHERE client_request_id=$1", [permanentlyBadDate.client_request_id])).rows[0];
+    check("invalid date never becomes a saved draft", invalidDateAttempts === 2 && invalidDateRow.state === "failed" && invalidDateRow.body === "");
     check("guard saw no real egress", guard.hits === 0);
     console.log(JSON.stringify({ passed, model_double_calls: models, real_model_requests: 0, evidence: "isolated_pg+real_auth+route_handler", run_id: runId }));
   } finally {

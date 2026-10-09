@@ -59,8 +59,9 @@ async function main() {
         const facts = JSON.parse(input.messages.find((item) => item.role === "user")!.content) as { child_name: string; observations: Array<{ observation_id: string; raw_text: string }> };
         const first = facts.observations[0];
         const quote = first.raw_text.includes("这次小车能过去了") ? "这次小车能过去了" : first.raw_text.slice(0, 12);
-        const text = `${facts.child_name}家长，您好！\n\n这段时间，我们记录了几个有意思的小故事。积木桥倒下后，她把桥墩挪近再试，说：“${quote}”。在美工区，她给画里的窗户添上圆点，讲起妈妈从窗户看自己的故事。她还会主动向同伴提出一起开车的请求。\n\n我们会继续提供积木、图书和画纸，回应她的想法。在家也可以听她讲讲画里的故事，或一起试试怎样把积木桥搭稳。`;
-        response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ model: "fixture-stepfun-protocol", choices: [{ message: { content: JSON.stringify({ text, evidence: [{ observation_id: first.observation_id, quote }] }) } }] }));
+        const stories = facts.observations.slice(0, 3).map(observation => ({ observation_id: observation.observation_id,
+          text: observation.raw_text, quote: observation.observation_id === first.observation_id ? quote : observation.raw_text.slice(0, 12) }));
+        response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ model: "fixture-stepfun-protocol", choices: [{ message: { content: JSON.stringify({ stories, suggestion: "在家也可以听她讲讲画里的故事，或一起试试怎样把积木桥搭稳。" }) } }] }));
       } catch { response.writeHead(400).end(); }
     });
     await new Promise<void>((resolve) => modelServer!.listen(0, "127.0.0.1", resolve));

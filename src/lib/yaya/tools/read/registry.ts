@@ -326,10 +326,21 @@ const childClassParams = z.strictObject({
     }),
 });
 const listClassesParams = z.strictObject({ catalog: z.boolean().optional() });
+const observationDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine(value => parseIsoDateStrict(value) !== null, '日期必须真实存在');
+const MAX_OBSERVATION_CONTENT_RECORDS = 60;
+const MAX_OBSERVATION_CONTENT_CHARACTERS = 60_000;
 const listObservationsParams = z.strictObject({
   child_id: z.string().min(1).optional(),
   status: z.enum(OBSERVATION_STATUSES).optional(),
   limit: z.number().int().min(1).max(1000).optional(),
+  from: observationDate.optional(),
+  to: observationDate.optional(),
+  include_content: z.boolean().optional().describe('回顾某名幼儿的多条记录时设为 true；必须提供 child_id，limit 最大 60'),
+}).superRefine((value, context) => {
+  if (value.from && value.to && value.from > value.to) context.addIssue({ code: 'custom', path: ['to'], message: '结束日期不能早于开始日期' });
+  if (value.include_content && !value.child_id) context.addIssue({ code: 'custom', path: ['child_id'], message: '批量正文必须指定幼儿' });
+  if (value.include_content && (value.limit ?? MAX_OBSERVATION_CONTENT_RECORDS) > MAX_OBSERVATION_CONTENT_RECORDS) context.addIssue({ code: 'custom', path: ['limit'], message: '批量正文最多 60 条' });
 });
 const evidenceQueryFields = {
   scope: z.enum(['current_semester', 'all_history', 'custom_range']).optional(),
@@ -516,16 +527,40 @@ function buildReadTools(ports: YayaReadPorts): ReadToolSpec<z.ZodType>[] {
     defineReadTool({
       tool: 'list_observations',
       description:
-        '查询当前范围内观察记录索引（可按幼儿/状态筛选，limit 最大 1000）；正文与工作流细节请用 get_observation。原班历史只读记录按聊天投影裁剪' +
+        '回顾某名幼儿整月或多条观察时，提供 child_id、from、to、status="confirmed"、include_content=true，一次读取原文与教师确认描述，不要逐条调用 get_observation。正文最多60条/60000字，truncated=true说明未读完整，不得声称全月没有记录或已完整回顾。默认仍是索引（limit最大1000）；单条工作流详情使用get_observation。原班历史只读投影保持裁剪' +
         SOURCE_CONTRACT,
       scope_policy: 'business_scope',
       auth: { kind: 'scope_query' },
       schema: listObservationsParams,
       run: async (params, context) => {
+        const contentLimit = params.limit ?? MAX_OBSERVATION_CONTENT_RECORDS;
+        const limit = params.include_content ? contentLimit : params.limit;
         const observations = await ports.listObservations(
-          { childId: params.child_id, status: params.status, limit: params.limit },
+          { childId: params.child_id, status: params.status, limit: params.include_content ? contentLimit + 1 : limit, from: params.from, to: params.to },
           context.request,
         );
+        if (params.include_content) {
+          const selected: Array<ReturnType<typeof observationIndex> & {
+            raw_text: string; confirmed_description: string | null; confirmed_at: string | null;
+            content_sources: { raw_text: YayaSourceRef; confirmed_description: YayaSourceRef | null };
+          }> = [];
+          let characters = 0;
+          const loaded: ScopedObservation[] = [];
+          for (const observation of observations.slice(0, limit)) {
+            const description = observation.confirmed_content?.objective_description ?? null;
+            characters += observation.raw_text.length + (description?.length ?? 0);
+            if (characters > MAX_OBSERVATION_CONTENT_CHARACTERS) break;
+            const sources = observationContentSources(observation);
+            selected.push({ ...observationIndex(observation), raw_text: observation.raw_text,
+              confirmed_description: description, confirmed_at: observation.confirmed_at,
+              content_sources: { raw_text: sources.raw_text, confirmed_description: sources.confirmed_content } });
+            loaded.push(observation);
+          }
+          return payload('list_observations', 'business_scope', scopeSource('observations:current_scope', '当前可读观察记录列表'), loaded.map(observationRef), {
+            child_id: params.child_id, from: params.from ?? null, to: params.to ?? null,
+            observations: selected, returned_count: selected.length, truncated: selected.length < observations.length,
+          });
+        }
         return payload(
           'list_observations',
           'business_scope',
