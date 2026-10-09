@@ -773,6 +773,14 @@
   .welcome-band {
     grid-template-columns: minmax(0, 1fr) 300px;
   }
+  .admin-actions {
+    flex-wrap: wrap;
+    padding-top: 0;
+  }
+  .admin-actions > a {
+    min-width: 0;
+    width: 100%;
+  }
   .teacher-artwork img {
     width: 300px;
   }
@@ -822,6 +830,7 @@
     padding: 30px;
   }
   .mechanism ol {
+    flex-wrap: wrap;
     gap: 10px;
   }
   .mechanism li {
@@ -1267,6 +1276,9 @@
   }
   .admin-actions > a {
     min-width: 0;
+  }
+  .mechanism ol {
+    flex-wrap: wrap;
   }
 }
 

@@ -1409,7 +1409,7 @@ function BasisEditorRow(props: {
               disabled={props.busy || props.disabled}
               data-testid="basis-quote-choice"
             >
-              {choice.label}·「{choice.quote.length > 12 ? `${choice.quote.slice(0, 12)}…` : choice.quote}」
+              {choice.quote_field === "highlight_quote" ? "确认稿 · 原文摘录" : choice.label}·「{choice.quote.length > 12 ? `${choice.quote.slice(0, 12)}…` : choice.quote}」
             </button>
           ))}
         </div>

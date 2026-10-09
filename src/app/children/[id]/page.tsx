@@ -89,20 +89,16 @@ function GrowthProfileSections({
             <h2 id="growth-summary-title" className="text-base font-semibold">
               成长小结
             </h2>
-            <p className="mt-1 text-xs text-slate-500">基于已确认观察更新</p>
+            <p className="mt-1 text-xs text-slate-500">来自教师已确认的观察</p>
           </div>
           <Badge variant="outline" className="font-normal">
-            {isFallback ? '根据现有观察呈现' : '已更新'}
+            {isFallback ? '观察摘要' : '已更新'}
           </Badge>
         </div>
         <Card className="border-emerald-200 bg-emerald-50/50">
           <CardContent className="space-y-3 p-5 sm:p-6">
             <p className="max-w-3xl text-base leading-7 text-slate-700">{profile.summary}</p>
-            <p className="text-xs leading-5 text-slate-500">
-              {isFallback
-                  ? '已有确认观察会先在这里呈现；下一次确认后，观察助手会继续更新这段小结。'
-                : `最近更新：${formatDateTimeCn(updatedAt)}`}
-            </p>
+            {!isFallback ? <p className="text-xs leading-5 text-slate-500">最近更新：{formatDateTimeCn(updatedAt)}</p> : null}
           </CardContent>
         </Card>
       </section>
@@ -173,7 +169,7 @@ export default async function ChildDetailPage({
       if (e.code === 'not_found') notFound();
       return <ReadFailureNotice kind={readFailureKind(e)} what="成长档案" retryHref={`/children/${encodeURIComponent(id)}`} />;
     }
-    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
+    dbError = '成长档案暂时无法加载，请稍后重试。';
   }
 
   if (dbError) {
@@ -186,7 +182,7 @@ export default async function ChildDetailPage({
           </Link>
         </Button>
         <Alert variant="destructive">
-          <AlertTitle>数据库暂不可用</AlertTitle>
+          <AlertTitle>成长档案暂时无法查看</AlertTitle>
           <AlertDescription>{dbError}</AlertDescription>
         </Alert>
       </div>
@@ -209,7 +205,7 @@ export default async function ChildDetailPage({
       if (e.code === 'not_found') notFound();
       return <ReadFailureNotice kind={readFailureKind(e)} what="成长档案的观察与班级轨迹" retryHref={`/children/${encodeURIComponent(id)}`} />;
     }
-    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
+    dbError = '观察与班级记录暂时无法加载，请稍后重试。';
   }
 
   if (dbError) {
@@ -297,6 +293,7 @@ export default async function ChildDetailPage({
             </div>
           </div>
           <div className="flex min-w-0 max-w-full shrink-0 flex-wrap gap-2">
+            {!isAdmin ? <Button asChild variant="outline"><Link href={`/family-communication?child=${encodeURIComponent(child.id)}`}>家园沟通</Link></Button> : null}
             <Button asChild variant="outline" className="min-h-11">
               <Link href={`/children/${encodeURIComponent(child.id)}/evidence?${evidenceEntryQuery(child.class_stage)}`}>
                 查看指南证据册
@@ -328,7 +325,7 @@ export default async function ChildDetailPage({
         </div>
         <div className="col-span-2 px-3 py-3 sm:col-span-1 sm:px-4">
           <p className="text-xs text-slate-500">当前班级</p>
-          <p className="mt-1 truncate text-sm font-medium text-slate-800">
+          <p className="mt-1 text-sm font-medium text-slate-800 [overflow-wrap:anywhere]">
             {classLabel(child.class_stage, child.class_name) ?? '暂未分班'}
           </p>
         </div>
@@ -378,7 +375,7 @@ export default async function ChildDetailPage({
             <div>
               <h2 className="font-semibold text-slate-800">成长小结</h2>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
-                还没有已确认的观察。确认一条具体记录后，这里会开始积累成长小结、最近变化和下一步支持。
+                确认一条观察后，可以在这里回顾。
               </p>
             </div>
           </CardContent>
@@ -403,7 +400,7 @@ export default async function ChildDetailPage({
             <h2 id="observation-timeline-title" className="text-base font-semibold">
               观察证据时间线
             </h2>
-            <p className="mt-1 text-xs text-slate-500">原文保留，点击记录可进入查看与确认</p>
+            <p className="mt-1 text-xs text-slate-500">打开记录，查看原文和确认稿。</p>
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-slate-500">共 {observations.length} 条</span>
@@ -427,8 +424,8 @@ export default async function ChildDetailPage({
                 <h3 className="font-medium">还没有观察记录</h3>
                 <p className="mt-1 text-sm text-slate-500">
                   {isAdmin
-                    ? '教师录入观察并确认后，记录会显示在这里。'
-                    : '从一次具体行为开始，逐步形成这个小朋友的观察档案。'}
+                    ? '教师记录观察后，会显示在这里。'
+                    : '记录幼儿的具体行为或原话。'}
                 </p>
               </div>
               {isAdmin ? null : (
@@ -473,9 +470,6 @@ export default async function ChildDetailPage({
                       </span>
                     </div>
                     <p className="text-sm leading-6 text-slate-600">{excerpt(obs.raw_text, 120)}</p>
-                    {obs.status === 'confirmed' ? (
-                      <p className="text-xs text-emerald-700">这条记录已进入成长档案依据</p>
-                    ) : null}
                   </CardContent>
                 </Card>
               </Link>

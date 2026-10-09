@@ -67,7 +67,7 @@ const STEPS = ['基本信息', '可选补充', '提交确认'] as const;
 const STEP_HINTS = [
   '姓名、性别、出生日期与班级为必填项。',
   '头像与备注可以留空。',
-  '确认信息无误后建档，随后直接录入第一次观察。',
+  '确认信息后建档，接着可以记录观察。',
 ] as const;
 
 const STEP_FIELDS: readonly FieldKey[][] = [
@@ -298,8 +298,7 @@ export default function NewChildPage() {
           <AlertTitle>账号服务暂时不可用</AlertTitle>
           <AlertDescription className="space-y-3">
             <p>
-              当前无法核验账号与任教范围，不能判断是否可以建档。这与未登录不同：重复输入账号密码
-              不会恢复，请等服务恢复后重新核验。
+              现在无法确认账号权限，暂时不能建档。请稍后重试。
             </p>
             <Button type="button" variant="outline" className="min-h-11" onClick={() => void revalidate()}>
               重新核验
@@ -317,7 +316,7 @@ export default function NewChildPage() {
           <LogIn className="size-4" />
           <AlertTitle>需要园所账号登录</AlertTitle>
           <AlertDescription className="space-y-3">
-            <p>建立成长档案属于写操作，需教师身份验证。请登录园所账号后再来。</p>
+            <p>请登录园所账号后建立成长档案。</p>
             <Button asChild className="min-h-11">
               <Link href="/login?returnTo=%2Fchildren%2Fnew">园所账号登录</Link>
             </Button>
@@ -334,7 +333,7 @@ export default function NewChildPage() {
           <LogIn className="size-4" />
           <AlertTitle>尚未分配任教班级</AlertTitle>
           <AlertDescription>
-            建立成长档案需要先有任教班级。请联系管理员分配任教班级后再建档；本页不提供自行建立班级的入口。
+            请联系园所管理员安排任教班级，再为班上的幼儿建档。
           </AlertDescription>
         </Alert>
       </div>
@@ -357,8 +356,8 @@ export default function NewChildPage() {
         </h1>
         <p className="mt-1 text-sm text-slate-600">
           {isAdmin
-            ? '分三步完成基本信息、可选补充和确认；建档后进入该幼儿的成长档案，由教师录入观察。'
-            : '分三步完成基本信息、可选补充和确认，随后即可记录第一次观察。'}
+            ? '填写幼儿信息，确认后建立档案。观察由任教教师记录。'
+            : '填写幼儿信息，建档后就可以记录观察。'}
         </p>
       </div>
 
@@ -403,7 +402,7 @@ export default function NewChildPage() {
       <Card className="border-amber-200/80">
         <CardHeader>
           <CardTitle className="text-base">{STEPS[step]}</CardTitle>
-          <CardDescription>{step === 2 && isAdmin ? '确认信息无误后建档，随后进入该幼儿的成长档案。' : STEP_HINTS[step]}</CardDescription>
+          <CardDescription>{step === 2 && isAdmin ? '请核对姓名、生日和班级。' : STEP_HINTS[step]}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {step === 0 ? (
@@ -468,7 +467,7 @@ export default function NewChildPage() {
                   </div>
                 ) : directory.status === 'denied' ? (
                   <div className="rounded-lg border border-dashed p-3 text-sm leading-6 text-slate-500">
-                    当前账号没有班级访问权限，不能据此判断班级为空。请联系管理员核对任教范围。
+                    当前账号不能查看班级，请联系园所管理员确认任教安排。
                   </div>
                 ) : directory.status === 'error' ? (
                   <div className="rounded-lg border border-dashed p-3 text-sm leading-6 text-slate-500">
@@ -523,7 +522,7 @@ export default function NewChildPage() {
                   </div>
                 )}
                 <p className="text-xs text-slate-400">
-                  先选学段再选班级；分班后可在儿童档案中转班，历史归属会保留。
+                  先选学段，再选班级。日后转班，原有记录仍保留。
                 </p>
                 <ErrorText message={errors.class_id} />
               </div>
@@ -610,8 +609,8 @@ export default function NewChildPage() {
 
               <p className="text-xs text-slate-400">
                 {isAdmin
-                  ? '建档成功后进入该幼儿的成长档案；观察录入由教师完成。'
-                  : '建档成功后将直接进入该幼儿的观察录入页；观察原文保存后不可修改。'}
+                  ? '建档后进入成长档案。'
+                  : '建档后进入观察记录页。'}
               </p>
             </div>
           ) : null}

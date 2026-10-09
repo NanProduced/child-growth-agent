@@ -85,27 +85,6 @@
 }
 .route-shell { min-width: 0; }
 
-/* Only on these two pages, anchor the existing assistant to the document's
-   return toolbar, not to the viewport over reading controls. */
-body:has(.route-shell) div:has(> [data-yaya-entry]) {
-  position: absolute;
-  top: 100px;
-  right: 24px;
-  bottom: auto;
-}
-
-body:has(.route-shell) div:has(> [data-yaya-entry][aria-expanded="true"]) {
-  display: none;
-}
-
-/* Matches the existing two-row product navigation breakpoint. */
-@media (width <= 1090px) {
-  body:has(.route-shell) div:has(> [data-yaya-entry]) {
-    top: 152px;
-    right: 16px;
-  }
-}
-
 /* ---------------------------------------------------------------- 头部 */
 
 .head {
@@ -691,38 +670,75 @@ body:has(.route-shell) div:has(> [data-yaya-entry][aria-expanded="true"]) {
 
 .goals {
   display: grid;
-  gap: 20px;
+  gap: 0;
   min-width: 0;
 }
 
 .goal-group {
-  display: grid;
-  gap: 10px;
+  display: block;
   min-width: 0;
+  border-bottom: 1px solid var(--guide-line);
+}
+
+.goal-summary {
+  padding: 12px 0;
+  list-style: none;
+}
+
+.goal-summary::-webkit-details-marker {
+  display: none;
 }
 
 .goal-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 12px;
   margin: 0;
-  padding: 4px 0;
+  padding: 0;
 }
 
 .goal-path {
+  grid-column: 1;
   font-size: 14px;
   font-weight: 500;
   color: var(--guide-muted);
 }
 
 .goal-heading {
-  display: inline-flex;
+  grid-column: 1;
+  display: flex;
   align-items: baseline;
   gap: 6px;
   font-size: 1rem;
   font-weight: 600;
   color: var(--guide-ink);
+  overflow-wrap: anywhere;
+}
+
+.goal-summary:hover .goal-heading {
+  color: var(--guide-green-deep);
+}
+
+.goal-meta {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--guide-muted);
+  font-size: 14px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.goal-chevron {
+  width: 18px;
+  height: 18px;
+}
+
+.goal-group[open] > .goal-summary .goal-chevron {
+  transform: rotate(180deg);
 }
 
 .goal-index {
@@ -745,6 +761,10 @@ body:has(.route-shell) div:has(> [data-yaya-entry][aria-expanded="true"]) {
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.goal-group[open] > .item-list {
+  padding-bottom: 16px;
 }
 
 .item {

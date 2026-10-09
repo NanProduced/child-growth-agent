@@ -250,11 +250,11 @@ async function runPanelDesktop(browser) {
   await sendMessage(page, "把刚才的观察保存一下");
   await waitStream(page, "[data-yaya-card=receipt]", 20000);
   const receiptText = await page.locator("[data-yaya-card=receipt]").first().innerText();
-  check("1440: 未知回执不显示已保存", receiptText.includes("结果未知") && !receiptText.includes("已保存"));
-  await page.locator("[data-yaya-card=receipt]").first().getByRole("button", { name: "重新读取核对" }).click();
-  await page.waitForSelector("text=操作已保存", { timeout: 10000 });
+  check("1440: 未知回执不显示已保存", receiptText.includes("保存结果待核对") && !receiptText.includes("已保存"));
+  await page.locator("[data-yaya-card=receipt]").first().getByRole("button", { name: "核对保存结果" }).click();
+  await page.waitForSelector("[data-yaya-card=receipt] p.font-semibold:text-is(\"已保存\")", { timeout: 10000 });
   const rechecked = await page.locator("[data-yaya-card=receipt]").first().innerText();
-  check("1440: 重读后按回执显示成功", rechecked.includes("操作已保存") && rechecked.includes("不代表幼儿发展达标"));
+  check("1440: 重读后按回执显示成功", await page.locator("[data-yaya-card=receipt] p.font-semibold").first().innerText() === "已保存" && rechecked.includes("记录时间"));
   await shot(page, "1440-panel-receipt-recheck");
 
   // 3) 上传失败：文字与其他内容保留
@@ -289,14 +289,14 @@ async function runPanelDesktop(browser) {
   const boxes = await page.locator("[data-yaya-proposal-item] [role=checkbox]").count();
   check("1440: 仅完整项可选（受限项无勾选框）", boxes === 1, String(boxes));
   const beforeText = await page.locator("[data-yaya-proposal]").first().innerText();
-  check("1440: 确认前不画成功", !beforeText.includes("已保存（服务端回执核对一致）"));
+  check("1440: 确认前不画成功", /已保存\s*0/.test(beforeText) && await page.locator("[data-yaya-proposal]").first().locator("p[role=status]").filter({ hasText: /^\s*已保存/ }).count() === 0);
   await page.locator("[data-yaya-proposal-item] [role=checkbox]").first().click();
   await page.getByRole("button", { name: /确认已选 1 条/ }).first().click();
   await page.waitForTimeout(3500);
   const afterText = await page.locator("[data-yaya-proposal]").first().innerText();
   check(
     "1440: 执行回执核验后才显示已保存",
-    afterText.includes("已保存（服务端回执核对一致）"),
+    /已保存\s*1/.test(afterText) && await page.locator("[data-yaya-proposal]").first().locator("p[role=status]").filter({ hasText: /^\s*已保存/ }).count() > 0,
     afterText.slice(0, 300)
   );
   await shot(page, "1440-panel-proposal-saved");
@@ -310,7 +310,7 @@ async function runPanelDesktop(browser) {
   await page.getByRole("button", { name: /确认已选 1 条/ }).last().click();
   await page.waitForSelector("text=执行回执未通过核验", { timeout: 20000 });
   const rejectText = await page.locator("[data-yaya-proposal]").last().innerText();
-  check("1440: unverified 回执不显示成功", rejectText.includes("执行回执未通过核验") && !rejectText.includes("已保存（服务端回执核对一致）"));
+  check("1440: unverified 回执不显示成功", rejectText.includes("执行回执未通过核验") && /已保存\s*0/.test(rejectText) && await page.locator("[data-yaya-proposal]").last().locator("p[role=status]").filter({ hasText: /^\s*已保存/ }).count() === 0);
   scenario.operations = "success";
 
   // 6) Escape 关闭并保持非模态语义

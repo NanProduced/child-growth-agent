@@ -1,5 +1,5 @@
 ---
-version: 6
+version: 7
 slug: "src-components-guide-class-evidence-overview-tsx"
 primary_target: "src/components/guide/class-evidence-overview.tsx"
 related_targets: ["src/components/guide/class-evidence-overview.module.css","src/components/guide/evidence-route-client.tsx","src/lib/guide/evidence-read.ts","src/components/guide/__fixtures__/class-evidence-overview-fixture.ts","scripts/check-class-evidence-overview.ts","scripts/acceptance/check-class-evidence-ui.cjs","scripts/check-evidence-pages-browser.cjs"]
@@ -14,7 +14,7 @@ Mode: Operate. Scope: 两类证据页面普通扩展中的班级页，正式路�
 THESIS: 从指南条目人数分布，进入一个条目的幼儿名单与逐字观察，再同期间下钻个人证据册。
 OWN-WORLD: 沿用“轻量成长观察册”的暖白、深墨、芽绿、细线与浅色面；绿色和蓝色辅助识别证据状态，不表达能力等级。
 STORY: 班级身份／当前在班名单与期间 → 领域／参考年龄筛选 → 行为条目分布 → 单一详情、名单与引用 → 同范围个人证据册；保健资料独立查阅。
-FIRST VIEWPORT: 优先连续可扫读的指南原文与对齐人数条；说明按需展开。窄屏详情是单独阅读状态，可返回指南条目，不能把滚动后的详情截图当初始首屏。
+FIRST VIEWPORT: 默认先展开首个行为目标，其他目标以原文标题和条目项数按需展开；保留领域与全部参考年龄筛选。窄屏详情是单独阅读状态，可返回指南条目，不能把滚动后的详情截图当初始首屏。
 FORM: 用户选择第三稿“证据下钻工作台”；方向图为 `docs/design/class-overview-v2-20261008/03-evidence-workspace.png`。按布局关系适配授权 DTO，不照搬图中合成姓名、20 人分母或短标题。
 SIGNATURE: 实际 N 的共同人数标尺、一个选中条目与一个 inspector；保健参考收在独立折叠入口，统计说明用页内中文阅读区。
 
@@ -29,7 +29,8 @@ SIGNATURE: 实际 N 的共同人数标尺、一个选中条目与一个 inspecto
 - 字体使用现有 `Home Noto Sans SC / Microsoft YaHei / sans-serif` 栈；原文与引用 `overflow-wrap: anywhere`，不据此宣称完整业务字形或跨系统字体已验收。
 - 列表为平面细分隔，详情无阴影；控件（8px）、工具栏（12px）、引用容器（10px）是当前局部尺寸。绿／蓝／琥珀／珊瑚用现有页面 CSS，文字与细线关联全局主题，不提升为新 token。
 - 原生 button/select/input 与 summary 最小高度（44px）；清晰焦点（3px，偏移 2px），减少动态偏好下关闭动画／过渡。灰底“暂无相关记录”标签明确保留深色字。
-- 两页正式 route-shell 将既有助手 launcher 停靠文档顶部返回工具栏，随页面滚走；使用已有导航 ≤1090px 断点，助手展开时隐藏 launcher。只在这两个页面生效，共享 YAYA、导航与 AUTH 未改。
+- 目标组使用原生 details/summary，首个行为目标展开，其他收起；收起目标同步关闭选中详情，条目与统计仍来自原 DTO。
+- PLATFORM-UX-FIX1 已移除两页 route-shell 的局部 launcher 定位补丁，改由共享导航处理 ≤1090px 的入口；宽屏保留紧凑右下图标，打开助手时隐藏。AUTH 未改。
 
 ## Data, source and teacher boundaries
 

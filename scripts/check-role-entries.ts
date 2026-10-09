@@ -228,11 +228,11 @@ async function main() {
     assert.ok(!denied.includes("还没有班级") && !denied.includes("PRIVATE_SCOPE_DETAIL"));
     reset({ failure: new AccountsError("identity_unavailable", "PRIVATE_IDENTITY_DETAIL") });
     const unavailable = await render(classesPage, { searchParams: Promise.resolve({}) });
-    assert.ok(unavailable.includes("资料服务暂时不可用"));
+    assert.ok(unavailable.includes("暂时无法核对账号"));
     assert.ok(!unavailable.includes("还没有班级") && !unavailable.includes("PRIVATE_IDENTITY_DETAIL"));
     reset({ failure: new Error("PRIVATE_DATABASE_DETAIL") });
     const broken = await render(classesPage, { searchParams: Promise.resolve({}) });
-    assert.ok(broken.includes("数据库暂不可用"));
+    assert.ok(broken.includes("班级资料暂时无法查看"));
     assert.ok(!broken.includes("还没有班级") && !broken.includes("PRIVATE_DATABASE_DETAIL"));
   });
 
@@ -276,10 +276,10 @@ async function main() {
     }
     assert.ok(!readOnlyHtml.includes(">生成活动支持</button>") && !readOnlyHtml.includes(">重新生成</button>") && !readOnlyHtml.includes(">再试一次</button>"));
     const staleHtml = render({ childId: child.id, confirmedObservationCount: 1, initialSupport: null, hasStaleSupport: true, readOnly: true });
-    assert.ok(staleHtml.includes("请由教师重新生成"));
+    assert.ok(staleHtml.includes("请由任教教师重新整理"));
     assert.ok(!staleHtml.includes(">重新生成</button>"));
     const emptyHtml = render({ childId: child.id, confirmedObservationCount: 0, initialSupport: null, readOnly: true });
-    assert.ok(emptyHtml.includes("还没有活动支持建议") && emptyHtml.includes("由教师"));
+    assert.ok(emptyHtml.includes("还没有活动支持建议") && emptyHtml.includes("由任教教师"));
     assert.ok(!emptyHtml.includes("先确认一条观察") && !emptyHtml.includes(">生成活动支持</button>"));
     scenario.viewer = teacher;
     const teacherHtml = render({ childId: child.id, confirmedObservationCount: 1, initialSupport: activitySupport });
@@ -305,7 +305,7 @@ async function main() {
     reset({ observations: [], children: [], classes: [] });
     const adminHtml = await render(observationsPage, { searchParams: Promise.resolve({}) });
     assert.ok(!adminHtml.includes("开始记录"));
-    assert.ok(adminHtml.includes("管理员查看全园观察记录"));
+    assert.ok(adminHtml.includes("管理员可查看全园记录"));
     reset({ observations: [], children: [], classes: [], viewer: teacher, auth: { kind: "authenticated", principal: teacher } });
     const teacherHtml = await render(observationsPage, { searchParams: Promise.resolve({}) });
     assert.ok(teacherHtml.includes("开始记录"));
@@ -341,12 +341,12 @@ async function main() {
     reset({ observations: [confirmed] });
     const profileHtml = await render(reportsPage, { searchParams: Promise.resolve({ child: child.id }) });
     assert.ok(!profileHtml.includes("去生成活动支持"));
-    assert.ok(profileHtml.includes("由教师从已确认观察整理生成"));
+    assert.ok(profileHtml.includes("由任教教师整理"));
   });
   await check("reports read failure never becomes an empty profile", async () => {
     reset({ failure: new AccountsError("identity_unavailable", "PRIVATE_IDENTITY_DETAIL") });
     const html = await render(reportsPage, { searchParams: Promise.resolve({}) });
-    assert.ok(html.includes("资料服务暂时不可用"));
+    assert.ok(html.includes("暂时无法核对账号"));
     assert.ok(!html.includes("还没有成长档案") && !html.includes("PRIVATE_IDENTITY_DETAIL"));
   });
 
@@ -360,17 +360,17 @@ async function main() {
     assert.ok(!activitiesDenied.includes("还没有成长档案") && !activitiesDenied.includes("PRIVATE_SCOPE_DETAIL"));
     reset({ failure: new Error("PRIVATE_DATABASE_DETAIL") });
     const childrenBroken = await render(childrenPage, { searchParams: Promise.resolve({}) });
-    assert.ok(childrenBroken.includes("数据库暂不可用"));
+    assert.ok(childrenBroken.includes("成长档案暂时无法查看"));
     assert.ok(!childrenBroken.includes("还没有成长档案") && !childrenBroken.includes("PRIVATE_DATABASE_DETAIL"));
     const activitiesBroken = await render(activitiesPage, {});
-    assert.ok(activitiesBroken.includes("数据库暂不可用"));
+    assert.ok(activitiesBroken.includes("活动资料暂时无法查看"));
     assert.ok(!activitiesBroken.includes("还没有成长档案") && !activitiesBroken.includes("PRIVATE_DATABASE_DETAIL"));
   });
   await check("unassigned teacher gets contact-admin guidance without a class shortcut", () => {
     reset({ viewer: unassigned, canCreateProfiles: false, auth: { kind: "authenticated", principal: unassigned } });
     const html = renderToStaticMarkup(createElement(childNewPage.default));
     assert.ok(html.includes("尚未分配任教班级"));
-    assert.ok(html.includes("请联系管理员"));
+    assert.ok(html.includes("请联系园所管理员"));
     assert.ok(!html.includes("去创建班级"));
   });
   await check("logged-out visitor sees login state, not an empty class picker", () => {
@@ -389,7 +389,8 @@ async function main() {
     reset({ viewer: null, canCreateProfiles: false, auth: { kind: "unavailable", reason: "identity_service_unavailable" } });
     const html = renderToStaticMarkup(createElement(childNewPage.default));
     assert.ok(html.includes("账号服务暂时不可用") && html.includes("重新核验"));
-    assert.ok(html.includes("重复输入账号密码"));
+    assert.ok(html.includes("现在无法确认账号权限") && html.includes("请稍后重试"));
+    assert.ok(!html.includes("账号密码") && !html.includes("/login"));
     assert.ok(!html.includes("需要园所账号登录") && !html.includes("尚未分配任教班级"));
   });
   await check("late directory responses are generation-guarded and identity changes clear the projection", () => {

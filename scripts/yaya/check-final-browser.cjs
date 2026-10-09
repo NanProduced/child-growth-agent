@@ -229,14 +229,14 @@ module.exports = async function checkFinalBrowser({ base, cookie, setMode, verif
         try {
           await savedThread.waitFor({ timeout: 45000 });
           await savedThread.click();
-          await page.getByRole('button', { name: '核对原运行', exact: true }).last().waitFor({ timeout: 15000 });
+          await page.getByRole('button', { name: '核对上次结果', exact: true }).last().waitFor({ timeout: 15000 });
         } catch (error) {
           console.log('history failure: ' + JSON.stringify({ errors, scriptErrors, network, visible: (await page.locator('body').innerText()).slice(0, 5500) }));
           fs.writeFileSync(path.join(out, 'browser-network-failure.json'), JSON.stringify(network, null, 2));
           await page.screenshot({ path: path.join(out, 'history-failure.png'), scale: 'css' });
           throw error;
         }
-        await page.getByRole('button', { name: '核对原运行', exact: true }).last().click();
+        await page.getByRole('button', { name: '核对上次结果', exact: true }).last().click();
         await page.locator('p:visible').filter({ hasText: /回执已核实保存/ }).first().waitFor({ timeout: 15000 });
         if (posts() !== beforeHistory) throw Error('history recovery dispatched an execution/message POST');
         await verifyObservation(true);

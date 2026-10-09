@@ -26,10 +26,10 @@ interface ClassStats {
   latest: string | null;
 }
 
-const stageMeta: Record<ClassStage, { icon: typeof Sprout; tone: string; description: string }> = {
-  small: { icon: Sprout, tone: 'bg-rose-50 text-rose-600', description: '在游戏与陪伴中慢慢成长' },
-  middle: { icon: Flower2, tone: 'bg-amber-50 text-amber-700', description: '在探索与合作中表达发现' },
-  large: { icon: Leaf, tone: 'bg-sky-50 text-sky-700', description: '看见新的尝试，留下自己的发现' },
+const stageMeta: Record<ClassStage, { icon: typeof Sprout; tone: string }> = {
+  small: { icon: Sprout, tone: 'bg-rose-50 text-rose-600' },
+  middle: { icon: Flower2, tone: 'bg-amber-50 text-amber-700' },
+  large: { icon: Leaf, tone: 'bg-sky-50 text-sky-700' },
 };
 
 export default async function ClassesPage() {
@@ -51,7 +51,7 @@ export default async function ClassesPage() {
     ]);
   } catch (e) {
     if (e instanceof AccountsError) return <ReadFailureNotice kind={readFailureKind(e)} what="班级资料" retryHref="/classes" />;
-    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
+    dbError = '班级资料暂时无法加载，请稍后重试。';
   }
 
   const stats = new Map<string, ClassStats>(
@@ -84,7 +84,7 @@ export default async function ClassesPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">班级</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-            先找到班级，再回到这个班级里的成长档案与观察记录。
+            查看班上的幼儿、观察记录和指南证据。
           </p>
         </div>
         {isAdmin ? <ClassFormDialog label="新建班级" variant="default" size="default" /> : null}
@@ -92,7 +92,7 @@ export default async function ClassesPage() {
 
       {dbError ? (
         <Alert variant="destructive">
-          <AlertTitle>数据库暂不可用</AlertTitle>
+          <AlertTitle>班级资料暂时无法查看</AlertTitle>
           <AlertDescription>{dbError}</AlertDescription>
         </Alert>
       ) : classes.length === 0 ? (
@@ -128,7 +128,7 @@ export default async function ClassesPage() {
                       {CLASS_STAGE_LABELS[stage]}
                     </h2>
                     <p className="mt-0.5 text-sm text-slate-500">
-                      {stageClasses.length} 个班级 · {meta.description}
+                      {stageClasses.length} 个班级
                     </p>
                   </div>
                 </div>

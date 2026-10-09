@@ -35,7 +35,7 @@ import {
   type ClassContextLookupState,
 } from '@/lib/class-context-client';
 import { loadChildren } from '@/lib/child-list-client';
-import { classLabel, isoDateInShanghai, parseIsoDateStrict } from '@/lib/format';
+import { classLabel, formatDateCn, isoDateInShanghai, parseIsoDateStrict } from '@/lib/format';
 import type { GuideWriteAccessView } from '@/lib/guide/association-types';
 import { observationFocusQuery } from '@/lib/guide/navigation';
 import type { Child, SchoolClass } from '@/lib/types';
@@ -152,10 +152,10 @@ export function NewObservationClient({
       .then(async (r) => {
         const data = (await r.json().catch(() => null)) as { classes?: unknown } | null;
         if (!r.ok) {
-          throw new Error(`班级列表加载失败（${r.status}），请重试。`);
+          throw new Error('班级列表暂时无法加载，请重试。');
         }
         if (!data || !Array.isArray(data.classes)) {
-          throw new Error('班级列表返回了无法解析的数据，请重试。');
+          throw new Error('班级资料暂时无法核对，请重试。');
         }
         return data.classes.filter((item): item is SchoolClass => isReliableClassShape(item));
       })
@@ -236,7 +236,7 @@ export function NewObservationClient({
       return;
     }
     if (rawText.trim().length < 10) {
-      toast.error('观察原文至少 10 个字，请尽量白描具体行为');
+      toast.error('请至少写 10 个字，说明幼儿的具体表现');
       return;
     }
     if (classContext.status === 'checking') {
@@ -285,7 +285,7 @@ export function NewObservationClient({
           typeof data.message === 'string' && data.message ? data.message : '保存失败，请稍后再试',
         );
       }
-      toast.success('观察已保存，原文将不可修改');
+      toast.success('观察已保存');
       const focusQuery = observationFocusQuery({
         itemId: focus.itemId,
         returnTo: focus.returnTo,
@@ -303,10 +303,10 @@ export function NewObservationClient({
       <div className="mx-auto max-w-lg py-10">
         <Alert>
           <LogIn className="size-4" />
-          <AlertTitle>需要教师身份</AlertTitle>
+          <AlertTitle><h1>需要教师身份</h1></AlertTitle>
           <AlertDescription>
             {writeAccess.read_only_reason ??
-              '录入观察属于写操作，需教师身份验证。请点击右上角「园所账号登录」输入账号密码后再来；访客模式可浏览档案与已归档记录。'}
+              '观察由任教教师记录，请使用教师账号登录。'}
           </AlertDescription>
         </Alert>
       </div>
@@ -322,9 +322,9 @@ export function NewObservationClient({
               <Baby className="size-5" />
             </span>
             <div>
-              <h2 className="font-medium">还没有成长档案，先建立一个成长档案</h2>
+              <h2 className="font-medium">还没有成长档案</h2>
               <p className="mt-1 text-sm text-slate-500">
-                建档完成后会自动回到这里录入第一次观察。
+                建档后，就可以记录这名幼儿的观察。
               </p>
             </div>
             <Button asChild>
@@ -347,11 +347,11 @@ export function NewObservationClient({
           开始记录观察
         </h1>
         <p className="mt-1 text-sm text-slate-600">
-          用白描方式记录幼儿的具体行为与语言。保存后原文不可修改，AI 会据此整理一张待确认草稿。
+          写下幼儿做了什么、说了什么。
         </p>
         {focus.itemId ? (
           <p className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-xs leading-5 text-emerald-900" data-testid="focus-note">
-            已从证据册带上关注条目与返回位置；关注条目不会自动成为关联或确认，保存后在整理页由你决定。
+            已带上关注条目，保存后再核对是否关联；不会自动确认。
           </p>
         ) : null}
       </div>
@@ -393,6 +393,8 @@ export function NewObservationClient({
                     <SelectItem key={c.id} value={c.id}>
                       {c.avatar_emoji} {c.name}（
                       {classLabel(c.class_stage, c.class_name) ?? '未分班'}）
+                      {children.some((other) => other.id !== c.id && other.name === c.name && other.class_id === c.class_id)
+                        ? ` · ${formatDateCn(c.birth_date)}出生` : ''}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -412,16 +414,16 @@ export function NewObservationClient({
           {selectedChild ? (
             classContext.status === 'checking' ? (
               <div className="rounded-lg border bg-slate-50/70 px-3 py-2.5 text-xs leading-5 text-slate-500">
-                正在按分班历史核对这条观察发生时的班级…
+                正在确认当时的班级…
               </div>
             ) : classContext.status === 'resolved' ? (
               <div className="rounded-lg border bg-slate-50/70 px-3 py-2.5 text-xs leading-5 text-slate-500">
-                发生时班级：
+                当时班级：
                 <Badge variant="secondary" className="mx-1 font-normal">
                   {classLabel(classContext.class.stage, classContext.class.name) ??
                     classContext.class.name}
                 </Badge>
-                按分班历史核对，保存时写入这条观察的快照；以后班级改名或转班都不会改变它。
+                记录会保留当时的班级名称。
               </div>
             ) : classContext.status === 'needs_confirmation' ? (
               <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50/70 px-3 py-3">
@@ -469,13 +471,13 @@ export function NewObservationClient({
                     </Select>
                     {!classesLoading && classes.length === 0 ? (
                       <p className="text-xs leading-5 text-amber-900">
-                        没有可核实的班级可选，请先建立或补全班级资料。
+                        暂无班级可选，请联系园所管理员补充班级资料。
                       </p>
                     ) : null}
                   </div>
                 )}
                 <p className="text-xs leading-5 text-amber-800/80">
-                  只用于记录这条观察的班级语境，不会改变幼儿当前分班。
+                  这里只确认当时的班级，不会办理转班。
                 </p>
               </div>
             ) : classContext.status === 'error' ? (
@@ -496,7 +498,7 @@ export function NewObservationClient({
               </div>
             ) : (
               <div className="rounded-lg border bg-slate-50/70 px-3 py-2.5 text-xs leading-5 text-slate-500">
-                选择观察日期后，会自动按分班历史核对这条观察发生时的班级。
+                选好日期后，会确认幼儿当时所在的班级。
               </div>
             )
           ) : null}
@@ -531,7 +533,7 @@ export function NewObservationClient({
               className="leading-7"
             />
             <p className="text-sm leading-6 text-slate-600">
-              提示：只记录看到和听到的，不写评判与猜测；原文保存后将作为不可改写的追溯依据。
+              请先核对内容，原文保存后不能修改。
             </p>
           </div>
 

@@ -24,12 +24,12 @@ export function ReadFailureNotice({ kind, what, loginHref = "/login", retryHref,
   backHref?: string;
 }) {
   const copy = kind === "login"
-    ? { title: "请先登录园所账号", text: `当前登录已失效或账号已停用，${what}尚未加载；这不代表没有记录。` }
+    ? { title: "请先登录园所账号", text: `请用园所账号查看${what}。账号已停用时，请联系管理员。` }
     : kind === "denied"
-      ? { title: "当前账号没有访问权限", text: `不能查看${what}；无权限或任教范围为空不等于没有数据。如有疑问请联系管理员。` }
+      ? { title: "当前账号没有访问权限", text: `当前账号不能查看${what}，请联系园所管理员。` }
       : kind === "unavailable"
-        ? { title: "资料服务暂时不可用", text: `身份或${what}读取暂未完成，不能据此判断为空。请稍后重新读取。` }
-        : { title: "资料暂时不可读", text: `${what}读取失败，不代表没有数据。请稍后重新读取。` };
+        ? { title: "暂时无法核对账号", text: `现在不能确认账号权限，${what}暂时无法显示。请稍后重试。` }
+        : { title: "资料暂时无法查看", text: `${what}加载失败，请稍后重试。` };
   return (
     <section data-platform-surface="read-failure" role="alert" className="mx-auto max-w-2xl space-y-5 py-8">
       <Alert variant="destructive">

@@ -652,3 +652,29 @@ export const yayaRuns = pgTable(
     check("yaya_runs_dependencies_check", sql`jsonb_typeof(${t.dependencies}) = 'array'`),
   ],
 );
+
+/** Private, teacher-reviewed parent communication drafts; no observation mutation. */
+export const familyCommunications = pgTable("family_communications", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  owner_account_id: varchar("owner_account_id", { length: 36 }).notNull().references(() => appAccounts.id, { onDelete: "cascade" }),
+  child_id: varchar("child_id", { length: 36 }).notNull().references(() => children.id, { onDelete: "cascade" }),
+  client_request_id: varchar("client_request_id", { length: 36 }).notNull(),
+  request_digest: varchar("request_digest", { length: 64 }).notNull(),
+  period: jsonb("period").notNull(),
+  range_from: date("range_from").notNull(), range_to: date("range_to").notNull(), range_label: text("range_label").notNull(),
+  class_premise: varchar("class_premise", { length: 36 }).notNull(), sources: jsonb("sources").notNull(),
+  note: text("note").notNull().default(""), body: text("body").notNull().default(""), author_name: text("author_name").notNull(), ai_model: text("ai_model"),
+  state: varchar("state", { length: 16 }).notNull().default("generating"), revision: integer("revision").notNull().default(1),
+  deadline_at: timestamp("deadline_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()+interval '5 minutes'`),
+  created_at: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  updated_at: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, (t) => [
+  unique("family_communications_owner_request_unique").on(t.owner_account_id, t.client_request_id),
+  index("family_communications_owner_child_idx").on(t.owner_account_id, t.child_id, t.created_at.desc()),
+  check("family_communications_state_check", sql`${t.state} IN ('generating','draft','reviewed','failed')`),
+  check("family_communications_revision_check", sql`${t.revision} >= 1`),
+  check("family_communications_request_digest_check", sql`${t.request_digest} ~ '^[a-f0-9]{64}$'`),
+  check("family_communications_period_check", sql`jsonb_typeof(${t.period}) = 'object'`),
+  check("family_communications_range_to_check", sql`${t.range_to} >= ${t.range_from}`),
+  check("family_communications_sources_check", sql`jsonb_typeof(${t.sources}) = 'array' AND jsonb_array_length(${t.sources}) BETWEEN 1 AND 60`),
+]);

@@ -77,15 +77,7 @@ function ProfileRow({ child, confirmedCount, support }: ChildRow) {
           <span className="font-medium text-slate-800">{suggestion.title}</span>
           <span className="mt-0.5 line-clamp-2 break-words"> {suggestion.purpose}</span>
         </span>
-      ) : confirmedCount > 0 ? (
-        <span className="block break-words text-sm leading-6 text-slate-600">
-          还没有活动支持建议。进入成长档案后，可以从已确认观察生成 2～3 个可试试的活动。
-        </span>
-      ) : (
-        <span className="block break-words text-sm leading-6 text-slate-600">
-          还没有已确认观察。先确认一条观察，活动支持才会有真实依据。
-        </span>
-      )}
+      ) : null}
     </Link>
   );
 }
@@ -105,7 +97,7 @@ export default async function ActivitiesPage() {
     ]);
   } catch (e) {
     if (e instanceof AccountsError) return <ReadFailureNotice kind={readFailureKind(e)} what="活动支持" retryHref="/activities" />;
-    dbError = '读取暂未完成，请稍后重新读取；这不代表没有数据。';
+    dbError = '活动资料暂时无法加载，请稍后重试。';
   }
 
   const observationsByChild = new Map<string, Observation[]>();
@@ -137,13 +129,13 @@ export default async function ActivitiesPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-slate-900">活动支持</h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-          从教师确认后的观察出发，为下一次活动提供可尝试的方向。建议保存在对应的成长档案里。
+          选一名幼儿，查看或整理下一次活动的建议。
         </p>
       </div>
 
       {dbError ? (
         <Alert variant="destructive">
-          <AlertTitle>数据库暂不可用</AlertTitle>
+          <AlertTitle>活动资料暂时无法查看</AlertTitle>
           <AlertDescription>{dbError}</AlertDescription>
         </Alert>
       ) : children.length === 0 ? (
@@ -155,7 +147,7 @@ export default async function ActivitiesPage() {
             <div>
               <h2 className="font-medium text-slate-800">还没有成长档案</h2>
               <p className="mt-1 max-w-lg text-sm leading-6 text-slate-500">
-                先建立一个成长档案并确认一条观察，活动支持才会从真实证据里长出来。
+                建档并确认一条观察后，可以整理活动建议。
               </p>
             </div>
             <Button asChild>
@@ -172,10 +164,10 @@ export default async function ActivitiesPage() {
             <section aria-labelledby="ready-title">
               <div className="mb-3">
                 <h2 id="ready-title" className="text-base font-semibold text-slate-900">
-                  已有确认观察的成长档案
+                  已有确认观察
                 </h2>
                 <p className="mt-1 text-xs text-slate-500">
-                  进入成长档案，可以生成新的活动支持或查看已有建议。
+                  可在成长档案中查看或整理建议。
                 </p>
               </div>
               <div className="divide-y divide-slate-200/80 border-y border-slate-200/80">
@@ -190,10 +182,10 @@ export default async function ActivitiesPage() {
             <section aria-labelledby="waiting-title">
               <div className="mb-3">
                 <h2 id="waiting-title" className="text-base font-semibold text-slate-900">
-                  等待第一条已确认观察
+                  尚无确认观察
                 </h2>
                 <p className="mt-1 text-xs text-slate-500">
-                  观察确认后，这里才会出现可以试试的方向。
+                  请先由任教教师确认观察。
                 </p>
               </div>
               <div className="divide-y divide-slate-200/80 border-y border-slate-200/80">
@@ -206,11 +198,6 @@ export default async function ActivitiesPage() {
         </div>
       )}
 
-      {!dbError && children.length > 0 ? (
-        <p className="text-xs leading-5 text-slate-400">
-          建议来自教师确认后的观察，可按现场情况灵活调整。
-        </p>
-      ) : null}
     </div>
   );
 }
