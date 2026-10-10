@@ -96,7 +96,9 @@ async function main() {
     const draft = await generateCommunication(request(teacher.token), create, model);
     check("real DB draft is stored", draft.status === "draft" && draft.owner_account_id === teacher.id && draft.text.includes("桥墩"));
     check("model once only", models === 1);
-    check("stored generation uses server-owned observation date", draft.text.includes(`${Number(month.slice(0, 4))}年${Number(month.slice(5))}月2日`));
+    const storedDate = await db.query<{ observed_at: string }>(
+      "SELECT source->>'observed_at' AS observed_at FROM family_communications f CROSS JOIN LATERAL jsonb_array_elements(f.sources) source WHERE f.id=$1 AND source->>'id'=$2", [draft.id, ids.first]);
+    check("stored generation omits dates while source metadata retains them", !/\d{4}年|观察：/.test(draft.text) && storedDate.rows[0]?.observed_at === `${month}-02`);
     const replay = await generateCommunication(request(teacher.token), { ...create, observation_ids: [...create.observation_ids].reverse() }, model);
     check("same request replays no model", replay.id === draft.id && models === 1);
     await denial(() => generateCommunication(request(teacher.token), { ...create, note: "different" }, model), "idempotency_conflict");
