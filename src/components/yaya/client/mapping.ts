@@ -3,7 +3,7 @@
  *
  * 守门：客户端只存正文 + 必要原操作标记；不存执行授权、不凭事件内容分配身份。
  */
-import type { ThreadAssistantMessagePart, ThreadMessage, ThreadMessageLike } from "@assistant-ui/react";
+import type { ImageMessagePart, ThreadAssistantMessagePart, ThreadMessage, ThreadMessageLike } from "@assistant-ui/react";
 import type { YayaStoredFragment } from "@/lib/yaya/storage-types";
 import { receiptProvesSuccess, type YayaOperationQueryOutcome, type YayaSourceRef } from "@/lib/yaya/types";
 
@@ -77,30 +77,43 @@ export function composeRunUserText(text: string, rawContext: unknown): string {
   return parts.length === 0 ? text : `（本条消息上下文：${parts.join("；")}）\n${text}`;
 }
 
+/** assistant-ui keeps sent composer images in attachments, not in message.content. */
+export function collectMessageImages(message: ThreadMessage): Array<ImageMessagePart & { id: string }> {
+  const parts = [...message.content];
+  if (message.role === "user") {
+    for (const attachment of message.attachments) {
+      if (attachment.status.type === "complete") parts.push(...attachment.content);
+    }
+  }
+  const images = new Map<string, ImageMessagePart & { id: string }>();
+  for (const part of parts) {
+    if (part.type !== "image") continue;
+    const id = yayaAttachmentIdFromUrl(part.image);
+    if (id !== null && !images.has(id)) images.set(id, { ...part, id });
+  }
+  return [...images.values()];
+}
+
 export function collectUserFacts(message: ThreadMessage): MessageWireFacts {
-  const attachmentIds: string[] = [];
   let text = "";
   for (const part of message.content) {
     if (part.type === "text") {
       text = text === "" ? part.text : `${text}\n${part.text}`;
       continue;
     }
-    if (part.type !== "image") continue;
-    const id = yayaAttachmentIdFromUrl(part.image);
-    if (id !== null && !attachmentIds.includes(id)) attachmentIds.push(id);
   }
-  return { text: text.trim(), attachmentIds };
+  return { text: text.trim(), attachmentIds: collectMessageImages(message).map((image) => image.id) };
 }
 
 /** 本地消息 → 服务端存储片段；只存正文与必要的原操作标记，不存执行授权。 */
 export function persistShape(message: ThreadMessage): PersistedShape | null {
   if (message.role === "system") return null;
   const fragments: YayaStoredFragment[] = [];
-  const attachmentIds: string[] = [];
+  const attachmentIds = collectMessageImages(message).map((image) => image.id);
   let executionState: PersistedShape["executionState"] = "none";
   let hasReceipt = false;
   let hasProposal = false;
-  let hasImage = false;
+  const hasImage = attachmentIds.length > 0;
 
   for (const part of message.content) {
     if (part.type === "text") {
@@ -114,12 +127,6 @@ export function persistShape(message: ThreadMessage): PersistedShape | null {
           )
         );
       }
-      continue;
-    }
-    if (part.type === "image") {
-      hasImage = true;
-      const attachmentId = yayaAttachmentIdFromUrl(part.image);
-      if (attachmentId !== null && !attachmentIds.includes(attachmentId)) attachmentIds.push(attachmentId);
       continue;
     }
     if (part.type !== "data") continue;

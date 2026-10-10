@@ -268,6 +268,7 @@ export function YayaRunErrorPart({ data }: DataMessagePartProps<YayaRunErrorPart
     data.client_request_id !== "" &&
     typeof data.conversation_id === "string" &&
     data.conversation_id !== "";
+  const emptyMessage = data.code === "empty_message";
   const notWired = data.stage === "not_wired";
   const restricted = data.status === 403;
 
@@ -304,7 +305,7 @@ export function YayaRunErrorPart({ data }: DataMessagePartProps<YayaRunErrorPart
     <CardShell
       tone={restricted ? "neutral" : "rose"}
       icon={<AlertTriangle className="size-4" />}
-      title={notWired ? "芽芽暂时不可用" : restricted ? "当前账号不能查看这段内容" : "这次回复暂时无法确认"}
+      title={emptyMessage ? "先添加文字或图片" : notWired ? "芽芽暂时不可用" : restricted ? "当前账号不能查看这段内容" : "这次回复暂时无法确认"}
       dataAttr="run-error"
     >
       <p className="text-foreground/90">{data.message}</p>
@@ -314,7 +315,7 @@ export function YayaRunErrorPart({ data }: DataMessagePartProps<YayaRunErrorPart
           <p className="pb-2 [overflow-wrap:anywhere]">协议校验：{data.detail}</p>
         </details>
       ) : null}
-      <p className="text-xs text-muted-foreground">只检查上次请求，不会自动重复提交。</p>
+      {!emptyMessage ? <p className="text-xs text-muted-foreground">只检查上次请求，不会自动重复提交。</p> : null}
       {canLookup ? (
         <Button type="button" variant="outline" size="sm" className="h-11 rounded-xl shadow-none" onClick={() => void lookup()} disabled={checking}>
           <RefreshCw className={cn("size-3.5", checking && "animate-spin motion-reduce:animate-none")} aria-hidden />

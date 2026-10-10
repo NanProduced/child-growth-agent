@@ -27,6 +27,7 @@ import {
 import { YayaProposalCard } from "./yaya-proposal";
 import { YayaRecoveryPart } from './yaya-recovery';
 import { YAYA_PART_NAMES } from "./client/parts";
+import { collectMessageImages } from "./client/mapping";
 import { useYayaStore } from "./yaya-provider";
 
 function AssistantText({ text }: TextMessagePartProps) {
@@ -64,15 +65,12 @@ const DATA_COMPONENTS = {
 
 function UserContent() {
   const store = useYayaStore();
-  const content = useAuiState((state) => state.message.content);
-  const images = useMemo<YayaGalleryImage[]>(() => {
-    const list: YayaGalleryImage[] = [];
-    for (const part of content) {
-      if (part.type !== "image") continue;
-      list.push({ attachmentId: part.id ?? part.image, src: part.image, filename: part.filename });
-    }
-    return list;
-  }, [content]);
+  const message = useAuiState((state) => state.message);
+  const content = message.content;
+  const images = useMemo<YayaGalleryImage[]>(
+    () => collectMessageImages(message).map((image) => ({ attachmentId: image.id, src: image.image, filename: image.filename })),
+    [message]
+  );
   const [viewer, setViewer] = useState<YayaGalleryImage | null>(null);
   const text = useMemo(
     () =>
