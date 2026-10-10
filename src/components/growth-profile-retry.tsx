@@ -13,9 +13,11 @@ import { fetchWithAccountAuth } from "@/lib/accounts/client";
 export function GrowthProfileRetry({
   childId,
   hasStoredProfile,
+  isCurrent = false,
 }: {
   childId: string;
   hasStoredProfile: boolean;
+  isCurrent?: boolean;
 }) {
   const router = useRouter();
   const { loading: authLoading, configured, isTeacher } = useTeacher();
@@ -40,6 +42,18 @@ export function GrowthProfileRetry({
     } finally {
       setBusy(false);
     }
+  }
+
+  if (isCurrent) {
+    return (
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        {error ? <p role="alert" className="text-sm text-amber-800">{error}</p> : null}
+        <Button type="button" variant="outline" className="min-h-11" onClick={() => void handleRetry()} disabled={busy}>
+          {busy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="size-4" aria-hidden="true" />}
+          {busy ? '正在整理…' : '重新整理成长小结'}
+        </Button>
+      </div>
+    );
   }
 
   return (

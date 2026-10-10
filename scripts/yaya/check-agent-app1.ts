@@ -650,7 +650,7 @@ async function startNext(
   fs.writeFileSync(logFile, '');
   const child = spawn(
     process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm',
-    ['exec', 'next', 'dev', '--hostname', '127.0.0.1', '--port', String(port)],
+    ['exec', 'next', 'dev', ...(process.platform === 'win32' ? ['--webpack'] : []), '--hostname', '127.0.0.1', '--port', String(port)],
     {
       cwd: ROOT,
       env: { ...env, AUTH_TRUSTED_ORIGINS: base },
@@ -1703,6 +1703,8 @@ async function main(): Promise<void> {
         )
       : null;
     const projectedImage = imageContext?.images[0];
+    check('authorized image source is registered as citable input',
+      projectedImage !== undefined && imageContext?.sources.some(source => source.kind === 'image_interpretation' && source.ref_id === projectedImage.source.ref_id));
     check(
       '正式上下文中图片是 image_interpretation 来源且字节与处理结果一致（不与教师原文混淆）',
       projectedImage !== undefined &&

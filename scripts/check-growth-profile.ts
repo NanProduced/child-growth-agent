@@ -310,6 +310,13 @@ async function main(): Promise<void> {
   assert.ok(resetSql.includes('growth_profile = null'));
   passed += 1;
 
+  // A current profile still needs an explicit teacher-only regeneration control.
+  const childPage = readFileSync(new URL('../src/app/children/[id]/page.tsx', import.meta.url), 'utf8');
+  const retryComponent = readFileSync(new URL('../src/components/growth-profile-retry.tsx', import.meta.url), 'utf8');
+  assert.ok(childPage.includes('isCurrent={profileIsCurrent}'));
+  assert.ok(retryComponent.includes('重新整理成长小结'));
+  passed += 1;
+
   // 8) 未登录写请求仍为 401。
   const previousTrustedOrigins = process.env.AUTH_TRUSTED_ORIGINS;
   try {
@@ -332,7 +339,7 @@ async function main(): Promise<void> {
   }
   passed += 1;
 
-  console.log(JSON.stringify({ passed, total: 13 }));
+  console.log(JSON.stringify({ passed, total: 14 }));
 }
 
 void main();

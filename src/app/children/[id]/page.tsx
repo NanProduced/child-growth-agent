@@ -383,8 +383,8 @@ export default async function ChildDetailPage({
         </Card>
       )}
 
-      {confirmedObservations.length > 0 && !profileIsCurrent ? (
-        <GrowthProfileRetry childId={child.id} hasStoredProfile={Boolean(child.growth_profile)} />
+      {confirmedObservations.length > 0 ? (
+        <GrowthProfileRetry childId={child.id} hasStoredProfile={Boolean(child.growth_profile)} isCurrent={profileIsCurrent} />
       ) : null}
 
       <ActivitySupportSection
