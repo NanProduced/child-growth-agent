@@ -39,6 +39,7 @@ async function main() {
     assert.equal(text.split('科学探索').length - 1, 1);
   });
   await check('family prompt contains diverse grounded examples', () => assert.ok(/少样本|示例/.test(COMMUNICATION_SYSTEM_PROMPT) && /自然角/.test(COMMUNICATION_SYSTEM_PROMPT) && /骑行/.test(COMMUNICATION_SYSTEM_PROMPT) && /成人/.test(COMMUNICATION_SYSTEM_PROMPT)));
+  await check('sparse parent stories omit technical gap prose and invented conditions', () => assert.ok(COMMUNICATION_SYSTEM_PROMPT.includes('不罗列') && COMMUNICATION_SYSTEM_PROMPT.includes('未记明就省略') && COMMUNICATION_SYSTEM_PROMPT.includes('原记录只有')));
   await check('growth prompt separates facts from interpretations and follow-up', () => assert.ok(/发展解读/.test(GROWTH_PROFILE_SYSTEM_PROMPT) && /继续观察/.test(GROWTH_PROFILE_SYSTEM_PROMPT) && /示例/.test(GROWTH_PROFILE_SYSTEM_PROMPT)));
   await check('valid literal growth evidence remains usable', async () => assert.deepEqual((await generateGrowthProfile(params, double(profile))).profile, profile));
   await check('invented growth quotation never publishes', async () => {
