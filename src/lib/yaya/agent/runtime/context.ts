@@ -233,19 +233,20 @@ async function loadImages(
         denied.push(attachmentId);
         continue;
       }
+      const source: YayaSourceRef = {
+        kind: 'image_interpretation',
+        ref_id: attachmentId,
+        label: '教师上传图片（服务端已授权、已处理字节）',
+        derived_from: null,
+      };
       images.push({
         image_id: attachmentId,
         media_type: mediaType as YayaAuthorizedImage['media_type'],
         data_base64: content.body.toString('base64'),
-        source: {
-          kind: 'image_interpretation',
-          ref_id: attachmentId,
-          label: '教师上传图片（服务端已授权、已处理字节）',
-          derived_from: null,
-        },
+        source,
       });
       dependencies.push({
-        ref: null,
+        ref: source,
         tool: null,
         image_id: attachmentId,
         message_id: null,
@@ -286,6 +287,9 @@ export async function loadYayaRunProjectedContext(
   try {
     const loaded = await loadImages(state, principal);
     images = loaded.images;
+    for (const image of images) {
+      if (!sources.some(source => sourceKey(source) === sourceKey(image.source))) sources.push(image.source);
+    }
     additions.push(...loaded.dependencies);
     if (loaded.denied.length > 0) state.load_failed = true;
   } catch {
