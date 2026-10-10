@@ -29,7 +29,28 @@ async function main() {
   await check('family groups by actual development focus instead of leading dates', () => {
     const text = validateCommunicationModel(output, sources, []).text;
     assert.ok(text.includes('科学探索') && text.includes('身体发展与健康'));
-    assert.ok(!text.startsWith('2026年')); assert.ok(text.includes('2026年9月7日') && text.includes('2026年10月10日'));
+    assert.ok(!/2026年|9月7日|10月10日|观察：/.test(text));
+  });
+  await check('parent prose never appends observation date footnotes', () => {
+    const text = validateCommunicationModel(output, sources, []).text;
+    assert.ok(!/观察：|2026年|9月7日|10月10日/.test(text));
+    assert.deepEqual(sources.map(source => source.observed_at), ['2026-09-07', '2026-10-10']);
+  });
+  await check('model clock time cannot enter parent prose', () => {
+    for (const time of ['14:30', '下午3点', '上午九点']) {
+      assert.throws(() => validateCommunicationModel({ ...output, stories: [{ ...stories[0], text: `${time}，${stories[0].text}` }, stories[1]] }, sources, []));
+    }
+  });
+  await check('verified quoted dates cannot bypass content-only output', () => {
+    const source = { ...sources[0], raw_text: '她说：“九月里妈妈带我看过花。”' };
+    assert.throws(() => validateCommunicationModel({ stories: [{ observation_id: source.id, focus: '科学', text: source.raw_text, quote: '九月里妈妈带我看过花' }], suggestion: '' }, [source], []));
+  });
+  await check('time-free literal excerpt preserves the dated original', () => {
+    const source = { ...sources[0], raw_text: '2026年9月7日，她说：“九月里妈妈带我看过花。”' };
+    const original = source.raw_text;
+    const text = validateCommunicationModel({ stories: [{ observation_id: source.id, focus: '科学', text: '她提到“妈妈带我看过花”，把自己的经历带进了与老师的交流。', quote: '妈妈带我看过花' }], suggestion: '' }, [source], []).text;
+    assert.ok(text.includes('妈妈带我看过花') && !/2026|九月|9月|观察：/.test(text));
+    assert.equal(source.raw_text, original);
   });
   await check('selected riding story cannot silently disappear even in legacy output', () => assert.throws(() => validateCommunicationModel({ stories: [{ observation_id: stories[0].observation_id, text: stories[0].text, quote: stories[0].quote }], suggestion: '' }, sources, [])));
   await check('each story still requires its own verified quote', () => assert.throws(() => validateCommunicationModel({ ...output, stories: [{ ...stories[0], quote: stories[1].quote }, stories[1]] }, sources, [])));

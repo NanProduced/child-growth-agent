@@ -40,7 +40,7 @@ for (const text of ["能力差", "明显进步", "越来越聪明", "每天都�
 check("other child name removed from parent text", () => assert.throws(() => validateCommunicationText("小禾和陈沐阳一起玩积木。", ["陈沐阳"])));
 const story = { observation_id: sourceId, text: "搭桥游戏中，她把桥墩挪近再试，说：“这次小车能过去了”。", quote: "这次小车能过去了" };
 const output = { stories: [story], suggestion: "家里也可以一起试试搭桥。" };
-check("literal factual source and parent prose", () => assert.equal(validateCommunicationModel(output, [source], []).text, `生活中的发现\n${story.text}\n（观察：2026年9月2日）\n\n${output.suggestion}`));
+check("literal factual source and date-free parent prose", () => assert.equal(validateCommunicationModel(output, [source], []).text, `生活中的发现\n${story.text}\n\n${output.suggestion}`));
 check("invented quote fails", () => assert.throws(() => validateCommunicationModel({ ...output, stories: [{ ...story, text: story.text.replace("这次小车能过去了", "我非常厉害"), quote: "我非常厉害" }] }, [source], [])));
 check("wrong source identity fails", () => assert.throws(() => validateCommunicationModel({ ...output, stories: [{ ...story, observation_id: randomUUID() }] }, [source], [])));
 check("unrelated citation fails", () => assert.throws(() => validateCommunicationModel({ ...output, stories: [{ ...story, quote: "桥倒了" }] }, [source], [])));
