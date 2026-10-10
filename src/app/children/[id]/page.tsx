@@ -112,9 +112,10 @@ function GrowthProfileSections({
         </ProfileCard>
 
         <ProfileCard
-          title="观察到的线索"
+          title={isFallback ? '观察到的线索' : '行为与发展解读'}
           icon={<Eye className="size-4 text-sky-600" aria-hidden="true" />}
         >
+          {!isFallback ? <p className="mb-3 text-sm text-muted-foreground">供教师参考，请结合原记录核对。</p> : null}
           <ul className="space-y-2 text-sm leading-6 text-slate-600">
             {profile.development_clues.map((clue, index) => (
               <li key={`${clue}-${index}`} className="flex gap-2">

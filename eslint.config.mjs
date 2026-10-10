@@ -23,6 +23,8 @@ const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
   {
+    // Match Next's plugin scope; it does not register import for CommonJS .cjs files.
+    files: ['**/*.{js,jsx,mjs,ts,tsx,mts,cts}'],
     settings: {
       // node_modules 里的 barrel 包（lucide-react 等）不参与 ExportMap 构建，
       // import/no-cycle 只需要项目源码的依赖图。
@@ -51,6 +53,10 @@ const eslintConfig = defineConfig([
     // Build artifacts:
     'server.js',
     'dist/',
+    // Local acceptance artifacts and credential-safe diagnostic scripts are not source.
+    '.tmp/',
+    'output/',
+    'logs/',
     // Script files (CommonJS):
     'scripts/**/*.{js,cjs}',
   ]),

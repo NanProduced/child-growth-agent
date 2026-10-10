@@ -37,7 +37,9 @@ const model: typeof invokeChatLlm = async (messages) => {
   const facts = JSON.parse(messages[1].content) as { observations: Array<{ observation_id: string; raw_text: string }> };
   assert.ok(facts.observations.every((item) => !item.raw_text.includes("陈沐阳")), "other names redacted before provider");
   return { provider: "stepfun", model: "in-process-double", usage: null, content: JSON.stringify({
-    stories: [{ observation_id: ids.first, text: "积木桥倒下后，她把桥墩挪近再试，说：“这次小车能过去了”。", quote: "这次小车能过去了" }],
+    stories: facts.observations.map(item => item.observation_id === ids.first
+      ? { observation_id: item.observation_id, focus: '科学', text: "积木桥倒下后，她把桥墩挪近再试，说：“这次小车能过去了”。", quote: "这次小车能过去了" }
+      : { observation_id: item.observation_id, focus: '语言', text: "她“拿来图书请老师讲”，指着画面停留了一会儿，邀请老师和自己一起阅读。", quote: "拿来图书请老师讲" }),
     suggestion: "在家可以一起试试搭桥，听她说说自己的办法。",
   }) };
 };

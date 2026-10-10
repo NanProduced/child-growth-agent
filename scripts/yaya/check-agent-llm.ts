@@ -5,7 +5,7 @@
  * 1. 原 6 类 strict json_schema 逐字节哈希回归（修改任一 schema 立即 RED）；
  * 2. 旧文本调用 invokeLlm 行为不变（默认 observation_draft、messages 直传）；
  * 3. invokeChatLlm：文本消息、应用自有 strict schema、usage=null、取消传播；
- * 4. StepFun 图片输入显式 unsupported，零 fetch，不静默切换 provider；
+ * 4. Step 5 Preview 图片字节正确发送；未接入的旧模型零 fetch，不静默换 provider；
  * 5. buildCozeChatMessages 只映射 base64 data URI，不产生/传递 URL；
  * 6. 全部 fetch 由替身截获：真实 provider 请求 0。
  */
@@ -33,6 +33,7 @@ type Captured = {
 const originalFetch = globalThis.fetch;
 const originalProvider = process.env.LLM_PROVIDER;
 const originalApiKey = process.env.STEPFUN_API_KEY;
+const originalModel = process.env.STEPFUN_MODEL;
 
 function installFetch(
   responder?: (captured: Captured) => Response | Promise<Response>,
@@ -104,6 +105,7 @@ async function check(name: string, run: () => void | Promise<void>): Promise<voi
 async function main(): Promise<void> {
   process.env.LLM_PROVIDER = 'stepfun';
   process.env.STEPFUN_API_KEY = 'offline-test-key';
+  process.env.STEPFUN_MODEL = 'step-5-preview';
 
   try {
     await check('llm/six-strict-schemas-unchanged', async () => {
@@ -197,6 +199,7 @@ async function main(): Promise<void> {
     });
 
     await check('llm/stepfun-images-unsupported-zero-fetch', async () => {
+      process.env.STEPFUN_MODEL = 'step-3.5-flash';
       const { calls, restore } = installFetch(() => chatResponse('不应到达'));
       try {
         await assert.rejects(
@@ -213,8 +216,38 @@ async function main(): Promise<void> {
         );
         assert.equal(calls.length, 0, 'unsupported 不允许先发请求或静默换 provider');
       } finally {
+        process.env.STEPFUN_MODEL = 'step-5-preview';
         restore();
       }
+    });
+
+    await check('llm/step5-image-only-strict-schema-and-history', async () => {
+      const { calls, restore } = installFetch(() => chatResponse('{"action":"answer"}', { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }));
+      try {
+        const result = await invokeChatLlm([
+          { role: 'user', content: '', images: [{ media_type: 'image/png', data_base64: 'QUJD' }] },
+          { role: 'assistant', content: '上一轮回答' },
+          { role: 'user', content: '比较两图', images: [{ media_type: 'image/jpeg', data_base64: 'REVG' }, { media_type: 'image/webp', data_base64: 'R0hJ' }] },
+        ], { responseFormat: YAYA_ACTION_WIRE_FORMAT });
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].body.model, 'step-5-preview');
+        const messages = calls[0].body.messages as Array<{ content: string | ContentPart[] }>;
+        assert.equal((messages[0].content as ContentPart[])[0].image_url?.url, 'data:image/png;base64,QUJD');
+        assert.equal(messages[1].content, '上一轮回答');
+        assert.equal((messages[2].content as ContentPart[]).length, 3);
+        assert.equal(((calls[0].body.response_format as Record<string, unknown>).json_schema as Record<string, unknown>).strict, true);
+        assert.equal(result.provider, 'stepfun');
+        assert.deepEqual(result.usage, { inputTokens: 12, outputTokens: 8, totalTokens: 20 });
+      } finally { restore(); }
+    });
+
+    await check('llm/step5-image-error-does-not-fallback', async () => {
+      const { calls, restore } = installFetch(() => new Response(JSON.stringify({ error: { message: 'vision unavailable' } }), { status: 400 }));
+      try {
+        await assert.rejects(invokeChatLlm([{ role: 'user', content: '', images: [{ media_type: 'image/png', data_base64: 'QUJD' }] }]));
+        assert.equal(calls.length, 1);
+        assert.ok(calls[0].url.startsWith('https://api.stepfun.com/'));
+      } finally { restore(); }
     });
 
     await check('llm/coze-vision-mapping-bytes-only', () => {
@@ -285,6 +318,8 @@ async function main(): Promise<void> {
     else process.env.LLM_PROVIDER = originalProvider;
     if (originalApiKey === undefined) delete process.env.STEPFUN_API_KEY;
     else process.env.STEPFUN_API_KEY = originalApiKey;
+    if (originalModel === undefined) delete process.env.STEPFUN_MODEL;
+    else process.env.STEPFUN_MODEL = originalModel;
   }
 }
 

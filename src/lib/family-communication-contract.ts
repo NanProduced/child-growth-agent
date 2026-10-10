@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { parseIsoDateStrict } from "./format";
 import { CONFIGURED_SEMESTERS } from "./semester/config";
+import { FIVE_DOMAINS } from "./types";
 
 export const MAX_COMMUNICATION_SOURCES = 60;
 const id = z.string().uuid();
@@ -58,6 +59,7 @@ export type UpdateCommunicationInput = z.infer<typeof updateCommunicationSchema>
 export const communicationSourceSchema = z.object({
   id, observed_at: date, context: z.string(), raw_text: z.string(),
   description: z.string(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  domain: z.enum(FIVE_DOMAINS).optional(), sub_domain: z.string().optional(),
 });
 export type CommunicationSource = z.infer<typeof communicationSourceSchema>;
 export const communicationViewSchema = z.object({
@@ -85,8 +87,9 @@ export type CommunicationWorkspace = z.infer<typeof communicationWorkspaceSchema
 export const communicationModelSchema = z.object({
   stories: z.array(z.object({
     observation_id: id,
-    text: z.string().trim().min(12).max(800).describe('只写这条观察的具体事例，不写日期或月份；日期由服务端添加'),
+    focus: z.enum([...FIVE_DOMAINS, '生活片段']).optional().describe('根据具体行为选择发展角度，不仅凭活动名称判断；不表示达标或能力等级'),
+    text: z.string().trim().min(12).max(800).describe('具体事例加贴近事实的发展解读，不写日期；分组和观察日期由服务端添加'),
     quote: z.string().trim().min(4).max(300),
-  }).strict()).min(1).max(3),
+  }).strict()).min(1).max(MAX_COMMUNICATION_SOURCES),
   suggestion: z.string().trim().max(500).describe('可选的家庭陪伴建议；不作事实回顾，不写日期，没有合适建议可填空字符串'),
 }).strict();
