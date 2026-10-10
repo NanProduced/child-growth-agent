@@ -1,6 +1,6 @@
 import type { TransactionClient } from '@/storage/database/pg-client';
 import type { Principal } from '@/lib/accounts/types';
-import { readAccessResourceFacts } from '@/lib/yaya/data/access-facts';
+import { evaluateAttachmentAccess, readAccessResourceFacts } from '@/lib/yaya/data/access-facts';
 import { projectMessageRow } from '@/lib/yaya/data/projection';
 import { parseStoredFragments, type YayaMessageRow } from '@/lib/yaya/data/rows';
 import { yayaDataRepository } from '@/lib/yaya/data';
@@ -15,7 +15,12 @@ async function messagePolicy(client: TransactionClient, principal: Principal, sc
   let unmapped = run.dependencies_corrupt ? 1 : 0;
   const add = (source: YayaMessageSourceRef) => refs.set(JSON.stringify(source), source);
   for (const dependency of run.dependencies) {
-    if (dependency.image_id !== null) { unmapped++; continue; }
+    if (dependency.image_id !== null) {
+      const [image] = await evaluateAttachmentAccess(client, principal, schoolId, [dependency.image_id]);
+      if (image?.access === 'full') add({ kind: 'image', image_id: dependency.image_id });
+      else unmapped++;
+      continue;
+    }
     if (dependency.message_id !== null) {
       const rows = await client.query<YayaMessageRow>('SELECT * FROM yaya_messages WHERE id=$1 AND conversation_id=$2 AND owner_account_id=$3 AND deleted_at IS NULL', [dependency.message_id, run.conversation_id, principal.account_id]);
       const row = rows.rows[0];
@@ -63,7 +68,8 @@ export async function persistRunTerminalMessage(client: TransactionClient, princ
       conversation_id: run.conversation_id, role: 'assistant', part: proposal === null ? 'assistant' : 'proposal-' + index,
       message_kind: proposal === null ? 'text' : 'tool_result', execution_state: outcome.kind === 'proposed' ? 'pending_approval' : outcome.kind === 'stopped' ? 'unknown' : 'none',
       fragments: [{ fragment_id: run.run_id + ':f' + index, text, sources: policy.sources, independently_readable: policy.independently_readable, provenance }],
-      attachment_ids: [], run: { run_id: run.run_id, client_request_id: run.client_request_id }, binding_state: policy.binding_state,
+      attachment_ids: policy.sources.flatMap(source => source.kind === 'image' ? [source.image_id] : []),
+      run: { run_id: run.run_id, client_request_id: run.client_request_id }, binding_state: policy.binding_state,
       recovery: { actor_account_id: run.owner_account_id, proposal: proposal === null ? null : { proposal_id: proposal.proposal_id, batch_id: proposal.batch_id }, operations },
     });
   }
