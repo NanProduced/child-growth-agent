@@ -510,7 +510,7 @@ export function imageDataUri(image: LlmChatImage): string {
   return `data:${image.media_type};base64,${image.data_base64}`;
 }
 
-/** Coze 聊天消息映射：图片只以 base64 data URI 进入 ContentPart，不接受 URL */
+/** 两个 provider 复用的兼容消息格式；保留旧导出名，图片仅传授权字节的 data URI。 */
 export function buildCozeChatMessages(messages: readonly LlmChatMessage[]): Message[] {
   return messages.map((message) => {
     const images = message.images ?? [];
@@ -638,17 +638,17 @@ async function invokeStepFunChat(
   messages: readonly LlmChatMessage[],
   options: LlmChatOptions,
 ): Promise<LlmChatResult> {
-  if (messages.some((message) => (message.images?.length ?? 0) > 0)) {
+  const model = getStepFunModel();
+  if (model !== 'step-5-preview' && messages.some((message) => (message.images?.length ?? 0) > 0)) {
     throw new LlmUnsupportedCapabilityError(
-      'StepFun 当前路径不支持图片输入；不会静默切换 provider',
+      '当前 StepFun 模型尚未接入图片理解，请使用 step-5-preview；不会静默切换 provider',
     );
   }
-  const model = getStepFunModel();
   const responseFormat = stepFunChatResponseFormat(options);
   const payload = await postStepFun(
     {
       model,
-      messages: messages.map((message) => ({ role: message.role, content: message.content })),
+      messages: buildCozeChatMessages(messages),
       temperature: options.temperature ?? 0.3,
       ...(responseFormat ? { response_format: responseFormat } : {}),
     },

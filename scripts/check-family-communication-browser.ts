@@ -36,14 +36,14 @@ async function main() {
         await db.query("INSERT INTO child_class_enrollments(child_id,class_id,start_date) VALUES($1,$2,'2020-01-01')", [id, classId]);
       }
       const stories = [
-        ["02", "积木区", "积木桥倒下后，小禾把桥墩挪近，说：“这次小车能过去了。”"],
-        ["11", "美工区", "小禾给画里的窗户添上圆点，说：“妈妈从这里看我。”"],
-        ["17", "同伴游戏", "小禾主动问同伴：“我可以和你们一起开车吗？”同伴点头后，她把小车停进了积木车库。"],
-        ["22", "阅读角", "小禾主动拿来《小熊回家》，请老师讲给她听，看到小熊找妈妈时指着画面停留了一会儿。"],
-        ["24", "生活整理", "收拾材料时，小禾把画纸放进自己的文件夹，再把蜡笔放回盒子。"],
+        ["02", "积木区", "积木桥倒下后，小禾把桥墩挪近，说：“这次小车能过去了。”", '科学', '科学探究'],
+        ["11", "美工区", "小禾给画里的窗户添上圆点，说：“妈妈从这里看我。”", '艺术', '表现与创造'],
+        ["17", "同伴游戏", "小禾主动问同伴：“我可以和你们一起开车吗？”同伴点头后，她把小车停进了积木车库。", '社会', '人际交往'],
+        ["22", "阅读角", "小禾主动拿来《小熊回家》，请老师讲给她听，看到小熊找妈妈时指着画面停留了一会儿。", '语言', '阅读与书写准备'],
+        ["24", "生活整理", "收拾材料时，小禾把画纸放进自己的文件夹，再把蜡笔放回盒子。", '健康', '生活习惯与生活能力'],
       ];
-      for (const [day, context, raw] of stories) {
-        const content: ObservationDraft = { domain: "科学", sub_domain: "日常尝试", objective_description: raw, highlights: [raw], support_suggestions: ["保留材料让她继续尝试。"], highlight_quote: raw };
+      for (const [day, context, raw, domain, subDomain] of stories) {
+        const content: ObservationDraft = { domain, sub_domain: subDomain, objective_description: raw, highlights: [raw], support_suggestions: ["保留材料让她继续尝试。"], highlight_quote: raw };
         await db.query(`INSERT INTO observations(id,child_id,class_id,observed_at,context,raw_text,status,confirmed_content,confirmed_at,is_demo)
           VALUES($1,$2,$3,$4,$5,$6,'confirmed',$7::jsonb,clock_timestamp(),true)`, [randomUUID(), child, classId, `${month}-${day}`, context, raw, JSON.stringify(content)]);
       }
@@ -56,10 +56,10 @@ async function main() {
       let body = ""; for await (const chunk of request) body += String(chunk);
       try {
         const input = JSON.parse(body) as { messages: Array<{ role: string; content: string }> };
-        const facts = JSON.parse(input.messages.find((item) => item.role === "user")!.content) as { child_name: string; observations: Array<{ observation_id: string; raw_text: string }> };
+        const facts = JSON.parse(input.messages.find((item) => item.role === "user")!.content) as { child_name: string; observations: Array<{ observation_id: string; raw_text: string; confirmed_domain?: string }> };
         const first = facts.observations[0];
         const quote = first.raw_text.includes("这次小车能过去了") ? "这次小车能过去了" : first.raw_text.slice(0, 12);
-        const stories = facts.observations.slice(0, 3).map(observation => ({ observation_id: observation.observation_id,
+        const stories = facts.observations.map(observation => ({ observation_id: observation.observation_id, focus: observation.confirmed_domain ?? '生活片段',
           text: observation.raw_text, quote: observation.observation_id === first.observation_id ? quote : observation.raw_text.slice(0, 12) }));
         response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ model: "fixture-stepfun-protocol", choices: [{ message: { content: JSON.stringify({ stories, suggestion: "在家也可以听她讲讲画里的故事，或一起试试怎样把积木桥搭稳。" }) } }] }));
       } catch { response.writeHead(400).end(); }
