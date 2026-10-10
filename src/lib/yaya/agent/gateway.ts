@@ -6,13 +6,25 @@
  * provider 能力不足（如 StepFun 图片输入）由 llm.ts 抛出 unsupported，不静默换 provider。
  */
 import { invokeChatLlm } from '../../llm';
+import { extractJson } from '../../ai';
 
 import {
   YAYA_ACTION_WIRE_FORMAT,
+  yayaAgentActionSchema,
   type YayaModelGateway,
   type YayaModelRequest,
   type YayaModelResponse,
 } from './types';
+
+/** Coze has no strict schema mode: only omitted no-op answer fields are defaulted. */
+function normalizeCozeAnswer(content: string): string {
+  let value: unknown;
+  try { value = extractJson(content); } catch { return content; }
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || !('action' in value)
+    || (value.action !== 'answer' && value.action !== 'clarify')) return content;
+  const parsed = yayaAgentActionSchema.safeParse({ tool: '', params_json: '', source_refs: [], ...value });
+  return parsed.success ? JSON.stringify(parsed.data) : content;
+}
 
 export function createLlmYayaModelGateway(options: { dateAnchor?: string; forwardHeaders?: Record<string, string> } = {}): YayaModelGateway {
   return {
@@ -31,7 +43,7 @@ export function createLlmYayaModelGateway(options: { dateAnchor?: string; forwar
         },
       );
       return {
-        content: result.content,
+        content: result.provider === 'coze' ? normalizeCozeAnswer(result.content) : result.content,
         provider: result.provider,
         model: result.model,
         usage: result.usage,
