@@ -1099,6 +1099,7 @@ export function itemsToResend(
  * 投影按每个来源用现有授权动作核验（child.read / class.read / observation.read 等）。
  */
 export type YayaMessageSourceRef =
+  | { kind: "image"; image_id: string }
   | { kind: "child"; child_id: string; current_class_id: string | null }
   | { kind: "class"; class_id: string }
   | {

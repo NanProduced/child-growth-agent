@@ -93,6 +93,7 @@ export interface YayaMessageRow {
 function isSourceRefShaped(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
+  if (record.kind === "image") return typeof record.image_id === "string" && record.image_id.trim() !== "";
   if (record.kind === "child") return typeof record.child_id === "string";
   if (record.kind === "class") return typeof record.class_id === "string";
   if (record.kind === "observation") return typeof record.observation_id === "string";

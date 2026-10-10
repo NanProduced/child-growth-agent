@@ -104,6 +104,7 @@ function decisionToSourceAccess(decision: AccessDecision): YayaSourceAccess {
 function isMessageSourceRef(value: unknown): value is YayaMessageSourceRef {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
+  if (record.kind === "image") return typeof record.image_id === "string" && record.image_id.trim() !== "";
   if (record.kind === "child") {
     return typeof record.child_id === "string" && record.child_id.trim() !== "";
   }
@@ -123,6 +124,9 @@ async function evaluateOneSource(
   source: YayaMessageSourceRef,
 ): Promise<YayaSourceAccess> {
   try {
+    if (source.kind === "image") {
+      return (await evaluateAttachmentAccess(client, principal, schoolId, [source.image_id]))[0]?.access ?? "broken";
+    }
     const ref: YayaItemResourceRef =
       source.kind === "child"
         ? { kind: "child", child_id: source.child_id }
@@ -279,7 +283,7 @@ export async function evaluateAttachmentAccess(
         results.push({ attachment_id: attachmentId, access: "broken" });
         continue;
       }
-      if (row.status === "deleting") {
+      if (row.status !== "ready") {
         results.push({ attachment_id: attachmentId, access: "unavailable" });
         continue;
       }
