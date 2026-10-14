@@ -1,86 +1,100 @@
-# 幼儿成长观察与活动支持智能体（child-growth-agent）
+# 芽芽观察
 
-面向幼儿园教师的观察记录智能体：教师录入观察原文 → 真实 AI（国产大模型）整理为结构化分析卡片 → 教师核对确认后归档 → 刷新后数据仍可查看。基于 [Next.js 16](https://nextjs.org) + [shadcn/ui](https://ui.shadcn.com) + 内置 PostgreSQL（Supabase PostgREST）+ coze-coding-dev-sdk LLM，由扣子编程 CLI 创建。
+面向幼儿园教师的成长观察与活动支持智能体。
 
-## 第一阶段范围（当前实现）
+芽芽观察把教师在一日生活、区域活动、户外活动和集体活动中记录下来的真实行为，整理成可追溯的发展性观察记录，并在教师确认后沉淀为成长档案和后续支持依据。
 
-- **核心链路**：录入观察 → 保存原文（不可改写）→ 真实 AI 整理 → 教师确认 → 刷新后仍可查看。
-- **页面**：工作台 `/`、幼儿档案 `/children`、档案详情 `/children/[id]`、观察列表 `/observations`、录入观察 `/observations/new`、整理与确认 `/observations/[id]/review`；活动计划与报告中心为下一阶段预留（建设中页）。
-- **AI 任务**：观察整理（`doubao-seed-2-0-lite-260215`，服务端调用，输出结构化五大领域卡片；产出一律标注「AI 生成」，仅为草稿）。AI 失败可重试；已确认记录禁止 AI 再改写。
-- **数据追溯**：`raw_text` 原文保存后永不修改；`ai_draft`（AI 草稿）与 `confirmed_content`（教师确认稿）分字段保存，可对照追溯。
-- **演示数据**：内置 6 名合成幼儿与 3 条示例观察，全部标注「合成数据」，不含真实幼儿信息。
+线上演示：<https://childgrowth.coze.site>
 
-## 最小访问控制
+> 产品不是幼儿测评、打分或排名系统。AI 负责整理、提问和提供支持建议，教师始终保留核对、修改和确认权。
 
-- 口令来自服务端环境变量 `TEACHER_PASSCODE`（见 `.env.example`），不进前端代码、不落库。
-- 访客只读：档案与观察记录可浏览；**所有写操作与 AI 调用**（新增幼儿、录入观察、AI 整理、确认归档）都在服务端 `requireTeacher()` 校验 httpOnly 签名 Cookie（HMAC-SHA256，7 天有效），前端状态不作为权限依据。
-- 未配置口令时，写接口与 AI 接口一律返回 503（默认禁用）；不开放公众注册，无通用默认密码。
-- 更换口令后所有旧会话立即失效（签名密钥随口令变化）。
+## 产品主线
 
-## 数据库
+```text
+教师登录与班级授权 → 建立成长档案 / 录入观察 → 保存原文
+→ AI 整理草稿 → 教师修改与确认 → 指南证据与成长档案
+→ 活动支持 / 家园沟通 / 芽芽自然语言助手
+```
 
-- 表结构事实源：`src/storage/database/shared/schema.ts`（`children`、`observations`）。CRUD 通过 `@supabase/supabase-js`（PostgREST）在服务端完成。
-- RLS：本项目不使用 Supabase Auth，两表启用 RLS 并按场景 A（公开读写策略）放行，鉴权由应用层 `requireTeacher()` 承担。
-- 注意：本机 pnpm 环境下 `coze-coding-ai db generate-models / upgrade`（drizzle-kit）存在 npm 模块解析问题；首次建表 DDL 已通过平台 SQL 通道执行，与 `schema.ts` 严格一致。云端环境可直接使用 `db upgrade`。
+核心原则：先记录事实，再形成理解；AI 提供支持，教师保留判断；关注发展过程，不给幼儿打分。
+
+## 主要功能
+
+| 模块 | 用途 |
+| --- | --- |
+| 工作台与账号权限 | 园所账号登录、教师任教班级范围、管理员班级与教师管理 |
+| 成长档案与观察记录 | 录入情境、日期和原始观察，完成 AI 整理、教师修改和确认归档 |
+| 指南证据 | 将观察关联到健康、语言、社会、科学、艺术五大领域的具体表现条目 |
+| 班级证据概览 | 用人数分布和证据状态查看班级情况，不把统计结果当作能力评分 |
+| 活动与成长支持 | 基于已确认观察生成发展性支持建议，并保留依据和教师判断 |
+| 家园沟通 | 按时间范围选择已确认记录，生成教师核对后分享给家长的文字 |
+| 芽芽智能体 | 用自然语言查询业务信息；涉及写入时先形成提案并等待教师批准 |
+| 图片与附件 | 校验、去 EXIF、生成缩略图和模型图，再进入授权分析链路 |
+
+## 可信记录边界
+
+- `raw_text` 是教师原始观察，保存后不可改写。
+- AI 草稿、教师修改稿和教师确认稿分开保存；未确认内容不会直接进入正式成长档案。
+- 指南年龄段是参考范围，不是统一达标期限。
+- 正式证据状态只有“暂无相关记录”“已有相关线索”“已确认观察到”。
+- 持续性表现需要跨日事实或明确期间依据，不使用“自动满三次即掌握”等规则。
+- 数据损坏、来源失效或权限不可核验时显示不可用，不伪造 0%、成功或空数据。
+- 不生成医疗、心理诊断，不对幼儿评分、排名或贴能力等级标签。
+- 演示数据使用合成记录；源码、日志、截图和视频不得包含密码、Cookie、连接串或对象存储签名 URL。
+
+## 技术架构
+
+```text
+Next.js App Router / React UI
+        ↓
+页面与 API Route Handlers
+        ↓
+业务服务、指南证据读写模型、芽芽 Agent Engine
+        ↓
+权限边界、事务型 Repository / Port
+        ↓
+PostgreSQL 直连 + Coze/StepFun LLM + 媒体对象存储
+```
+
+技术栈：Next.js 16.1、React 19、TypeScript 5、shadcn/ui、Radix UI、Tailwind CSS 4、Assistant UI、Recharts、`pg`、`sharp`、`coze-coding-dev-sdk` 和 pnpm 9+。
+
+生产环境使用扣子平台注入的运行时身份和对象存储配置；本地开发不得复制平台凭证，也不得把 API Key、数据库连接串或口令提交到仓库。
+
+## 数据库与迁移
+
+数据库通过 `pg` 直连，数据访问集中在 `src/lib` 与 `src/storage/database`。迁移脚本位于 `scripts/`，覆盖基础业务表、班级历史、成长支持、账号授权、指南证据、芽芽运行记录、聊天绑定、家园沟通和附件元数据。
+
+生产执行迁移前必须先完成备份、隔离库重复执行、schema 指纹核对和回滚兼容性核验；不要在生产运行演示 reset 脚本。
 
 ## 快速开始
 
-### 配置教师口令
-
 ```bash
-cp .env.example .env   # 然后在 .env 中填写 TEACHER_PASSCODE=<你的口令>
+pnpm install
+cp .env.example .env
+pnpm dev
 ```
 
-### 启动开发服务器
+Windows 也可以使用：
 
-```bash
-coze-dev dev
+```powershell
+pwsh scripts/dev.ps1
 ```
 
-启动后，在浏览器中打开 [http://localhost:5000](http://localhost:5000) 查看应用。
+常用变量见 `.env.example`：`DATABASE_URL`、`AUTH_TRUSTED_ORIGINS`、`AUTH_SCHOOL_ID`、`LLM_PROVIDER`、StepFun 配置和本地媒体配置。旧的 `TEACHER_PASSCODE` 不作为新版账号授权机制；生产账号、数据库和平台身份由部署流程配置。
 
-开发服务器支持热更新，修改代码后页面会自动刷新。
+## 代码结构
 
-### 静态检查
-
-```bash
-coze-dev validate
-```
-
-### 构建生产版本
-
-```bash
-coze-dev build
-```
-
-### 启动生产服务器
-
-```bash
-coze-dev start
-```
-
-## 项目结构
-
-```
-src/
-├── app/                      # Next.js App Router 目录
-│   ├── layout.tsx           # 根布局组件
-│   ├── page.tsx             # 首页
-│   ├── globals.css          # 全局样式（包含 shadcn 主题变量）
-│   └── [route]/             # 其他路由页面
-├── components/              # React 组件目录
-│   └── ui/                  # shadcn/ui 基础组件（优先使用）
-│       ├── button.tsx
-│       ├── card.tsx
-│       └── ...
-├── lib/                     # 工具函数库
-│   └── utils.ts            # cn() 等工具函数
-└── hooks/                   # 自定义 React Hooks（可选）
-
-server/
-├── index.ts                 # 自定义服务器入口
-├── tsconfig.json           # Server TypeScript 配置
-└── dist/                    # 编译输出目录（自动生成）
+```text
+src/app/                    # 页面与 API Route Handlers
+src/components/             # 页面业务组件
+src/components/ui/          # shadcn/ui 基础组件
+src/lib/guide/              # 指南目录、证据读模型与决定规则
+src/lib/yaya/               # 芽芽 Agent、数据投影、工具和协议
+src/lib/media/              # 图片上传、内容读取和保留策略
+src/lib/accounts/           # 账号、会话与班级范围授权
+src/storage/database/       # PostgreSQL 连接与共享 schema
+scripts/                    # 构建、迁移、验收与安全检查
+docs/                       # 产品契约、设计、交付和验收证据
 ```
 
 ## 核心开发规范
@@ -367,18 +381,15 @@ export const useStore = create<Store>((set) => ({
 
 ### 集成数据库
 
-推荐使用 Prisma 或 Drizzle ORM，在 `src/lib/db.ts` 中配置。
+本项目使用 `pg` 直连 PostgreSQL；请复用 `src/storage/database/pg-client.ts` 与现有 Repository，不要在页面组件中直接拼接数据库连接或引入第二套数据访问层。
 
-## 技术栈
+## 技术栈补充
 
-- **框架**: Next.js 16.1.1 (App Router)
-- **UI 组件**: shadcn/ui (基于 Radix UI)
-- **样式**: Tailwind CSS v4
-- **表单**: React Hook Form + Zod
-- **图标**: Lucide React
-- **字体**: Geist Sans & Geist Mono
-- **包管理器**: pnpm 9+
-- **TypeScript**: 5.x
+- **模型与平台**：`coze-coding-dev-sdk`、Coze provider、StepFun provider
+- **媒体**：`sharp`、本地对象存储、扣子平台 S3Storage 适配
+- **数据可视化**：Recharts + shadcn chart primitives
+- **表单与校验**：React Hook Form、Zod
+- **图标与交互**：Lucide React、Radix UI
 
 ## 参考文档
 
@@ -386,14 +397,33 @@ export const useStore = create<Store>((set) => ({
 - [shadcn/ui 组件文档](https://ui.shadcn.com)
 - [Tailwind CSS 文档](https://tailwindcss.com/docs)
 - [React Hook Form](https://react-hook-form.com)
+- [产品上下文与术语](PRODUCT.md)
+- [视觉与交互规范](DESIGN.md)
+- [指南证据契约](docs/guide-evidence-v1/contract.md)
+- [芽芽设计与交互资料](docs/design/yaya-v1/README.md)
+- [家园沟通交付记录](docs/family-communication-v1-delivery.md)
+- [平台 UI/UX 评审证据](docs/platform-review/)
 
 ## 重要提示
 
-1. **必须使用 pnpm** 作为包管理器
-2. **优先使用 shadcn/ui 组件** 而不是从零开发基础组件
-3. **遵循 Next.js App Router 规范**，正确区分服务端/客户端组件
-4. **使用 TypeScript** 进行类型安全开发
-5. **使用 `@/` 路径别名** 导入模块（已配置）
+1. **必须使用 pnpm** 作为包管理器。
+2. **优先复用 shadcn/ui、现有业务服务和端口**，不要重复实现授权、媒体或事务逻辑。
+3. **遵循 Next.js App Router 规范**，正确区分服务端/客户端组件，避免 hydration 问题。
+4. **使用 TypeScript 严格类型**，不要提交 `any`、凭证或生产数据。
+5. **涉及 AI、写入和附件的改动必须补充失败、权限、空数据和恢复路径检查**。
+
+## 参赛材料准备原则
+
+江西省教育厅指南要求 AI 创新应用案例同时说明应用文字材料、推进过程与成效的数字故事、以及支撑成果材料；开发过程需要能说明平台/技术选择、提示词、知识结构、交互逻辑或关键代码，并突出“可复现”。
+
+建议围绕一条教师工作故事准备材料：
+
+```text
+真实观察输入 → AI 整理草稿 → 教师确认 → 指南证据与成长档案
+→ 班级/个体回看 → 活动支持或家园分享 → 芽芽自然语言查询
+```
+
+提交包应明确区分“已实现”“隔离环境验收”“线上演示可见”和“尚未运行”，所有截图、录屏和样例数据使用合成数据，不编造效率提升或教育效果数字。
 
 ## 云盘源码与本地开发
 
