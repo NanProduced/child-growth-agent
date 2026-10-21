@@ -392,6 +392,28 @@ export function getLlmModel(provider = getLlmProvider()): string {
 }
 
 async function invokeCoze(messages: LlmMessage[], options: LlmOptions): Promise<LlmResult> {
+  if (process.env.YAYA_PLATFORM_AUTH === 'workload') {
+    // 平台运行时（沙箱预览/部署）不注入 SDK 所需的 COZE_API_TOKEN，
+    // 结构化调用与聊天调用统一走 workload 网关，不静默换 provider。
+    const value = await postCozeWorkload(
+      {
+        model: COZE_ORGANIZE_MODEL,
+        messages,
+        temperature: options.temperature ?? 0.3,
+        thinking: { type: options.thinking ?? 'disabled' },
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+      undefined,
+      options.forwardHeaders,
+    );
+    return {
+      content: stepFunContent(value),
+      provider: 'coze',
+      model: cozeWireModel(value, COZE_ORGANIZE_MODEL),
+      usage: isRecord(value) ? normalizeUsage(value.usage) : undefined,
+    };
+  }
   const response = await new LLMClient(new Config(), options.forwardHeaders).invoke(messages, {
     model: COZE_ORGANIZE_MODEL,
     temperature: options.temperature ?? 0.3,
@@ -403,6 +425,53 @@ async function invokeCoze(messages: LlmMessage[], options: LlmOptions): Promise<
     provider: 'coze',
     model: COZE_ORGANIZE_MODEL,
   };
+}
+
+/**
+ * 扣子平台 workload 网关公共路径：鉴权头、端点校验、超时与线协议解析，
+ * 由 invokeCoze 与 invokeCozeChat 共享；线协议为 SSE Chat Completions。
+ */
+async function postCozeWorkload(
+  body: Record<string, unknown>,
+  callerSignal: AbortSignal | undefined,
+  forwardHeaders: Record<string, string> | undefined,
+): Promise<unknown> {
+  const headers = platformWorkloadHeaders('model', forwardHeaders);
+  const endpoint = assertCozeEndpoint(
+    process.env.COZE_INTEGRATION_MODEL_BASE_URL || 'https://integration.coze.cn/api/v3',
+  );
+  const timeout = AbortSignal.timeout(getStepFunTimeoutMs());
+  const signal = callerSignal ? AbortSignal.any([timeout, callerSignal]) : timeout;
+  let response: Response;
+  try {
+    response = await fetch(endpoint + '/chat/completions', {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        ...headers,
+        'content-type': 'application/json',
+        'X-Client-Sdk': 'coze-coding-dev-sdk-typescript/0.3.0',
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch {
+    if (callerSignal?.aborted) throw new LlmAbortedError();
+    throw Error('扣子平台代理请求未完成。');
+  }
+  if (!response.ok) throw Error('扣子平台代理请求失败（HTTP ' + response.status + '）。');
+  const timing = timeoutRace(signal, getStepFunTimeoutMs());
+  let wire: string;
+  try {
+    wire = await Promise.race([response.text(), timing.promise]);
+  } finally {
+    timing.cancel();
+  }
+  return parseCozeModelWire(wire, response.headers.get('content-type') ?? '');
+}
+
+function cozeWireModel(value: unknown, fallback: string): string {
+  return isRecord(value) && typeof value.model === 'string' && value.model ? value.model : fallback;
 }
 
 /**
@@ -598,23 +667,24 @@ async function invokeCozeChat(
 ): Promise<LlmChatResult> {
   const model = process.env.YAYA_COZE_MODEL?.trim() || COZE_ORGANIZE_MODEL;
   if (process.env.YAYA_PLATFORM_AUTH === 'workload') {
-    const headers = platformWorkloadHeaders('model', options.forwardHeaders);
-    const endpoint = assertCozeEndpoint(process.env.COZE_INTEGRATION_MODEL_BASE_URL || 'https://integration.coze.cn/api/v3');
-    const timeout = AbortSignal.timeout(getStepFunTimeoutMs());
-    const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
-    let response: Response;
-    try {
-      response = await fetch(endpoint + '/chat/completions', { method: 'POST', redirect: 'error', headers: { ...headers, 'content-type': 'application/json', 'X-Client-Sdk': 'coze-coding-dev-sdk-typescript/0.3.0' }, body: JSON.stringify({ model, messages: buildCozeChatMessages(messages), temperature: options.temperature ?? 0.3, thinking: { type: options.thinking ?? 'disabled' }, stream: true, stream_options: { include_usage: true } }), signal });
-    } catch {
-      if (options.signal?.aborted) throw new LlmAbortedError();
-      throw Error('扣子平台代理请求未完成。');
-    }
-    if (!response.ok) throw Error('扣子平台代理请求失败（HTTP ' + response.status + '）。');
-    const timing = timeoutRace(signal, getStepFunTimeoutMs());
-    let wire: string;
-    try { wire = await Promise.race([response.text(), timing.promise]); } finally { timing.cancel(); }
-    const value = parseCozeModelWire(wire, response.headers.get('content-type') ?? '');
-    return { content: stepFunContent(value), provider: 'coze', model: isRecord(value) && typeof value.model === 'string' && value.model ? value.model : model, usage: isRecord(value) ? normalizeUsage(value.usage) ?? null : null };
+    const value = await postCozeWorkload(
+      {
+        model,
+        messages: buildCozeChatMessages(messages),
+        temperature: options.temperature ?? 0.3,
+        thinking: { type: options.thinking ?? 'disabled' },
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+      options.signal,
+      options.forwardHeaders,
+    );
+    return {
+      content: stepFunContent(value),
+      provider: 'coze',
+      model: cozeWireModel(value, model),
+      usage: isRecord(value) ? normalizeUsage(value.usage) ?? null : null,
+    };
   }
   // Coze 已安装 SDK 没有 response_format/tools 参数：结构化动作由 Prompt 承载，Zod 校验在应用层。
   const response = await raceWithAbort(

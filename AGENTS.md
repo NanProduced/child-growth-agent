@@ -122,7 +122,7 @@
 ## 部署要点
 
 1. 部署前在扣子编程部署面板的"生产环境变量"配置 `DATABASE_URL` 与 `AUTH_TRUSTED_ORIGINS`（新授权必需）；旧 `TEACHER_PASSCODE` 不再作为新版授权或部署前提
-2. AI 整理使用当前选择的 provider；Coze provider 依赖平台注入的 LLM 网关凭证，StepFun provider 依赖本地/生产环境变量中的 StepFun 配置，不能把任何凭证写入仓库
+2. **LLM provider（2026-10 切换）**：全部 AI 功能默认 **coze provider + `doubao-seed-2-0-lite`**（StepFun 账户余额耗尽）。provider 由 `LLM_PROVIDER`（结构化任务）与 `YAYA_CHAT_TEXT/IMAGE_PROVIDER`（聊天，未设时沿用 `LLM_PROVIDER`）控制，代码默认 coze。**Coze provider 在平台运行时（沙箱预览/部署）必须设 `YAYA_PLATFORM_AUTH=workload`**：此时 `invokeCoze` 与 `invokeCozeChat` 共用 `src/lib/llm.ts` 的 `postCozeWorkload` workload 网关（平台不注入 SDK 所需的 `COZE_API_TOKEN`，SDK 分支只在本地裸机配了该 token 时可用）。**面板注入的环境变量优先于 `.env`**——沙箱面板仍残留 `LLM_PROVIDER=stepfun` 时结构化任务不会切换；切换需在面板把 `LLM_PROVIDER` 改为 `coze`（或删除）并设 `YAYA_PLATFORM_AUTH=workload`，改完重启预览/重新部署生效。StepFun 相关代码路径保留作备用，不得把任何凭证写入仓库
 3. 按上节顺序执行/核对迁移；部署前必须验证表和索引已存在
 4. `.coze` 的部署标识是**扣子编程**体系的：`project_id` 必须等于沙箱 `COZE_PROJECT_ID`（当前 `7690843235199139866`，与线上站点埋点上报一致）。初始化快照曾带入旧扣子（低代码平台）的 `project_id`/`app_id`，2025-09 已纠正为扣子编程值并移除无对应概念的 `app_id`——两平台 ID 互不相通，勿混用
 
