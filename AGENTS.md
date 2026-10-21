@@ -133,4 +133,4 @@
 - `scripts/harness-safety.ts` 是已获批的安全装置，保持 blob `6702f2ddf3b436e79f8c92ae8756c33f611a8503` 不变
 - `pnpm lint --quiet` / `pnpm ts-check` 通过 ≠ 功能可用；写接口必须实际走一遍授权链路
 - 真实模型预算受限：模型相关验证使用测试进程内替身并明确标注，不新增产品侧绕过开关；禁止无预算的真实 provider 请求
-- **线上 yaya run 排障（2026-10-21 实测）**：NDJSON 里 `stopped` 的 detail 是协议安全文案（服务端刻意隐藏）；真实错误在共享库 `yaya_runs.outcome->>'detail'`（`state='terminal'` 行），先查库再决定是否重试，避免盲跑烧预算。当日部署 `7698962385171939371` 后实测：生产面板 `YAYA_CHAT_TEXT_PROVIDER` 仍为 `stepfun`，聊天模型调用报 `you have no active step plan subscription`——**面板变量不改，代码默认 coze 不生效**；切换必须在面板改 `LLM_PROVIDER` / `YAYA_CHAT_TEXT_PROVIDER`（删除或置 `coze`）后重新部署
+- **线上 yaya run 排障（2026-10-21 实测）**：NDJSON 里 `stopped` 的 detail 是协议安全文案（服务端刻意隐藏）；真实错误在共享库 `yaya_runs.outcome->>'detail'`（`state='terminal'` 行），先查库再决定是否重试，避免盲跑烧预算。当日面板变量切换前实测聊天报 `you have no active step plan subscription`（面板 `YAYA_CHAT_TEXT_PROVIDER=stepfun` 优先于代码默认 coze）；用户改面板（删除/置 `coze`）并重新部署后，同一链路复测 `outcome=answered` 且回答内容精确符合指令——**切换生效的判定依据：stepfun 死分支必然失败，成功即证明走 coze 网关；具体 lite/mini 模型 ID 线上协议与库均不透出，取决于面板 `YAYA_CHAT_MODEL` 残留值**
