@@ -137,7 +137,40 @@ async function main(): Promise<void> {
   assert.equal(modelCalls, 3);
   assert.equal(seenMessages[1].at(-1)?.role, 'tool');
   assert.equal(seenMessages[2].at(-1)?.tool_call_id, 'call-observations');
-  console.log(JSON.stringify({ passed: 7, total: 7, native_tool_rounds: modelCalls, read_calls: readCalls }));
+
+  let recoveryCalls = 0;
+  const recoveryDeps: YayaAgentDependencies = {
+    ...deps,
+    resolveCurrentIdentity: async () => ({ ...identity, run_id: 'native-loop-recovery' }),
+    model: {
+      generate: async (request) => {
+        recoveryCalls += 1;
+        if (recoveryCalls === 1) {
+          return { content: '', provider: 'coze', model: 'fixture-doubao', usage: null, tool_calls: [toolCall('bad-read', 'list_observations', { include_content: true })] };
+        }
+        if (recoveryCalls === 2) {
+          const toolResult = request.messages.at(-1);
+          assert.equal(toolResult?.role, 'tool');
+          assert.ok(toolResult?.text.includes('invalid_params'));
+          return { content: '', provider: 'coze', model: 'fixture-doubao', usage: null, tool_calls: [toolCall('corrected-read', 'list_children', {})] };
+        }
+        return {
+          content: JSON.stringify({ action: 'answer', content: '已读取当前授权范围内的幼儿名册。', tool: '', params_json: '', source_refs: ['children:current_scope'] }),
+          provider: 'coze',
+          model: 'fixture-doubao',
+          usage: null,
+        };
+      },
+    },
+  };
+  const recovered = await runYayaAgent(recoveryDeps, {
+    run_id: 'native-loop-recovery',
+    user_text: '读取幼儿名册',
+    attachment_ids: [],
+  });
+  assert.equal(recovered.outcome.kind, 'answered');
+  assert.equal(recoveryCalls, 3);
+  console.log(JSON.stringify({ passed: 12, total: 12, native_tool_rounds: modelCalls, recovery_rounds: recoveryCalls, read_calls: readCalls }));
 }
 
 void main();

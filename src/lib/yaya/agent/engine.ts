@@ -322,6 +322,26 @@ function appendToolResult(
   state.turns.push({ role: 'user', text: formatYayaToolResult(tool, envelope) });
 }
 
+function appendNativeToolFailure(
+  state: EngineState,
+  tool: string,
+  toolCallId: string,
+  code: string,
+  message: string,
+): void {
+  if (state.budget.tool_steps >= state.limits.max_tool_steps) throw stop('max_tool_steps');
+  if (state.budget.tool_attempts >= state.limits.max_tool_attempts) throw stop('max_tool_attempts');
+  state.budget.tool_steps += 1;
+  state.budget.tool_attempts += 1;
+  const envelope: YayaUntrustedEnvelope<unknown> = {
+    untrusted: true,
+    provenance: { kind: 'tool_result', ref_id: null, label: `工具参数未通过校验：${tool}`, derived_from: null },
+    content: { ok: false, code, message },
+  };
+  emit(state, { type: 'tool_result', tool, outcome: 'failed', source_kind: 'tool_result' });
+  appendToolResult(state, tool, envelope, toolCallId);
+}
+
 function validateAuthorizedImages(images: readonly YayaAuthorizedImage[]): void {
   for (const image of images) {
     if ('url' in image || 'signed_url' in image || 'key' in image) {
@@ -401,9 +421,21 @@ async function executeRead(
   if (definition === undefined) throw stop('unknown_read_tool', action.tool);
 
   const parsed = parseYayaActionParams(action.params_json);
-  if (!parsed.ok) throw stop('invalid_params', `${action.tool}: ${parsed.error}`);
+  if (!parsed.ok) {
+    if (toolCallId) {
+      appendNativeToolFailure(state, action.tool, toolCallId, 'invalid_params', parsed.error);
+      return;
+    }
+    throw stop('invalid_params', `${action.tool}: ${parsed.error}`);
+  }
   const validated = definition.params.validate(parsed.params);
-  if (!validated.ok) throw stop('invalid_params', `${action.tool}: ${validated.error}`);
+  if (!validated.ok) {
+    if (toolCallId) {
+      appendNativeToolFailure(state, action.tool, toolCallId, 'invalid_params', validated.error);
+      return;
+    }
+    throw stop('invalid_params', `${action.tool}: ${validated.error}`);
+  }
   const params = validated.params;
 
   if (state.budget.tool_steps >= state.limits.max_tool_steps) throw stop('max_tool_steps');
@@ -547,14 +579,27 @@ async function executeProposeWrite(
   state: EngineState,
   deps: YayaAgentDependencies,
   action: YayaAgentAction,
-): Promise<YayaRunOutcome> {
+  toolCallId?: string,
+): Promise<YayaRunOutcome | null> {
   const definition = deps.tools.write_tools.find((entry) => entry.tool === action.tool);
   if (definition === undefined) throw stop('unknown_write_tool', action.tool);
 
   const parsed = parseYayaActionParams(action.params_json);
-  if (!parsed.ok) throw stop('invalid_params', `${action.tool}: ${parsed.error}`);
+  if (!parsed.ok) {
+    if (toolCallId) {
+      appendNativeToolFailure(state, action.tool, toolCallId, 'invalid_params', parsed.error);
+      return null;
+    }
+    throw stop('invalid_params', `${action.tool}: ${parsed.error}`);
+  }
   const validated = definition.params.validate(parsed.params);
-  if (!validated.ok) throw stop('invalid_params', `${action.tool}: ${validated.error}`);
+  if (!validated.ok) {
+    if (toolCallId) {
+      appendNativeToolFailure(state, action.tool, toolCallId, 'invalid_params', validated.error);
+      return null;
+    }
+    throw stop('invalid_params', `${action.tool}: ${validated.error}`);
+  }
 
   if (state.budget.tool_steps >= state.limits.max_tool_steps) throw stop('max_tool_steps');
   state.budget.tool_steps += 1;
@@ -727,7 +772,9 @@ async function runLoop(
           action: 'propose_write',
           tool: writeCalls[0].action.tool,
         });
-        return await executeProposeWrite(state, deps, writeCalls[0].action);
+        const outcome = await executeProposeWrite(state, deps, writeCalls[0].action, writeCalls[0].call.id);
+        if (outcome !== null) return outcome;
+        continue;
       }
       for (const { call, action } of actions) {
         emit(state, { type: 'action_parsed', action: 'read', tool: action.tool });
@@ -751,7 +798,11 @@ async function runLoop(
         await executeRead(state, deps, action);
         break;
       case 'propose_write':
-        return await executeProposeWrite(state, deps, action);
+        {
+          const outcome = await executeProposeWrite(state, deps, action);
+          if (outcome === null) throw stop('propose_failed', '写提案未返回结果');
+          return outcome;
+        }
     }
   }
 }
