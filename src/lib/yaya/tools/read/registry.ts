@@ -313,6 +313,7 @@ function growthProfileDependencies(record: YayaChildProfileRecord): YayaSourceRe
 /* --------------------------------- 参数 schema --------------------------------- */
 
 const noParams = z.strictObject({});
+const listChildrenParams = z.strictObject({ name: z.string().trim().min(1).optional() });
 const classIdParams = z.strictObject({ class_id: z.string().min(1) });
 const childIdParams = z.strictObject({ child_id: z.string().min(1) });
 const observationIdParams = z.strictObject({ observation_id: z.string().min(1) });
@@ -434,19 +435,21 @@ function buildReadTools(ports: YayaReadPorts): ReadToolSpec<z.ZodType>[] {
     defineReadTool({
       tool: 'list_children',
       description:
-        '查询当前账号可读范围内的在班幼儿列表（教师=任教班级当前在班；管理员=全园）。只读；空任教范围返回 empty_scope，绝不等于全园' +
+        '查询当前账号可读范围内的在班幼儿列表（教师=任教班级当前在班；管理员=全园）；可按幼儿姓名精确筛选。只读；空任教范围返回 empty_scope，绝不等于全园' +
         SOURCE_CONTRACT,
       scope_policy: 'business_scope',
       auth: { kind: 'scope_query' },
-      schema: noParams,
-      run: async (_params, context) => {
+      schema: listChildrenParams,
+      run: async (params, context) => {
         const children = await ports.listChildren(context.request);
+        const visibleChildren =
+          params.name === undefined ? children : children.filter((child) => child.name === params.name);
         return payload(
           'list_children',
           'business_scope',
           scopeSource('children:current_scope', '当前可读幼儿列表'),
-          children.map(childRef),
-          { children: children.map(childSummary) },
+          visibleChildren.map(childRef),
+          { children: visibleChildren.map(childSummary) },
         );
       },
     }),

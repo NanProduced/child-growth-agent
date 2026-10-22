@@ -453,6 +453,9 @@ async function main(): Promise<void> {
   );
   assert.ok(listChildrenDefinition, 'list_children is registered');
   check(listChildrenDefinition.params.validate({}).ok, 'list_children accepts empty params');
+  check(listChildrenDefinition.params.validate({ name: '幼儿甲' }).ok, 'list_children accepts an exact name filter');
+  check(!listChildrenDefinition.params.validate({ name: '' }).ok, 'list_children rejects an empty name filter');
+  check(!listChildrenDefinition.params.validate({ name: 1 }).ok, 'list_children rejects a non-string name filter');
   check(!listChildrenDefinition.params.validate({ extra: 1 }).ok, 'list_children rejects unknown fields');
 
   const childClassDefinition = registry.definitions.find(
@@ -502,6 +505,15 @@ async function main(): Promise<void> {
   check(!JSON.stringify(children).includes('教师私有备注'), 'list_children omits teacher-private note');
   check(!JSON.stringify(children).includes('growth_profile'), 'list_children omits growth profile');
   check(children.scope_policy === 'business_scope', 'list_children is business scope');
+
+  const filteredChildren = payloadOf(
+    await registry.dispatch({ tool: 'list_children', params: { name: '幼儿甲' } }),
+  );
+  const filteredChildData = filteredChildren.data as { children: Array<Record<string, unknown>> };
+  check(
+    filteredChildData.children.length === 1 && filteredChildData.children[0].child_id === CHILD_A,
+    'list_children filters by an authorized child name',
+  );
 
   state.children = [];
   const emptyChildren = await registry.dispatch({ tool: 'list_children', params: {} });
