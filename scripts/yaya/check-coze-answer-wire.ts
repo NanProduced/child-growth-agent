@@ -68,12 +68,9 @@ async function main() {
   await check('read parameters are never repaired', {action:'read',tool:'list_children'},false);
   await check('write parameters are never repaired', {action:'propose_write',tool:'create_child'},false);
   await check('Coze plain text is normalized to a safe answer', '这是普通文本',true);
-  await checkAsync('Coze workload sends strict action response_format', async () => {
+  await checkAsync('Coze workload uses Prompt/Zod for action output', async () => {
     const format = capturedBodies.at(-1)?.response_format as Record<string, unknown> | undefined;
-    const schema = format?.json_schema as Record<string, unknown> | undefined;
-    assert.equal(format?.type, 'json_schema');
-    assert.equal(schema?.name, 'yaya_agent_action');
-    assert.equal(schema?.strict, true);
+    assert.equal(format, undefined);
   });
   await checkAsync('legacy Coze structured calls use Prompt/Zod instead of strict schema', async () => {
     modelOutput = '{"decision":"proceed","question":"","reason":""}';

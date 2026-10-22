@@ -733,14 +733,12 @@ async function invokeCozeChat(
 ): Promise<LlmChatResult> {
   const model = process.env.YAYA_COZE_MODEL?.trim() || COZE_ORGANIZE_MODEL;
   if (process.env.YAYA_PLATFORM_AUTH === 'workload') {
-    const responseFormat = stepFunChatResponseFormat(options);
     const value = await postCozeWorkload(
       {
         model,
         messages: buildCozeChatMessages(messages),
         temperature: options.temperature ?? 0.3,
         thinking: { type: options.thinking ?? 'disabled' },
-        ...(responseFormat ? { response_format: responseFormat } : {}),
         ...(options.tools && options.tools.length > 0 ? { tools: options.tools } : {}),
         stream: true,
         stream_options: { include_usage: true },
