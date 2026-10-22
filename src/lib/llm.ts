@@ -48,9 +48,11 @@ export type LlmChatImage = {
 };
 
 export type LlmChatMessage = {
-  role: LlmMessage['role'];
-  content: string;
+  role: LlmMessage['role'] | 'tool';
+  content: string | null;
   images?: readonly LlmChatImage[];
+  tool_calls?: readonly LlmChatToolCall[];
+  tool_call_id?: string;
 };
 
 /** 应用自有结构化动作格式（如芽芽 answer/read/clarify/propose_write） */
@@ -70,6 +72,7 @@ export type LlmChatTool = {
 
 export type LlmChatToolCall = {
   id: string | null;
+  type: 'function';
   name: string;
   arguments: string;
 };
@@ -600,9 +603,35 @@ export function imageDataUri(image: LlmChatImage): string {
   return `data:${image.media_type};base64,${image.data_base64}`;
 }
 
-/** 两个 provider 复用的兼容消息格式；保留旧导出名，图片仅传授权字节的 data URI。 */
-export function buildCozeChatMessages(messages: readonly LlmChatMessage[]): Message[] {
+type CozeChatWireMessage = {
+  role: LlmChatMessage['role'];
+  content: string | null | ContentPart[];
+  tool_calls?: readonly {
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }[];
+  tool_call_id?: string;
+};
+
+/** OpenAI-compatible messages; images are authorized bytes converted to data URIs. */
+export function buildCozeChatMessages(messages: readonly LlmChatMessage[]): CozeChatWireMessage[] {
   return messages.map((message) => {
+    if (message.role === 'tool') {
+      if (!message.tool_call_id) throw new Error('工具结果缺少 tool_call_id');
+      return { role: 'tool', content: message.content ?? '', tool_call_id: message.tool_call_id };
+    }
+    if (message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0) {
+      const toolCalls = message.tool_calls.map((call) => {
+        if (!call.id) throw new Error('assistant 工具调用缺少 tool_call_id');
+        return {
+          id: call.id,
+          type: 'function' as const,
+          function: { name: call.name, arguments: call.arguments },
+        };
+      });
+      return { role: 'assistant', content: message.content, tool_calls: toolCalls };
+    }
     const images = message.images ?? [];
     if (images.length === 0) return { role: message.role, content: message.content };
     const parts: ContentPart[] = [
@@ -610,7 +639,7 @@ export function buildCozeChatMessages(messages: readonly LlmChatMessage[]): Mess
         type: 'image_url' as const,
         image_url: { url: imageDataUri(image) },
       })),
-      { type: 'text' as const, text: message.content },
+      { type: 'text' as const, text: message.content ?? '' },
     ];
     return { role: message.role, content: parts };
   });
@@ -665,8 +694,8 @@ export function parseCozeModelWire(body: string, contentType: string): unknown {
       const index = typeof item.index === 'number' && Number.isInteger(item.index) && item.index >= 0
         ? item.index
         : toolCalls.length;
-      const current = toolCalls[index] ?? { id: null, name: '', arguments: '' };
-      if (typeof item.id === 'string') current.id = item.id;
+      const current = toolCalls[index] ?? { id: null, type: 'function' as const, name: '', arguments: '' };
+      if (typeof item.id === 'string' && item.id.length > 0) current.id = item.id;
       const fn = isRecord(item.function) ? item.function : null;
       if (fn && typeof fn.name === 'string') current.name += fn.name;
       if (fn && typeof fn.arguments === 'string') current.arguments += fn.arguments;
@@ -721,6 +750,7 @@ function cozeToolCalls(payload: unknown): LlmChatToolCall[] {
     const args = fn.arguments;
     return [{
       id: typeof item.id === 'string' ? item.id : null,
+      type: 'function',
       name: fn.name,
       arguments: typeof args === 'string' ? args : JSON.stringify(args ?? null),
     }];
@@ -757,7 +787,7 @@ async function invokeCozeChat(
   }
   // 非 workload 的 Coze SDK 没有 response_format/tools 参数：结构化动作由 Prompt 承载，Zod 校验在应用层。
   const response = await raceWithAbort(
-    new LLMClient(new Config(), options.forwardHeaders).invoke(buildCozeChatMessages(messages), {
+    new LLMClient(new Config(), options.forwardHeaders).invoke(buildCozeChatMessages(messages) as unknown as Message[], {
       model,
       temperature: options.temperature ?? 0.3,
       thinking: options.thinking ?? 'disabled',

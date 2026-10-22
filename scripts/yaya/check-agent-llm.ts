@@ -270,6 +270,24 @@ async function main(): Promise<void> {
       assert.equal(parts[1].text, '描述图片');
     });
 
+    await check('llm/coze-native-tool-message-roundtrip', () => {
+      const mapped = buildCozeChatMessages([
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: 'call-1', type: 'function', name: 'list_children', arguments: '{}' }],
+        },
+        { role: 'tool', content: '{"children":[]}', tool_call_id: 'call-1' },
+      ]);
+      assert.equal(mapped[0].role, 'assistant');
+      assert.equal(mapped[0].content, null);
+      assert.equal(mapped[0].tool_calls?.[0]?.id, 'call-1');
+      assert.equal(mapped[0].tool_calls?.[0]?.function.name, 'list_children');
+      assert.equal(mapped[1].role, 'tool');
+      assert.equal(mapped[1].tool_call_id, 'call-1');
+      assert.equal(mapped[1].content, '{"children":[]}');
+    });
+
     await check('llm/cancellation-propagation', async () => {
       const controller = new AbortController();
       const { calls, restore } = installFetch(

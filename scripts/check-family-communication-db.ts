@@ -34,7 +34,7 @@ async function denial(work: () => Promise<unknown>, code: string) {
 }
 const model: typeof invokeChatLlm = async (messages) => {
   models++;
-  const facts = JSON.parse(messages[1].content) as { observations: Array<{ observation_id: string; raw_text: string }> };
+  const facts = JSON.parse(String(messages[1]?.content ?? "")) as { observations: Array<{ observation_id: string; raw_text: string }> };
   assert.ok(facts.observations.every((item) => !item.raw_text.includes("陈沐阳")), "other names redacted before provider");
   return { provider: "stepfun", model: "in-process-double", usage: null, content: JSON.stringify({
     stories: facts.observations.map(item => item.observation_id === ids.first

@@ -12,8 +12,10 @@ import {
   YAYA_ACTION_WIRE_FORMAT,
   yayaAgentActionSchema,
   type YayaModelGateway,
+  type YayaModelMessage,
   type YayaModelRequest,
   type YayaModelResponse,
+  type YayaModelToolCall,
   type YayaToolCatalog,
 } from './types';
 
@@ -30,18 +32,6 @@ function normalizeCozeAnswer(content: string): string {
   }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return content;
   const record = value as Record<string, unknown>;
-  if (record.action === 'read' || record.action === 'propose_write') {
-    // Coze may serialize the nested params_json value as an object even though
-    // the application wire contract deliberately keeps it as a JSON string.
-    if (
-      typeof record.params_json === 'object' &&
-      record.params_json !== null &&
-      !Array.isArray(record.params_json)
-    ) {
-      return JSON.stringify({ ...record, params_json: JSON.stringify(record.params_json) });
-    }
-    return content;
-  }
   if (record.action !== 'answer' && record.action !== 'clarify') return content;
   const parsed = yayaAgentActionSchema.safeParse({ tool: '', params_json: '', source_refs: [], ...record });
   return parsed.success ? JSON.stringify(parsed.data) : content;
@@ -59,35 +49,45 @@ function nativeTools(catalog: YayaToolCatalog | undefined): LlmChatTool[] {
   }));
 }
 
-function nativeToolAction(
+function nativeToolCalls(
   calls: readonly LlmChatToolCall[],
   catalog: YayaToolCatalog | undefined,
-): string {
-  if (calls.length !== 1) throw new Error('扣子模型一次返回了多个工具调用，当前芽芽只接受一个动作。');
-  const call = calls[0];
-  const kind = catalog?.read_tools.some((tool) => tool.tool === call.name)
-    ? 'read'
-    : catalog?.write_tools.some((tool) => tool.tool === call.name)
-      ? 'propose_write'
-      : null;
-  if (kind === null) throw new Error(`扣子模型调用了未注册工具：${call.name}`);
-  return JSON.stringify({
-    action: kind,
-    content: '',
-    tool: call.name,
-    params_json: call.arguments,
-    source_refs: [],
+): YayaModelToolCall[] {
+  return calls.map((call) => {
+    if (!call.id) throw new Error(`扣子模型工具调用 ${call.name} 缺少 tool_call_id`);
+    const registered = catalog?.read_tools.some((tool) => tool.tool === call.name) ||
+      catalog?.write_tools.some((tool) => tool.tool === call.name);
+    if (!registered) throw new Error(`扣子模型调用了未注册工具：${call.name}`);
+    return { id: call.id, type: 'function', name: call.name, arguments: call.arguments };
   });
 }
 
 export function createLlmYayaModelGateway(options: { dateAnchor?: string; forwardHeaders?: Record<string, string>; tools?: YayaToolCatalog } = {}): YayaModelGateway {
   return {
     async generate(request: YayaModelRequest): Promise<YayaModelResponse> {
+      const modelMessages: YayaModelMessage[] = [
+        ...(options.dateAnchor ? [{
+          role: 'system' as const,
+          text: `服务端本次运行日期（Asia/Shanghai）：${options.dateAnchor}。今天/昨天以此为锚点；教师已明确给出的绝对日期优先，不要因缺少模型自身时钟而追问今天是哪一天。此日期不是幼儿事实，也不改写教师原文。`,
+        }] : []),
+        ...request.messages,
+      ];
+      const messages = modelMessages.map((message) => ({
+        role: message.role,
+        content: message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0
+          ? null
+          : message.text,
+        ...(message.images ? { images: message.images } : {}),
+        ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
+        ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+      }));
       const result = await invokeChatLlm(
-        [...(options.dateAnchor ? [{ role: 'system' as const, text: `服务端本次运行日期（Asia/Shanghai）：${options.dateAnchor}。今天/昨天以此为锚点；教师已明确给出的绝对日期优先，不要因缺少模型自身时钟而追问今天是哪一天。此日期不是幼儿事实，也不改写教师原文。` }] : []), ...request.messages].map((message) => ({
+        messages.map((message) => ({
           role: message.role,
-          content: message.text,
+          content: message.content,
           images: message.images,
+          tool_calls: message.tool_calls,
+          tool_call_id: message.tool_call_id,
         })),
         {
           temperature: 0.3,
@@ -97,16 +97,15 @@ export function createLlmYayaModelGateway(options: { dateAnchor?: string; forwar
           tools: nativeTools(options.tools),
         },
       );
-      const content = result.toolCalls && result.toolCalls.length > 0
-        ? nativeToolAction(result.toolCalls, options.tools)
-        : result.provider === 'coze'
-          ? normalizeCozeAnswer(result.content)
-          : result.content;
+      const toolCalls = result.toolCalls && result.toolCalls.length > 0
+        ? nativeToolCalls(result.toolCalls, options.tools)
+        : undefined;
       return {
-        content,
+        content: toolCalls ? '' : result.provider === 'coze' ? normalizeCozeAnswer(result.content) : result.content,
         provider: result.provider,
         model: result.model,
         usage: result.usage,
+        ...(toolCalls ? { tool_calls: toolCalls } : {}),
       };
     },
   };

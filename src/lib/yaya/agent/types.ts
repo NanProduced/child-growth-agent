@@ -266,12 +266,21 @@ export interface YayaProjectedContext {
 
 /* ---------------------------------- 模型端口 ---------------------------------- */
 
-export type YayaModelRole = 'system' | 'user' | 'assistant';
+export type YayaModelRole = 'system' | 'user' | 'assistant' | 'tool';
+
+export interface YayaModelToolCall {
+  id: string;
+  type: 'function';
+  name: string;
+  arguments: string;
+}
 
 export interface YayaModelMessage {
   role: YayaModelRole;
   text: string;
   images?: readonly YayaAuthorizedImage[];
+  tool_calls?: readonly YayaModelToolCall[];
+  tool_call_id?: string;
 }
 
 export interface YayaModelRequest {
@@ -286,6 +295,7 @@ export interface YayaModelResponse {
   model: string;
   /** 未知 usage 记 null，不填 0 */
   usage: LlmUsage | null;
+  tool_calls?: readonly YayaModelToolCall[];
 }
 
 export interface YayaModelGateway {

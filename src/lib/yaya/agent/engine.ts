@@ -44,6 +44,7 @@ import {
   type YayaCurrentIdentity,
   type YayaModelMessage,
   type YayaModelResponse,
+  type YayaModelToolCall,
   type YayaRecoveryRequest,
   type YayaRecoveryResult,
   type YayaRunOutcome,
@@ -288,6 +289,39 @@ function parseAction(content: string): YayaAgentAction {
   return parsed.data;
 }
 
+function actionFromNativeToolCall(
+  call: YayaModelToolCall,
+  deps: YayaAgentDependencies,
+): YayaAgentAction {
+  const isRead = deps.tools.read_tools.some((tool) => tool.tool === call.name);
+  const isWrite = deps.tools.write_tools.some((tool) => tool.tool === call.name);
+  if (!isRead && !isWrite) throw stop('invalid_action', `模型调用了未注册工具：${call.name}`);
+  return {
+    action: isRead ? 'read' : 'propose_write',
+    content: '',
+    tool: call.name,
+    params_json: call.arguments,
+    source_refs: [],
+  };
+}
+
+function appendToolResult(
+  state: EngineState,
+  tool: string,
+  envelope: YayaUntrustedEnvelope<unknown>,
+  toolCallId: string | undefined,
+): void {
+  if (toolCallId) {
+    state.turns.push({
+      role: 'tool',
+      text: JSON.stringify(envelope),
+      tool_call_id: toolCallId,
+    });
+    return;
+  }
+  state.turns.push({ role: 'user', text: formatYayaToolResult(tool, envelope) });
+}
+
 function validateAuthorizedImages(images: readonly YayaAuthorizedImage[]): void {
   for (const image of images) {
     if ('url' in image || 'signed_url' in image || 'key' in image) {
@@ -361,6 +395,7 @@ async function executeRead(
   state: EngineState,
   deps: YayaAgentDependencies,
   action: YayaAgentAction,
+  toolCallId?: string,
 ): Promise<void> {
   const definition = deps.tools.read_tools.find((entry) => entry.tool === action.tool);
   if (definition === undefined) throw stop('unknown_read_tool', action.tool);
@@ -424,7 +459,7 @@ async function executeRead(
         outcome: 'failed',
         source_kind: 'tool_result',
       });
-      state.turns.push({ role: 'user', text: formatYayaToolResult(action.tool, refusal) });
+      appendToolResult(state, action.tool, refusal, toolCallId);
       return;
     }
   }
@@ -478,7 +513,7 @@ async function executeRead(
         outcome: 'ok',
         source_kind: outcome.source.kind,
       });
-      state.turns.push({ role: 'user', text: formatYayaToolResult(action.tool, envelope) });
+      appendToolResult(state, action.tool, envelope, toolCallId);
       return;
     }
 
@@ -503,7 +538,7 @@ async function executeRead(
       outcome: 'failed',
       source_kind: 'tool_result',
     });
-    state.turns.push({ role: 'user', text: formatYayaToolResult(action.tool, failure) });
+    appendToolResult(state, action.tool, failure, toolCallId);
     return;
   }
 }
@@ -671,7 +706,35 @@ async function runLoop(
       model: response.model,
       usage: response.usage,
     });
-    state.turns.push({ role: 'assistant', text: response.content });
+    state.turns.push({
+      role: 'assistant',
+      text: response.content,
+      ...(response.tool_calls ? { tool_calls: response.tool_calls } : {}),
+    });
+
+    if (response.tool_calls && response.tool_calls.length > 0) {
+      const actions = response.tool_calls.map((call) => ({
+        call,
+        action: actionFromNativeToolCall(call, deps),
+      }));
+      const writeCalls = actions.filter(({ action }) => action.action === 'propose_write');
+      if (writeCalls.length > 1 || (writeCalls.length > 0 && actions.length > 1)) {
+        throw stop('invalid_action', '一次模型响应不能混合多个写提案或读工具调用。');
+      }
+      if (writeCalls.length === 1) {
+        emit(state, {
+          type: 'action_parsed',
+          action: 'propose_write',
+          tool: writeCalls[0].action.tool,
+        });
+        return await executeProposeWrite(state, deps, writeCalls[0].action);
+      }
+      for (const { call, action } of actions) {
+        emit(state, { type: 'action_parsed', action: 'read', tool: action.tool });
+        await executeRead(state, deps, action, call.id);
+      }
+      continue;
+    }
 
     const action = parseAction(response.content);
     emit(state, {

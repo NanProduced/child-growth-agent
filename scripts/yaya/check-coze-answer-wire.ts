@@ -68,19 +68,6 @@ async function main() {
   await check('read parameters are never repaired', {action:'read',tool:'list_children'},false);
   await check('write parameters are never repaired', {action:'propose_write',tool:'create_child'},false);
   await check('Coze plain text is normalized to a safe answer', '这是普通文本',true);
-  await checkAsync('Coze nested params_json is canonicalized without changing its value', async () => {
-    modelOutput = JSON.stringify({
-      action: 'propose_write',
-      content: '',
-      tool: 'organize_observation',
-      params_json: { observation_id: 'observation-1' },
-      source_refs: [],
-    });
-    const response = await gateway.generate({ run_id:'fixture',messages:[{role:'user',text:'整理观察'}],signal:new AbortController().signal });
-    const value = JSON.parse(response.content) as Record<string, unknown>;
-    assert.equal(value.params_json, '{"observation_id":"observation-1"}');
-    assert.equal(yayaAgentActionSchema.safeParse(value).success, true);
-  });
   await checkAsync('Coze workload uses Prompt/Zod for action output', async () => {
     const format = capturedBodies.at(-1)?.response_format as Record<string, unknown> | undefined;
     assert.equal(format, undefined);
@@ -90,14 +77,12 @@ async function main() {
     await invokeLlm([{ role: 'user', content: '判断是否需要追问' }], { responseType: 'follow_up_decision' });
     assert.equal('response_format' in (capturedBodies.at(-1) ?? {}), false);
   });
-  await checkAsync('native Coze tool call becomes a bounded read action', async () => {
+  await checkAsync('native Coze tool call is returned with an opaque call id', async () => {
     responseWire = JSON.stringify({ model: 'fixture-coze', choices: [{ message: { content: '', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'list_children', arguments: '{"name":"罗子墨"}' } }] } }] });
     responseContentType = 'application/json';
     const response = await gateway.generate({ run_id:'fixture',messages:[{role:'user',text:'请记录罗子墨今天的观察'}],signal:new AbortController().signal });
-    const value = JSON.parse(response.content) as Record<string, unknown>;
-    assert.equal(value.action, 'read');
-    assert.equal(value.tool, 'list_children');
-    assert.equal(value.params_json, '{"name":"罗子墨"}');
+    assert.equal(response.content, '');
+    assert.deepEqual(response.tool_calls, [{ id: 'call-1', type: 'function', name: 'list_children', arguments: '{"name":"罗子墨"}' }]);
     const bodyTools = capturedBodies.at(-1)?.tools as Array<Record<string, unknown>> | undefined;
     assert.equal(bodyTools?.[0]?.type, 'function');
     assert.equal((bodyTools?.[0]?.function as Record<string, unknown>)?.name, 'list_children');
@@ -111,7 +96,7 @@ async function main() {
     ].join('\n');
     responseContentType = 'text/event-stream';
     const response = await gateway.generate({ run_id:'fixture',messages:[{role:'user',text:'匹配周米朵'}],signal:new AbortController().signal });
-    assert.equal((JSON.parse(response.content) as Record<string, unknown>).params_json, '{"name":"周米朵"}');
+    assert.deepEqual(response.tool_calls, [{ id: 'call-2', type: 'function', name: 'list_children', arguments: '{"name":"周米朵"}' }]);
     responseWire = null;
     responseContentType = 'application/json';
   });
@@ -120,12 +105,14 @@ async function main() {
     await assert.rejects(() => gateway.generate({ run_id:'fixture',messages:[{role:'user',text:'执行未知工具'}],signal:new AbortController().signal }));
     responseWire = null;
   });
-  await checkAsync('multiple native tool calls are rejected', async () => {
+  await checkAsync('multiple native tool calls are preserved for parallel execution', async () => {
     responseWire = JSON.stringify({ model: 'fixture-coze', choices: [{ message: { content: '', tool_calls: [
       { id: 'call-4', type: 'function', function: { name: 'list_children', arguments: '{}' } },
       { id: 'call-5', type: 'function', function: { name: 'list_children', arguments: '{}' } },
     ] } }] });
-    await assert.rejects(() => gateway.generate({ run_id:'fixture',messages:[{role:'user',text:'执行两个工具'}],signal:new AbortController().signal }));
+    const response = await gateway.generate({ run_id:'fixture',messages:[{role:'user',text:'执行两个工具'}],signal:new AbortController().signal });
+    assert.equal(response.tool_calls?.length, 2);
+    assert.deepEqual(response.tool_calls?.map((call) => call.id), ['call-4', 'call-5']);
     responseWire = null;
   });
   process.env.YAYA_CHAT_TEXT_PROVIDER='stepfun'; process.env.STEPFUN_API_KEY='fixture-not-a-real-key';
