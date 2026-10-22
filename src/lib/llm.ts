@@ -97,7 +97,7 @@ export class LlmAbortedError extends Error {
   }
 }
 
-export const COZE_ORGANIZE_MODEL = 'doubao-seed-2-0-lite-260215';
+export const COZE_ORGANIZE_MODEL = 'doubao-seed-2-0-pro-260215';
 const DEFAULT_STEPFUN_BASE_URL = 'https://api.stepfun.com/step_plan/v1';
 const DEFAULT_STEPFUN_MODEL = 'step-5-preview';
 export const DEFAULT_STEPFUN_TIMEOUT_MS = 60_000;
