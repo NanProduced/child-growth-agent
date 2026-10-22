@@ -66,7 +66,14 @@ async function main() {
   await check('empty content is not a successful reply', {action:'answer',content:''},false);
   await check('read parameters are never repaired', {action:'read',tool:'list_children'},false);
   await check('write parameters are never repaired', {action:'propose_write',tool:'create_child'},false);
-  await check('non-JSON is never promoted to an answer', '这是普通文本',false);
+  await check('Coze plain text is normalized to a safe answer', '这是普通文本',true);
+  await checkAsync('Coze workload sends strict action response_format', async () => {
+    const format = capturedBodies.at(-1)?.response_format as Record<string, unknown> | undefined;
+    const schema = format?.json_schema as Record<string, unknown> | undefined;
+    assert.equal(format?.type, 'json_schema');
+    assert.equal(schema?.name, 'yaya_agent_action');
+    assert.equal(schema?.strict, true);
+  });
   await checkAsync('native Coze tool call becomes a bounded read action', async () => {
     responseWire = JSON.stringify({ model: 'fixture-coze', choices: [{ message: { content: '', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'list_children', arguments: '{"name":"罗子墨"}' } }] } }] });
     responseContentType = 'application/json';

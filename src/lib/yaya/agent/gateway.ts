@@ -20,7 +20,14 @@ import {
 /** Coze fallback has no strict schema mode: only omitted no-op answer fields are defaulted. */
 function normalizeCozeAnswer(content: string): string {
   let value: unknown;
-  try { value = extractJson(content); } catch { return content; }
+  try {
+    value = extractJson(content);
+  } catch {
+    const text = content.trim();
+    return text.length > 0
+      ? JSON.stringify({ action: 'answer', content: text, tool: '', params_json: '', source_refs: [] })
+      : content;
+  }
   if (typeof value !== 'object' || value === null || Array.isArray(value) || !('action' in value)
     || (value.action !== 'answer' && value.action !== 'clarify')) return content;
   const parsed = yayaAgentActionSchema.safeParse({ tool: '', params_json: '', source_refs: [], ...value });
