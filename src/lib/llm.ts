@@ -420,7 +420,8 @@ async function invokeCoze(messages: LlmMessage[], options: LlmOptions): Promise<
         messages,
         temperature: options.temperature ?? 0.3,
         thinking: { type: options.thinking ?? 'disabled' },
-        response_format: STEPFUN_RESPONSE_FORMATS[options.responseType ?? 'observation_draft'],
+        // Coze workload 对旧结构化链路不稳定支持 StepFun 的 strict json_schema；
+        // 该链路由 Prompt + Zod + 上层一次重试共同守门，避免网关直接返回错误事件。
         stream: true,
         stream_options: { include_usage: true },
       },
@@ -679,7 +680,11 @@ export function parseCozeModelWire(body: string, contentType: string): unknown {
     if (ended) throw Error('扣子事件流终态后仍有数据。');
     if (data === '[DONE]') { done = true; ended = true; continue; }
     const value: unknown = JSON.parse(data);
-    if (!isRecord(value) || value.error) throw Error('扣子事件流包含错误。');
+    if (!isRecord(value)) throw Error('扣子事件流形状错误。');
+    if (value.error) {
+      const detail = errorMessage(value) ?? '未知错误';
+      throw Error(`扣子事件流包含错误：${detail}`);
+    }
     if (typeof value.model === 'string') {
       if (model !== null && model !== value.model) throw Error('扣子事件流模型身份矛盾。');
       model = value.model;

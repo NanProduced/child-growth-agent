@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { createLlmYayaModelGateway } from '../../src/lib/yaya/agent/gateway';
+import { invokeLlm } from '../../src/lib/llm';
 import { yayaAgentActionSchema, zodToolParams, type YayaToolCatalog } from '../../src/lib/yaya/agent/types';
 
 const originalFetch = globalThis.fetch;
@@ -73,6 +74,11 @@ async function main() {
     assert.equal(format?.type, 'json_schema');
     assert.equal(schema?.name, 'yaya_agent_action');
     assert.equal(schema?.strict, true);
+  });
+  await checkAsync('legacy Coze structured calls use Prompt/Zod instead of strict schema', async () => {
+    modelOutput = '{"decision":"proceed","question":"","reason":""}';
+    await invokeLlm([{ role: 'user', content: '判断是否需要追问' }], { responseType: 'follow_up_decision' });
+    assert.equal('response_format' in (capturedBodies.at(-1) ?? {}), false);
   });
   await checkAsync('native Coze tool call becomes a bounded read action', async () => {
     responseWire = JSON.stringify({ model: 'fixture-coze', choices: [{ message: { content: '', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'list_children', arguments: '{"name":"罗子墨"}' } }] } }] });
