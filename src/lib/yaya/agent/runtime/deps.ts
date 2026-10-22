@@ -144,8 +144,12 @@ export function createYayaRunDependencies(
 ): YayaAgentDependencies {
   const readRegistry = options.readRegistry ?? createYayaReadRegistry();
   const write = typeof options.write === 'function' ? options.write(state) : options.write;
+  const tools: YayaToolCatalog = {
+    read_tools: readRegistry.definitions,
+    write_tools: write?.write_tools ?? [],
+  };
   return {
-    model: createLlmYayaModelGateway({ dateAnchor: isoDateInShanghai(new Date(state.run.created_at)), forwardHeaders: options.forwardHeaders }),
+    model: createLlmYayaModelGateway({ dateAnchor: isoDateInShanghai(new Date(state.run.created_at)), forwardHeaders: options.forwardHeaders, tools }),
     resolveCurrentIdentity: ({ run_id }) =>
       resolveYayaRunCurrentIdentity({ runId: run_id, token: state.token }),
     loadProjectedContext: (input) => loadYayaRunProjectedContext(state, input.identity.principal),
@@ -185,9 +189,6 @@ export function createYayaRunDependencies(
       provider_enabled: false,
       scanChildIdentifiers: async () => 'unknown',
     },
-    tools: {
-      read_tools: readRegistry.definitions,
-      write_tools: write?.write_tools ?? [],
-    },
+    tools,
   };
 }

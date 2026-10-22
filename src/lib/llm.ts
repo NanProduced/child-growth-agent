@@ -59,6 +59,21 @@ export type LlmChatResponseFormat = {
   schema: object;
 };
 
+export type LlmChatTool = {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: object;
+  };
+};
+
+export type LlmChatToolCall = {
+  id: string | null;
+  name: string;
+  arguments: string;
+};
+
 export type LlmChatOptions = {
   temperature?: number;
   thinking?: 'enabled' | 'disabled';
@@ -67,6 +82,8 @@ export type LlmChatOptions = {
   responseType?: LlmResponseType;
   /** 应用自有 strict json_schema；与 responseType 同时给出时优先本项 */
   responseFormat?: LlmChatResponseFormat;
+  /** OpenAI-compatible function tools；仅具备该能力的 provider 通道发送。 */
+  tools?: readonly LlmChatTool[];
   /** 调用方取消传播；上游物理取消效果另记 NOT_RUN */
   signal?: AbortSignal;
 };
@@ -77,6 +94,8 @@ export type LlmChatResult = {
   model: string;
   /** 未知 usage 记 null，不填 0 */
   usage: LlmUsage | null;
+  /** Coze workload 通道返回的原生工具调用；普通回答时为空。 */
+  toolCalls?: readonly LlmChatToolCall[];
 };
 
 /** provider 不具备所需能力（如图片输入）时显式抛出；不静默切换 provider */
@@ -567,6 +586,22 @@ export function parseCozeModelWire(body: string, contentType: string): unknown {
   if (text.startsWith('{')) return JSON.parse(text) as unknown;
   if (!contentType.includes('text/event-stream') && !text.startsWith('data:')) throw Error('扣子网关没有返回模型 JSON 或合法事件流。');
   let content = '', usage: unknown = null, model: string | null = null, done = false, ended = false;
+  const toolCalls: LlmChatToolCall[] = [];
+  const mergeToolCalls = (value: unknown): void => {
+    if (!Array.isArray(value)) return;
+    for (const item of value) {
+      if (!isRecord(item)) continue;
+      const index = typeof item.index === 'number' && Number.isInteger(item.index) && item.index >= 0
+        ? item.index
+        : toolCalls.length;
+      const current = toolCalls[index] ?? { id: null, name: '', arguments: '' };
+      if (typeof item.id === 'string') current.id = item.id;
+      const fn = isRecord(item.function) ? item.function : null;
+      if (fn && typeof fn.name === 'string') current.name += fn.name;
+      if (fn && typeof fn.arguments === 'string') current.arguments += fn.arguments;
+      toolCalls[index] = current;
+    }
+  };
   for (const line of text.split(/\r?\n/)) {
     if (!line.startsWith('data:')) continue;
     const data = line.slice(5).trim();
@@ -583,13 +618,38 @@ export function parseCozeModelWire(body: string, contentType: string): unknown {
     if (!Array.isArray(value.choices)) continue;
     for (const choice of value.choices) {
       if (!isRecord(choice)) throw Error('扣子事件流形状错误。');
-      if (isRecord(choice.delta) && typeof choice.delta.content === 'string') content += choice.delta.content;
-      if (choice.finish_reason === 'stop') done = true;
+      const delta = isRecord(choice.delta) ? choice.delta : isRecord(choice.message) ? choice.message : null;
+      if (delta && typeof delta.content === 'string') content += delta.content;
+      if (delta) mergeToolCalls(delta.tool_calls);
+      if (choice.finish_reason === 'stop' || choice.finish_reason === 'tool_calls') done = true;
       if (choice.finish_reason === 'length') throw Error('扣子模型回答被截断。');
     }
   }
-  if (!done || !content.trim()) throw Error('扣子事件流没有完整回答。');
-  return { model, choices: [{ message: { content } }], usage };
+  if (!done || (!content.trim() && toolCalls.length === 0)) throw Error('扣子事件流没有完整回答。');
+  return {
+    model,
+    choices: [{ message: { content, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}) } }],
+    usage,
+  };
+}
+
+function cozeToolCalls(payload: unknown): LlmChatToolCall[] {
+  if (!isRecord(payload) || !Array.isArray(payload.choices)) return [];
+  const message = isRecord(payload.choices[0]) && isRecord(payload.choices[0].message)
+    ? payload.choices[0].message
+    : null;
+  if (!message || !Array.isArray(message.tool_calls)) return [];
+  return message.tool_calls.flatMap((item): LlmChatToolCall[] => {
+    if (!isRecord(item)) return [];
+    const fn = isRecord(item.function) ? item.function : item;
+    if (typeof fn.name !== 'string') return [];
+    const args = fn.arguments;
+    return [{
+      id: typeof item.id === 'string' ? item.id : null,
+      name: fn.name,
+      arguments: typeof args === 'string' ? args : JSON.stringify(args ?? null),
+    }];
+  });
 }
 
 async function invokeCozeChat(
@@ -604,7 +664,7 @@ async function invokeCozeChat(
     const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
     let response: Response;
     try {
-      response = await fetch(endpoint + '/chat/completions', { method: 'POST', redirect: 'error', headers: { ...headers, 'content-type': 'application/json', 'X-Client-Sdk': 'coze-coding-dev-sdk-typescript/0.3.0' }, body: JSON.stringify({ model, messages: buildCozeChatMessages(messages), temperature: options.temperature ?? 0.3, thinking: { type: options.thinking ?? 'disabled' }, stream: true, stream_options: { include_usage: true } }), signal });
+      response = await fetch(endpoint + '/chat/completions', { method: 'POST', redirect: 'error', headers: { ...headers, 'content-type': 'application/json', 'X-Client-Sdk': 'coze-coding-dev-sdk-typescript/0.3.0' }, body: JSON.stringify({ model, messages: buildCozeChatMessages(messages), temperature: options.temperature ?? 0.3, thinking: { type: options.thinking ?? 'disabled' }, ...(options.tools && options.tools.length > 0 ? { tools: options.tools } : {}), stream: true, stream_options: { include_usage: true } }), signal });
     } catch {
       if (options.signal?.aborted) throw new LlmAbortedError();
       throw Error('扣子平台代理请求未完成。');
@@ -614,9 +674,10 @@ async function invokeCozeChat(
     let wire: string;
     try { wire = await Promise.race([response.text(), timing.promise]); } finally { timing.cancel(); }
     const value = parseCozeModelWire(wire, response.headers.get('content-type') ?? '');
-    return { content: stepFunContent(value), provider: 'coze', model: isRecord(value) && typeof value.model === 'string' && value.model ? value.model : model, usage: isRecord(value) ? normalizeUsage(value.usage) ?? null : null };
+    const toolCalls = cozeToolCalls(value);
+    return { content: toolCalls.length > 0 ? '' : stepFunContent(value), provider: 'coze', model: isRecord(value) && typeof value.model === 'string' && value.model ? value.model : model, usage: isRecord(value) ? normalizeUsage(value.usage) ?? null : null, ...(toolCalls.length > 0 ? { toolCalls } : {}) };
   }
-  // Coze 已安装 SDK 没有 response_format/tools 参数：结构化动作由 Prompt 承载，Zod 校验在应用层。
+  // 非 workload 的 Coze SDK 没有 response_format/tools 参数：结构化动作由 Prompt 承载，Zod 校验在应用层。
   const response = await raceWithAbort(
     new LLMClient(new Config(), options.forwardHeaders).invoke(buildCozeChatMessages(messages), {
       model,
