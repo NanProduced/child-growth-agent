@@ -68,6 +68,19 @@ async function main() {
   await check('read parameters are never repaired', {action:'read',tool:'list_children'},false);
   await check('write parameters are never repaired', {action:'propose_write',tool:'create_child'},false);
   await check('Coze plain text is normalized to a safe answer', '这是普通文本',true);
+  await checkAsync('Coze nested params_json is canonicalized without changing its value', async () => {
+    modelOutput = JSON.stringify({
+      action: 'propose_write',
+      content: '',
+      tool: 'organize_observation',
+      params_json: { observation_id: 'observation-1' },
+      source_refs: [],
+    });
+    const response = await gateway.generate({ run_id:'fixture',messages:[{role:'user',text:'整理观察'}],signal:new AbortController().signal });
+    const value = JSON.parse(response.content) as Record<string, unknown>;
+    assert.equal(value.params_json, '{"observation_id":"observation-1"}');
+    assert.equal(yayaAgentActionSchema.safeParse(value).success, true);
+  });
   await checkAsync('Coze workload uses Prompt/Zod for action output', async () => {
     const format = capturedBodies.at(-1)?.response_format as Record<string, unknown> | undefined;
     assert.equal(format, undefined);

@@ -28,9 +28,22 @@ function normalizeCozeAnswer(content: string): string {
       ? JSON.stringify({ action: 'answer', content: text, tool: '', params_json: '', source_refs: [] })
       : content;
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value) || !('action' in value)
-    || (value.action !== 'answer' && value.action !== 'clarify')) return content;
-  const parsed = yayaAgentActionSchema.safeParse({ tool: '', params_json: '', source_refs: [], ...value });
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return content;
+  const record = value as Record<string, unknown>;
+  if (record.action === 'read' || record.action === 'propose_write') {
+    // Coze may serialize the nested params_json value as an object even though
+    // the application wire contract deliberately keeps it as a JSON string.
+    if (
+      typeof record.params_json === 'object' &&
+      record.params_json !== null &&
+      !Array.isArray(record.params_json)
+    ) {
+      return JSON.stringify({ ...record, params_json: JSON.stringify(record.params_json) });
+    }
+    return content;
+  }
+  if (record.action !== 'answer' && record.action !== 'clarify') return content;
+  const parsed = yayaAgentActionSchema.safeParse({ tool: '', params_json: '', source_refs: [], ...record });
   return parsed.success ? JSON.stringify(parsed.data) : content;
 }
 
