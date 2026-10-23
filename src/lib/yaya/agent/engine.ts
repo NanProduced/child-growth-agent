@@ -436,7 +436,7 @@ async function executeRead(
   deps: YayaAgentDependencies,
   action: YayaAgentAction,
   toolCallId?: string,
-): Promise<void> {
+): Promise<YayaRunOutcome | null> {
   const definition = deps.tools.read_tools.find((entry) => entry.tool === action.tool);
   if (definition === undefined) throw stop('unknown_read_tool', action.tool);
 
@@ -444,7 +444,7 @@ async function executeRead(
   if (!parsed.ok) {
     if (toolCallId) {
       appendNativeToolFailure(state, action.tool, toolCallId, 'invalid_params', parsed.error);
-      return;
+      return null;
     }
     throw stop('invalid_params', `${action.tool}: ${parsed.error}`);
   }
@@ -452,14 +452,17 @@ async function executeRead(
   if (!validated.ok) {
     if (toolCallId) {
       appendNativeToolFailure(state, action.tool, toolCallId, 'invalid_params', validated.error);
-      return;
+      return null;
     }
     throw stop('invalid_params', `${action.tool}: ${validated.error}`);
   }
   const params = validated.params;
 
   const signature = `${action.tool}\u0000${JSON.stringify(params)}`;
-  if (state.readSignatures.has(signature)) {
+  const repeatedTool = action.tool === 'list_children' && [...state.readSignatures].some(
+    (entry) => entry.startsWith('list_children\u0000'),
+  );
+  if (state.observationPhase === 'save_confirmed' && (state.readSignatures.has(signature) || repeatedTool)) {
     appendNativeToolFailure(
       state,
       action.tool,
@@ -467,7 +470,9 @@ async function executeRead(
       'duplicate_query',
       '同一查询已经执行过，请使用上一轮工具结果，不要重复查询。',
     );
-    return;
+    const question = '我暂时没有在当前可读班级中唯一匹配到这名幼儿，请确认幼儿姓名或所在班级后再保存。';
+    emit(state, { type: 'clarify', question });
+    return { kind: 'clarified', question };
   }
   state.readSignatures.add(signature);
 
@@ -525,7 +530,7 @@ async function executeRead(
         source_kind: 'tool_result',
       });
       appendToolResult(state, action.tool, refusal, toolCallId);
-      return;
+      return null;
     }
   }
 
@@ -579,7 +584,7 @@ async function executeRead(
         source_kind: outcome.source.kind,
       });
       appendToolResult(state, action.tool, envelope, toolCallId);
-      return;
+      return null;
     }
 
     if (outcome.code === 'unauthenticated') throw stop('unauthenticated', outcome.message);
@@ -604,7 +609,7 @@ async function executeRead(
       source_kind: 'tool_result',
     });
     appendToolResult(state, action.tool, failure, toolCallId);
-    return;
+    return null;
   }
 }
 
@@ -816,7 +821,8 @@ async function runLoop(
       }
       for (const { call, action } of actions) {
         emit(state, { type: 'action_parsed', action: 'read', tool: action.tool });
-        await executeRead(state, deps, action, call.id);
+        const readOutcome = await executeRead(state, deps, action, call.id);
+        if (readOutcome !== null) return readOutcome;
       }
       continue;
     }
@@ -837,7 +843,10 @@ async function runLoop(
       case 'clarify':
         return completeClarify(state, action);
       case 'read':
-        await executeRead(state, deps, action);
+        {
+          const readOutcome = await executeRead(state, deps, action);
+          if (readOutcome !== null) return readOutcome;
+        }
         break;
       case 'propose_write':
         {

@@ -995,7 +995,7 @@ async function main(): Promise<void> {
         },
       });
       const result = await runYayaAgent(analysis.deps, { run_id: 'run-1', user_text: userText });
-      assert.equal(result.outcome.kind, 'answered');
+      assert.equal(result.outcome.kind, 'answered', JSON.stringify(result.outcome));
       assert.equal(analysis.calls.propose.length, 0, '首轮分析不得触达写提案端口');
     }
 
@@ -1017,6 +1017,41 @@ async function main(): Promise<void> {
     const confirmedResult = await runYayaAgent(confirmed.deps, { run_id: 'run-1', user_text: '保存这段观察' });
     assert.equal(confirmedResult.outcome.kind, 'proposed');
     assert.equal(confirmed.calls.propose.length, 1, '教师确认后才准备保存提案');
+
+    let repeatedCalls = 0;
+    const repeatedLookup = createDoubles({
+      tools: {
+        ...DEFAULT_TEST_TOOLS,
+        read_tools: [
+          ...DEFAULT_TEST_TOOLS.read_tools,
+          {
+            tool: 'list_children',
+            description: '查询幼儿名册',
+            scope_policy: 'business_scope',
+            params: zodToolParams(z.object({ name: z.string().optional() })),
+          },
+        ],
+      },
+      context: () => ({
+        history: [
+          { role: 'user' as const, content: short },
+          { role: 'assistant' as const, content: '是否要把这段原话保存为观察记录？' },
+        ],
+        sources: [],
+        images: [],
+        guide_catalog: null,
+      }),
+      model: () => {
+        repeatedCalls += 1;
+        return modelReply(actionJson('read', {
+          tool: 'list_children',
+          params_json: repeatedCalls === 1 ? '{}' : JSON.stringify({ name: '沈乐乐' }),
+        }));
+      },
+    });
+    const repeatedResult = await runYayaAgent(repeatedLookup.deps, { run_id: 'run-1', user_text: '保存这段观察' });
+    assert.equal(repeatedResult.outcome.kind, 'clarified', JSON.stringify(repeatedResult.outcome));
+    assert.equal(repeatedLookup.calls.read.length, 1, '重复幼儿名册查询不得继续触达数据端');
   });
 
   await check('engine/recovery-queries-original-operation-only', async () => {
