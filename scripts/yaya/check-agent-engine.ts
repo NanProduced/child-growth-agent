@@ -15,12 +15,12 @@ import { z } from 'zod';
 
 import type { DataScope, Principal } from '../../src/lib/accounts/types';
 import {
-  DEFAULT_YAYA_AGENT_LIMITS,
   recoverYayaOperations,
   runYayaAgent,
   verifyRecoveredOutcome,
 } from '../../src/lib/yaya/agent/engine';
 import {
+  DEFAULT_YAYA_AGENT_LIMITS,
   zodToolParams,
   type YayaAgentDependencies,
   type YayaAgentLimits,
