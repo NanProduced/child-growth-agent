@@ -135,7 +135,7 @@ export function YayaToolResultPart({ data }: DataMessagePartProps<YayaToolResult
   return (
     <p className="flex items-center gap-2 py-1 text-sm text-muted-foreground" data-yaya-tool-result data-tool-name={data.tool}>
       <Search className="size-3.5" aria-hidden />
-      {data.outcome === "ok" ? "已查询" : "查询未完成"} · {TOOL_LABELS.get(data.tool) ?? "平台资料"}
+      {data.phase === "analysis" ? "已完成分析" : data.outcome === "ok" ? "已查询" : "查询未完成"} · {TOOL_LABELS.get(data.tool) ?? "平台资料"}
     </p>
   );
 }

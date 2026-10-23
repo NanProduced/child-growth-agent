@@ -50,6 +50,7 @@ export interface YayaToolResultPartData {
   tool: string;
   outcome: "ok" | "failed";
   source_kind: string | null;
+  phase?: "analysis";
 }
 
 export interface YayaSearchRefusedPartData {

@@ -161,7 +161,7 @@ function eventParts(event: YayaRunWireEvent): ThreadAssistantMessagePart[] {
           type: "data",
           id: `tool-${event.tool}`,
           name: YAYA_PART_NAMES.toolResult,
-          data: { tool: event.tool, outcome: event.outcome, source_kind: event.source_kind },
+          data: { tool: event.tool, outcome: event.outcome, source_kind: event.source_kind, phase: event.phase },
         },
       ];
     case "public_search_refused":

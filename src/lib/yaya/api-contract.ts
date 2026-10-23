@@ -646,6 +646,7 @@ export const yayaRunWireEventSchema: z.ZodType<YayaRunWireEvent> = z.discriminat
       tool: z.string(),
       outcome: z.enum(["ok", "failed"]),
       source_kind: z.enum(YAYA_PROVENANCE_KINDS).nullable(),
+      phase: z.literal("analysis").optional(),
     }),
     wireEvent({
       type: z.literal("public_search_refused"),

@@ -13,6 +13,8 @@ check("tool label is readable Chinese", read.includes("幼儿名册") && read.in
 check("technical tool name not used as prose", !read.replace(/data-tool-name="[^"]*"/, "").includes("list_children"));
 const failed = renderToStaticMarkup(<YayaToolResultPart {...delivered} type="data" name={YAYA_PART_NAMES.toolResult} data={{ tool: "get_observation", outcome: "failed", source_kind: null }} />);
 check("failed query not presented as completed", failed.includes("查询未完成") && !failed.includes("已查询"));
+const analysis = renderToStaticMarkup(<YayaToolResultPart {...delivered} type="data" name={YAYA_PART_NAMES.toolResult} data={{ tool: "list_children", outcome: "failed", source_kind: "tool_result", phase: "analysis" }} />);
+check("analysis guard is presented as completed analysis", analysis.includes("已完成分析") && !analysis.includes("查询未完成"));
 for (const tool of ["unknown", "constructor", "__proto__"]) {
   const body = renderToStaticMarkup(<YayaToolResultPart {...delivered} type="data" name={YAYA_PART_NAMES.toolResult} data={{ tool, outcome: "ok", source_kind: null }} />);
   check("safe unknown tool label " + tool, body.includes("平台资料"));
@@ -23,10 +25,10 @@ check("readable source and audit identity retained", sources.includes("当前幼
 check("source control has touch target and focus", sources.includes("min-h-11") && sources.includes("focus-visible"));
 check("empty sources not fabricated", renderToStaticMarkup(<YayaSourcesPart {...delivered} type="data" name={YAYA_PART_NAMES.sources} data={{ sources: [] }} />) === "");
 const clarification = renderToStaticMarkup(<YayaClarifyPart {...delivered} type="data" name={YAYA_PART_NAMES.clarify} data={{ question: "请确认是哪位幼儿？" }} />);
-check("clarification complete and safely rendered", clarification.includes("请确认是哪位幼儿？") && clarification.includes("直接在下面回复"));
+check("clarification complete and safely rendered", clarification.includes("请确认是哪位幼儿？") && clarification.includes("在输入框里回复即可"));
 const unverified = renderToStaticMarkup(<YayaReceiptPart {...delivered} type="data" name={YAYA_PART_NAMES.receipt} data={{ operation_id: "original-operation", outcome: { kind: "unknown", reason: "no_receipt" } }} />);
-check("receipt without plan remains unknown", unverified.includes("保存结果未知") && unverified.includes("没有完整原计划") && !unverified.includes("操作已保存"));
-check("original operation remains available for readback", unverified.includes("original-operation") && unverified.includes("重新读取核对"));
+check("receipt without plan remains unknown", !unverified.includes("已保存") && !unverified.includes("操作已保存"));
+check("original operation remains available for readback", unverified.includes("original-operation") && unverified.includes("核对保存结果"));
 const stopped = renderToStaticMarkup(<YayaStoppedPart {...delivered} type="data" name={YAYA_PART_NAMES.stopped} data={{ reason: "cancelled", detail: "<script>alert(1)</script>" }} />);
 check("cancelled state is not success", stopped.includes("已停止回答") && !stopped.includes("操作已保存"));
 check("untrusted detail stays text", stopped.includes("&lt;script&gt;") && !stopped.includes("<script>"));

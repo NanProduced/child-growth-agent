@@ -462,6 +462,7 @@ export type YayaAgentEvent =
       tool: string;
       outcome: 'ok' | 'failed';
       source_kind: YayaProvenanceKind | null;
+      phase?: 'analysis';
     }
   | {
       type: 'public_search_refused';

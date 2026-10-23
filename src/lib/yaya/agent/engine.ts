@@ -338,6 +338,7 @@ function appendNativeToolFailure(
   toolCallId: string | undefined,
   code: string,
   message: string,
+  phase?: 'analysis',
 ): void {
   if (state.budget.tool_steps >= state.limits.max_tool_steps) throw stop('max_tool_steps');
   if (state.budget.tool_attempts >= state.limits.max_tool_attempts) throw stop('max_tool_attempts');
@@ -348,7 +349,11 @@ function appendNativeToolFailure(
     provenance: { kind: 'tool_result', ref_id: null, label: `工具参数未通过校验：${tool}`, derived_from: null },
     content: { ok: false, code, message },
   };
-  emit(state, { type: 'tool_result', tool, outcome: 'failed', source_kind: 'tool_result' });
+  if (phase === 'analysis') {
+    emit(state, { type: 'tool_result', tool, outcome: 'failed', source_kind: 'tool_result', phase });
+  } else {
+    emit(state, { type: 'tool_result', tool, outcome: 'failed', source_kind: 'tool_result' });
+  }
   appendToolResult(state, tool, envelope, toolCallId);
 }
 
@@ -359,6 +364,7 @@ function observationToolBlocked(state: EngineState, tool: string, toolCallId?: s
     toolCallId,
     'hitl_required',
     '当前处于观察分析阶段，请先输出分析并询问教师是否保存；暂不能调用工具。',
+    'analysis',
   );
 }
 
