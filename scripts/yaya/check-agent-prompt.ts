@@ -13,6 +13,7 @@ import {
   buildYayaSystemPrompt,
   formatYayaToolResult,
   formatYayaUserMessage,
+  observationPhase,
   YAYA_ACTION_PROTOCOL,
   YAYA_PROMPT_ZONE_LABELS,
   YAYA_SYSTEM_PROMPT,
@@ -117,6 +118,18 @@ function main(): void {
     assert.ok(YAYA_SYSTEM_PROMPT.includes('先直接回答问题'));
     assert.ok(YAYA_SYSTEM_PROMPT.includes('只有教师明确要求记录'));
     assert.ok(YAYA_SYSTEM_PROMPT.includes('页面导航或会话延续不会改变此前提案的对象'));
+  });
+
+  check('prompt/observation-analysis-hitl-phases', () => {
+    const short = '沈乐乐午睡起来自己穿袜子，请分析并保存观察';
+    const long = '今天上午区域活动时，沈乐乐先把积木按颜色分开，发现桥面不稳后换了两块长积木，并请同伴一起观察哪里需要调整。';
+    const history = [{ role: 'assistant' as const, content: '这段观察可以先保存原话。是否要把这段原话保存为观察记录？' }];
+    assert.equal(observationPhase(short, []), 'analysis_first');
+    assert.equal(observationPhase(long, []), 'analysis_first');
+    assert.equal(observationPhase('保存这段观察', history), 'save_confirmed');
+    assert.equal(observationPhase('请查询沈乐乐最近的观察', []), null);
+    assert.ok(buildYayaSystemPrompt({ observationPhase: 'analysis_first' }).includes('不得调用 read 或任何写入工具'));
+    assert.ok(buildYayaSystemPrompt({ observationPhase: 'save_confirmed' }).includes('观察保存：教师已确认'));
   });
 
   check('prompt/no-secret-or-arbitrary-execution-capability', () => {

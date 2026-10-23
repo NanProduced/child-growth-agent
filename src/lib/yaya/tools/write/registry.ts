@@ -302,6 +302,7 @@ const createObservationEntry = defineEntry({
     tool: 'create_observation',
     description:
       '为指定幼儿录入一条观察原始记录（raw_text 保存后永不改写）。需要幼儿当前归属在任教范围内；' +
+      '仅在教师阅读芽芽分析并明确确认保存后调用；单独观察描述或“请分析并保存”的首轮不得调用。' +
       '观察日期对应班级归属无法唯一确定时，必须先在参数中给出 confirmed_class_id，否则准备失败。' +
       '可携带已上传图片的 image_ids，图片关联与观察保存在同一事务内。',
     auth: { kind: 'action', action: 'observation.write', resource: 'child' },

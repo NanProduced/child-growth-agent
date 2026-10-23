@@ -27,7 +27,13 @@ import {
   type YayaUntrustedEnvelope,
 } from '../types';
 
-import { buildYayaSystemPrompt, formatYayaToolResult, formatYayaUserMessage } from './prompt';
+import {
+  buildYayaSystemPrompt,
+  formatYayaToolResult,
+  formatYayaUserMessage,
+  observationPhase,
+  type YayaObservationPhase,
+} from './prompt';
 import {
   DEFAULT_YAYA_AGENT_LIMITS,
   parseYayaActionParams,
@@ -89,6 +95,8 @@ interface EngineState {
   deadlineAt: number;
   limits: YayaAgentLimits;
   expectedAccountId: string | null;
+  observationPhase: YayaObservationPhase;
+  readSignatures: Set<string>;
 }
 
 function sourceKey(source: YayaSourceRef): string {
@@ -147,6 +155,8 @@ function createEngineState(
     deadlineAt: Date.now() + limits.deadline_ms,
     limits,
     expectedAccountId: null,
+    observationPhase: null,
+    readSignatures: new Set(),
   };
 }
 
@@ -325,7 +335,7 @@ function appendToolResult(
 function appendNativeToolFailure(
   state: EngineState,
   tool: string,
-  toolCallId: string,
+  toolCallId: string | undefined,
   code: string,
   message: string,
 ): void {
@@ -340,6 +350,16 @@ function appendNativeToolFailure(
   };
   emit(state, { type: 'tool_result', tool, outcome: 'failed', source_kind: 'tool_result' });
   appendToolResult(state, tool, envelope, toolCallId);
+}
+
+function observationToolBlocked(state: EngineState, tool: string, toolCallId?: string): void {
+  appendNativeToolFailure(
+    state,
+    tool,
+    toolCallId,
+    'hitl_required',
+    '当前处于观察分析阶段，请先输出分析并询问教师是否保存；暂不能调用工具。',
+  );
 }
 
 function validateAuthorizedImages(images: readonly YayaAuthorizedImage[]): void {
@@ -437,6 +457,19 @@ async function executeRead(
     throw stop('invalid_params', `${action.tool}: ${validated.error}`);
   }
   const params = validated.params;
+
+  const signature = `${action.tool}\u0000${JSON.stringify(params)}`;
+  if (state.readSignatures.has(signature)) {
+    appendNativeToolFailure(
+      state,
+      action.tool,
+      toolCallId,
+      'duplicate_query',
+      '同一查询已经执行过，请使用上一轮工具结果，不要重复查询。',
+    );
+    return;
+  }
+  state.readSignatures.add(signature);
 
   if (state.budget.tool_steps >= state.limits.max_tool_steps) throw stop('max_tool_steps');
   state.budget.tool_steps += 1;
@@ -692,6 +725,7 @@ async function runLoop(
   }
   // 装载后、任何模型派发前，先按当前授权重核；失效则不把旧投影送入模型。
   await revalidateContextOrStop(state, deps, contextIdentity);
+  state.observationPhase = observationPhase(state.userText, context.history);
 
   let userMessageText: string;
   try {
@@ -708,7 +742,7 @@ async function runLoop(
     }
     throw error;
   }
-  state.turns.push({ role: 'system', text: buildYayaSystemPrompt() });
+  state.turns.push({ role: 'system', text: buildYayaSystemPrompt({ observationPhase: state.observationPhase }) });
   for (const turn of context.history) {
     state.turns.push({ role: turn.role, text: turn.content });
   }
@@ -762,6 +796,10 @@ async function runLoop(
         call,
         action: actionFromNativeToolCall(call, deps),
       }));
+      if (state.observationPhase === 'analysis_first') {
+        for (const { call } of actions) observationToolBlocked(state, call.name, call.id);
+        continue;
+      }
       const writeCalls = actions.filter(({ action }) => action.action === 'propose_write');
       if (writeCalls.length > 1 || (writeCalls.length > 0 && actions.length > 1)) {
         throw stop('invalid_action', '一次模型响应不能混合多个写提案或读工具调用。');
@@ -789,6 +827,10 @@ async function runLoop(
       action: action.action,
       tool: action.tool.length > 0 ? action.tool : null,
     });
+    if (state.observationPhase === 'analysis_first' && action.action !== 'answer' && action.action !== 'clarify') {
+      observationToolBlocked(state, action.tool);
+      continue;
+    }
     switch (action.action) {
       case 'answer':
         return completeAnswer(state, action);

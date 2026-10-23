@@ -453,6 +453,28 @@ async function main(): Promise<void> {
     const record = createDoubles({
       identity: () => identityOf('run-2'),
       model: () =>
+        modelReply(actionJson('answer', { content: '小满在搭桥过程中尝试调整材料。是否要把这段原话保存为观察记录？' })),
+      context: () => ({ history: [], sources: [], images: [], guide_catalog: null }),
+    });
+    const recordResult = await runYayaAgent(record.deps, {
+      run_id: 'run-2',
+      user_text: '请把小满和乐乐这次分别记成观察。',
+    });
+    expectOutcome(recordResult, 'answered');
+    assert.equal(record.calls.propose.length, 0, '首轮记录请求先分析，不直接准备提案');
+
+    const confirmed = createDoubles({
+      identity: () => identityOf('run-3'),
+      context: () => ({
+        history: [
+          { role: 'user' as const, content: '请把小满和乐乐这次分别记成观察。' },
+          { role: 'assistant' as const, content: '小满在搭桥过程中尝试调整材料。是否要把这段原话保存为观察记录？' },
+        ],
+        sources: [],
+        images: [],
+        guide_catalog: null,
+      }),
+      model: () =>
         modelReply(
           actionJson('propose_write', {
             tool: 'create_observation',
@@ -464,16 +486,16 @@ async function main(): Promise<void> {
         proposals: [proposalFor('p1', 'child-1'), proposalFor('p2', 'child-2')],
       }),
     });
-    const recordResult = await runYayaAgent(record.deps, {
-      run_id: 'run-2',
-      user_text: '请把小满和乐乐这次分别记成观察。',
+    const confirmedResult = await runYayaAgent(confirmed.deps, {
+      run_id: 'run-3',
+      user_text: '保存这段观察。',
     });
-    const outcome = expectOutcome(recordResult, 'proposed');
+    const outcome = expectOutcome(confirmedResult, 'proposed');
     assert.equal(outcome.proposals.length, 2);
-    assert.equal(record.calls.propose.length, 1);
-    assert.equal(record.calls.propose[0].proposal_origin, 'model_suggestion');
+    assert.equal(confirmed.calls.propose.length, 1);
+    assert.equal(confirmed.calls.propose[0].proposal_origin, 'model_suggestion');
     assert.equal(
-      recordResult.events.filter((event) => event.type === 'proposal_prepared').length,
+      confirmedResult.events.filter((event) => event.type === 'proposal_prepared').length,
       2,
     );
 
@@ -488,8 +510,8 @@ async function main(): Promise<void> {
       red: `naive auto-execute=${naiveWrites}`,
       green: `engine proposals=${outcome.proposals.length}, writes=${engineWrites}`,
     });
-    counters.engine_model += consult.calls.model.length + record.calls.model.length;
-    counters.engine_propose += record.calls.propose.length;
+    counters.engine_model += consult.calls.model.length + record.calls.model.length + confirmed.calls.model.length;
+    counters.engine_propose += confirmed.calls.propose.length;
   });
 
   await check('engine/authorized-bytes-only-rejects-url-images', async () => {
@@ -952,6 +974,49 @@ async function main(): Promise<void> {
     counters.engine_model +=
       stepCap.calls.model.length + modelCap.calls.model.length + retryCap.calls.model.length;
     counters.engine_read += stepCap.calls.read.length + modelCap.calls.read.length + retryCap.calls.read.length;
+  });
+
+  await check('engine/observation-analysis-before-save-hitl', async () => {
+    const short = '沈乐乐午睡起来自己穿袜子，请分析并保存观察';
+    const long = '今天上午区域活动时，沈乐乐先把积木按颜色分开，发现桥面不稳后换了两块长积木，并请同伴一起观察哪里需要调整。';
+    for (const userText of [short, long]) {
+      let modelCalls = 0;
+      const analysis = createDoubles({
+        model: () => {
+          modelCalls += 1;
+          return modelCalls === 1
+            ? modelReply(actionJson('propose_write', {
+              tool: 'create_observation',
+              params_json: JSON.stringify({ child_id: 'child-1', raw_text: userText }),
+            }))
+            : modelReply(actionJson('answer', {
+              content: '这段记录呈现了幼儿在生活环节中尝试独立完成动作的过程。是否要把这段原话保存为观察记录？',
+            }));
+        },
+      });
+      const result = await runYayaAgent(analysis.deps, { run_id: 'run-1', user_text: userText });
+      assert.equal(result.outcome.kind, 'answered');
+      assert.equal(analysis.calls.propose.length, 0, '首轮分析不得触达写提案端口');
+    }
+
+    const confirmed = createDoubles({
+      context: () => ({
+        history: [
+          { role: 'user' as const, content: short },
+          { role: 'assistant' as const, content: '这段记录呈现了幼儿尝试独立完成动作的过程。是否要把这段原话保存为观察记录？' },
+        ],
+        sources: [],
+        images: [],
+        guide_catalog: null,
+      }),
+      model: () => modelReply(actionJson('propose_write', {
+        tool: 'create_observation',
+        params_json: JSON.stringify({ child_id: 'child-1', raw_text: short }),
+      })),
+    });
+    const confirmedResult = await runYayaAgent(confirmed.deps, { run_id: 'run-1', user_text: '保存这段观察' });
+    assert.equal(confirmedResult.outcome.kind, 'proposed');
+    assert.equal(confirmed.calls.propose.length, 1, '教师确认后才准备保存提案');
   });
 
   await check('engine/recovery-queries-original-operation-only', async () => {
