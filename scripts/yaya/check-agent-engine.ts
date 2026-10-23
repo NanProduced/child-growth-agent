@@ -891,6 +891,8 @@ async function main(): Promise<void> {
     assert.equal(stepResult.budget.tool_steps, 3);
     assert.equal(stepResult.budget.model_attempts, 4);
 
+    assert.equal(DEFAULT_YAYA_AGENT_LIMITS.max_tool_steps, 16);
+    assert.equal(DEFAULT_YAYA_AGENT_LIMITS.max_tool_attempts, 32);
     let defaultChainCalls = 0;
     const defaultChain = createDoubles({
       model: () => {

@@ -415,8 +415,8 @@ export interface YayaAgentLimits {
 
 export const DEFAULT_YAYA_AGENT_LIMITS: YayaAgentLimits = {
   max_model_calls: 8,
-  max_tool_steps: 8,
-  max_tool_attempts: 16,
+  max_tool_steps: 16,
+  max_tool_attempts: 32,
   max_tool_retries: 1,
   deadline_ms: 90_000,
   model_wait_ms: 60_000,
