@@ -15,6 +15,7 @@ import { z } from 'zod';
 
 import type { DataScope, Principal } from '../../src/lib/accounts/types';
 import {
+  DEFAULT_YAYA_AGENT_LIMITS,
   recoverYayaOperations,
   runYayaAgent,
   verifyRecoveredOutcome,
@@ -889,6 +890,24 @@ async function main(): Promise<void> {
     assert.equal(stoppedReason(stepResult), 'max_tool_steps');
     assert.equal(stepResult.budget.tool_steps, 3);
     assert.equal(stepResult.budget.model_attempts, 4);
+
+    let defaultChainCalls = 0;
+    const defaultChain = createDoubles({
+      model: () => {
+        defaultChainCalls += 1;
+        return defaultChainCalls <= 5
+          ? modelReply(actionJson('read', { tool: 'list_class_children', params_json: '{}' }))
+          : modelReply(actionJson('answer', { content: '已完成连续查询。' }));
+      },
+    });
+    const defaultChainResult = await runYayaAgent(
+      defaultChain.deps,
+      { run_id: 'run-1', user_text: '需要连续查询' },
+      DEFAULT_YAYA_AGENT_LIMITS,
+    );
+    assert.equal(defaultChainResult.outcome.kind, 'answered');
+    assert.equal(defaultChainResult.budget.tool_steps, 5);
+    assert.equal(defaultChainResult.budget.model_attempts, 6);
 
     const modelCap = createDoubles({
       model: () =>
